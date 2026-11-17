@@ -739,7 +739,6 @@ pub trait AccountLookupPort: Send + Sync {
     async fn account(&self, account_id: &AccountId) -> ServiceResult<Option<AccountProfileState>>;
     async fn accounts(&self) -> ServiceResult<Vec<AccountProfileState>>;
     async fn save_account(&self, account: AccountProfileState) -> ServiceResult<()>;
-    async fn delete_account(&self, account_id: &AccountId) -> ServiceResult<()>;
     async fn account_localparts(
         &self,
         account_pk: AccountPk,
@@ -843,6 +842,7 @@ pub struct RecordAgentPairingCommitIntentCommand {
     pub authorize_event_id: String,
     pub key_authorization_event: arkret_wire::Event,
     pub scope_custody_ref: Option<coland_storage::AgentScopeCustodyRef>,
+    pub prepared_scope_custody: Option<coland_storage::PreparedAgentScopeCustody>,
 }
 
 pub use coland_storage::AgentPrincipalRecord as AgentPairingState;
@@ -889,7 +889,17 @@ pub trait AgentPairingPort: Send + Sync {
         &self,
         controller_principal_id: &str,
     ) -> ServiceResult<Vec<AgentPairingState>>;
+    async fn controller_account(
+        &self,
+        agent_id: &str,
+    ) -> ServiceResult<Option<arkret_wire::AccountId>>;
     async fn save_agent(&self, agent: AgentPairingState) -> ServiceResult<()>;
+    async fn save_accepted_agent_projection(&self, agent: AgentPairingState) -> ServiceResult<()>;
+    async fn commit_agent_pairing_preparation(
+        &self,
+        agent: AgentPairingState,
+        primary: &coland_storage::IdempotencyRecord,
+    ) -> ServiceResult<coland_storage::IdempotencyRecord>;
     async fn store_runtime_approval(
         &self,
         command: &StoreAgentRuntimeApprovalCommand,
@@ -1537,14 +1547,14 @@ pub trait SessionIdentityPort: Send + Sync {
         token_hash: &str,
         revoked_at: DateTime<Utc>,
     ) -> ServiceResult<Option<SessionIdentityState>>;
-    async fn revoke_actor_sessions(
+    async fn revoke_account_sessions(
         &self,
-        actor_id: &str,
+        account_id: &arkret_wire::AccountId,
         revoked_at: DateTime<Utc>,
     ) -> ServiceResult<usize>;
-    async fn revoke_actor_device_sessions(
+    async fn revoke_account_device_sessions(
         &self,
-        actor_id: &str,
+        account_id: &arkret_wire::AccountId,
         device_id: &str,
         revoked_at: DateTime<Utc>,
     ) -> ServiceResult<usize>;
@@ -1576,24 +1586,24 @@ impl SessionService {
         self.sessions.revoke_session(token_hash, revoked_at).await
     }
 
-    pub async fn revoke_actor_sessions(
+    pub async fn revoke_account_sessions(
         &self,
-        actor_id: &str,
+        account_id: &arkret_wire::AccountId,
         revoked_at: DateTime<Utc>,
     ) -> ServiceResult<usize> {
         self.sessions
-            .revoke_actor_sessions(actor_id, revoked_at)
+            .revoke_account_sessions(account_id, revoked_at)
             .await
     }
 
-    pub async fn revoke_actor_device_sessions(
+    pub async fn revoke_account_device_sessions(
         &self,
-        actor_id: &str,
+        account_id: &arkret_wire::AccountId,
         device_id: &str,
         revoked_at: DateTime<Utc>,
     ) -> ServiceResult<usize> {
         self.sessions
-            .revoke_actor_device_sessions(actor_id, device_id, revoked_at)
+            .revoke_account_device_sessions(account_id, device_id, revoked_at)
             .await
     }
 }
@@ -1815,8 +1825,32 @@ impl AgentPairingService {
             .await
     }
 
+    pub async fn controller_account(
+        &self,
+        agent_id: &str,
+    ) -> ServiceResult<Option<arkret_wire::AccountId>> {
+        self.pairing.controller_account(agent_id).await
+    }
+
     pub async fn save_agent(&self, agent: AgentPairingState) -> ServiceResult<()> {
         self.pairing.save_agent(agent).await
+    }
+
+    pub async fn save_accepted_agent_projection(
+        &self,
+        agent: AgentPairingState,
+    ) -> ServiceResult<()> {
+        self.pairing.save_accepted_agent_projection(agent).await
+    }
+
+    pub async fn commit_agent_pairing_preparation(
+        &self,
+        agent: AgentPairingState,
+        primary: &coland_storage::IdempotencyRecord,
+    ) -> ServiceResult<coland_storage::IdempotencyRecord> {
+        self.pairing
+            .commit_agent_pairing_preparation(agent, primary)
+            .await
     }
 
     pub async fn store_runtime_approval(
@@ -1979,10 +2013,6 @@ impl IdentityService {
 
     pub async fn save_account(&self, account: AccountProfileState) -> ServiceResult<()> {
         self.accounts.save_account(account).await
-    }
-
-    pub async fn delete_account(&self, account_id: &AccountId) -> ServiceResult<()> {
-        self.accounts.delete_account(account_id).await
     }
 
     pub async fn account_localparts(
@@ -3310,10 +3340,6 @@ mod tests {
         }
 
         async fn save_account(&self, _account: AccountProfileState) -> ServiceResult<()> {
-            Ok(())
-        }
-
-        async fn delete_account(&self, _account_id: &AccountId) -> ServiceResult<()> {
             Ok(())
         }
 

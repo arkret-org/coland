@@ -83,6 +83,18 @@ pub(crate) async fn current(
     .await?;
     let value: RealmActorControlValue = serde_json::from_value(value).map_err(invalid)?;
     let (event, _) = original(conn, &source).await?;
+    crate::boxed_future(|| qualify_current_original(conn, actor, subject, value, source, event))
+        .await
+}
+
+async fn qualify_current_original(
+    conn: &mut AsyncPgConnection,
+    actor: &ActorId,
+    subject: &arkret_wire::RealmActorId,
+    value: RealmActorControlValue,
+    source: CommittedEventRef,
+    event: Event,
+) -> PersistenceResult<AcceptedControl> {
     let (resolution, method) = match event.kind {
         EventKind::RealmActorCreate => {
             let payload: RealmActorCreatePayload =

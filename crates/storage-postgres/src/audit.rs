@@ -8,7 +8,14 @@ pub struct PgAuditStore {
 }
 #[async_trait]
 impl AuditStore for PgAuditStore {
-    async fn append(&self, entry: Value) -> PersistenceResult<()> {
+    async fn append(&self, mut entry: Value) -> PersistenceResult<()> {
+        // This local diagnostic sink is not a signed proof archive. Its one
+        // producer supplies fixed outer audit coordinates; business bodies
+        // duplicate erasable Account state and are never needed for replay.
+        // Separate canonical and signed mapping audit stores are untouched.
+        if let Some(object) = entry.as_object_mut() {
+            object.remove("payload");
+        }
         let mut conn = pg_conn(&self.pool)
             .await
             .map_err(PersistenceError::database)?;
@@ -75,3 +82,7 @@ impl AuditStore for PgAuditStore {
             .map_err(PersistenceError::database)
     }
 }
+
+#[cfg(test)]
+#[path = "audit/private_body_tests.rs"]
+mod private_body_tests;

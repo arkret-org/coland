@@ -105,6 +105,21 @@ struct BackupIdentityRow {
 
 const IDENTITY_COLUMNS: &str = "'ak:backup:' || id::text AS backup_id, actor_id, envelope_digest, signing_payload_digest, series_sequence, deleted_at";
 
+/// Retain only the original public root descriptors needed after body deletion.
+/// Other secret names remain solely inside the signed live envelope.
+pub(crate) fn content_root_index(
+    backup: &arkret_models_crypto::KeyBackup,
+) -> Vec<arkret_models_crypto::SecretStorageContentIndex> {
+    backup
+        .contents
+        .iter()
+        .filter(|item| {
+            item.item_kind == arkret_models_crypto::SecretStorageItemKind::ContentEpochRoot
+        })
+        .cloned()
+        .collect()
+}
+
 /// Store a verified immutable envelope together with its first-admission
 /// record. Ordinary deletion does not make either the identity or series new.
 pub(crate) async fn put_key_backup_in_connection(
@@ -134,6 +149,9 @@ pub(crate) async fn put_key_backup_in_connection(
     }
     let actor = typed.actor_id.to_string();
     let uuid = ids::typed_uuid_part_expect_internal(backup_id);
+    if let Some(account) = typed.actor_id.as_account_id() {
+        crate::pcr_private_authority::require_active_account_owner(conn, account).await?;
+    }
     lock_backup_series_in_connection(conn, &typed.actor_id).await?;
     let identity = sql_query(format!(
         "SELECT {IDENTITY_COLUMNS} FROM key_backup_identities WHERE id=$1 FOR SHARE"
@@ -219,7 +237,7 @@ pub(crate) async fn put_key_backup_in_connection(
         .bind::<sql_types::Uuid,_>(uuid).bind::<Text,_>(&actor).bind::<Text,_>(typed.series_id.as_str())
         .bind::<super::BigInt,_>(i64::try_from(typed.series_sequence).map_err(PersistenceError::database)?)
         .bind::<Text,_>(&digest).bind::<Text,_>(&signing_digest)
-        .bind::<Jsonb,_>(serde_json::to_value(&typed.contents).map_err(PersistenceError::database)?)
+        .bind::<Jsonb,_>(serde_json::to_value(content_root_index(&typed)).map_err(PersistenceError::database)?)
         .bind::<Jsonb,_>(serde_json::to_value(admission).map_err(PersistenceError::database)?)
         .bind::<Nullable<Text>,_>(account.map(|account| account.principal_id.as_str()))
         .bind::<Nullable<Text>,_>(account.map(|account| account.station_id.as_str()))
@@ -680,7 +698,10 @@ impl KeyBackupStore for PgKeyBackupStore {
                 "delete challenge ledger columns differ from its exact closed challenge".into(),
             ));
         }
-        let mut conn = crate::pg_db(&self.pool);
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_,crate::PgTransactionError,_>(async |conn| {
+        crate::pcr_private_authority::require_active_account_owner(conn,&record.account_id).await?;
+        let result:PersistenceResult<KeyBackupDeleteChallengeRecord> = async {
         // The row is unique on `(principal_id, station_id, backup_id, request_id)`, and the
         // `DO UPDATE ... WHERE` guard only replaces it once the held challenge
         // is consumed or expired. So this statement mints a challenge exactly
@@ -698,7 +719,7 @@ impl KeyBackupStore for PgKeyBackupStore {
         .bind::<Timestamptz, _>(record.issued_at)
         .bind::<Timestamptz, _>(record.expires_at)
         .bind::<Timestamptz, _>(now)
-        .get_result::<KeyBackupDeleteChallengeRow>(&mut conn)
+        .get_result::<KeyBackupDeleteChallengeRow>(&mut *conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?;
@@ -717,10 +738,13 @@ impl KeyBackupStore for PgKeyBackupStore {
         .bind::<Text, _>(&record.account_id.station_id)
         .bind::<Text, _>(&record.backup_id)
         .bind::<Text, _>(&record.request_id)
-        .get_result::<KeyBackupDeleteChallengeRow>(&mut conn)
+        .get_result::<KeyBackupDeleteChallengeRow>(&mut *conn)
         .await
         .map(KeyBackupDeleteChallengeRecord::from)
         .map_err(PersistenceError::database)
+        }.await;
+        Ok(result?)
+        }).await.map_err(crate::PgTransactionError::into_persistence)
     }
 
     async fn delete_challenge(
@@ -819,3 +843,7 @@ impl KeyBackupStore for PgKeyBackupStore {
             .map_err(PersistenceError::database)
     }
 }
+
+#[cfg(test)]
+#[path = "key_backup/root_index_tests.rs"]
+mod root_index_tests;

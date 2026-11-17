@@ -133,6 +133,16 @@ fn locator_issue_outcome(
     })
 }
 
+fn invite_locator_owner(
+    state: &AppState,
+    session: &coland_services::identity::SessionIdentityState,
+) -> Result<arkret_wire::AccountId, AppError> {
+    crate::routing::identity::session_actor::session_actor_from_credential(state, session)?
+        .as_account_id()
+        .cloned()
+        .ok_or_else(|| AppError::capability_denied("invite locator owner must be an Account"))
+}
+
 #[endpoint(summary = "Issue an invite locator", tags("invites"))]
 async fn issue_invite_locator(
     aa: AuthArgs,
@@ -143,13 +153,17 @@ async fn issue_invite_locator(
 ) -> JsonResult<InviteLocatorIssueResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
-    let (record, token) =
-        new_invite_locator(&session.actor, state.service_id(), body.into_inner())?;
+    let owner = invite_locator_owner(state, &session)?;
+    let (record, token) = new_invite_locator(
+        owner.principal_id.as_str(),
+        owner.station_id.as_str(),
+        body.into_inner(),
+    )?;
     match state
         .invite_locators()
         .insert_locator(&record, ACTIVE_LOCATOR_LIMIT, now())
         .await
-        .map_err(|error| AppError::internal(format!("invite locator insert: {error}")))?
+        .map_err(crate::state::actor_private_refusal)?
     {
         InviteLocatorInsertOutcome::Inserted => {
             set_invite_locator_secret_response_headers(res);
@@ -173,6 +187,7 @@ async fn rotate_invite_locator(
 ) -> JsonResult<InviteLocatorIssueResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
+    let owner = invite_locator_owner(state, &session)?;
     let body = body.into_inner();
     body.validate_minimal()
         .map_err(|error| AppError::param_invalid(error.to_string()))?;
@@ -187,9 +202,9 @@ async fn rotate_invite_locator(
     };
     let Some(record) = state
         .invite_locators()
-        .rotate_locator(&session.actor, body.locator_id.as_str(), &mutation, now())
+        .rotate_locator(&owner, body.locator_id.as_str(), &mutation, now())
         .await
-        .map_err(|error| AppError::internal(format!("invite locator rotate: {error}")))?
+        .map_err(crate::state::actor_private_refusal)?
     else {
         return Err(invite_locator_not_found());
     };
@@ -206,15 +221,16 @@ async fn revoke_invite_locator(
 ) -> JsonResult<InviteLocatorRevokeResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
+    let owner = invite_locator_owner(state, &session)?;
     let body = body.into_inner();
     body.validate_minimal()
         .map_err(|error| AppError::param_invalid(error.to_string()))?;
     let revoked_at = now();
     let Some(record) = state
         .invite_locators()
-        .revoke_locator(&session.actor, body.locator_id.as_str(), revoked_at)
+        .revoke_locator(&owner, body.locator_id.as_str(), revoked_at)
         .await
-        .map_err(|error| AppError::internal(format!("invite locator revoke: {error}")))?
+        .map_err(crate::state::actor_private_refusal)?
     else {
         return Err(invite_locator_not_found());
     };

@@ -299,7 +299,7 @@ async fn validate_same_key_renewal(
             "revoked keys require fresh pairing and cannot be renewed",
         ));
     }
-    let row = sql_query("SELECT requested_scope AS value FROM agent_principals WHERE id=$1 AND principal_control_realm_id=$2 AND controller_principal_id=$3 FOR SHARE")
+    let row = sql_query("SELECT requested_scope AS value FROM agent_principals WHERE id=$1 AND principal_control_realm_id=$2 AND controller_principal_id=$3 AND requested_scope IS NOT NULL FOR SHARE")
         .bind::<Text,_>(payload.agent_id.as_str()).bind::<Text,_>(event.realm_id.as_str())
         .bind::<Text,_>(payload.accountable_principal_id.as_str()).get_result::<ValueRow>(&mut *conn).await.optional()?
         .ok_or_else(|| precondition("same-key renewal has no private provision selection"))?;

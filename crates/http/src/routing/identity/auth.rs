@@ -38,7 +38,7 @@ use crate::{JsonResult, json_ok};
 
 mod login;
 mod logout;
-pub(crate) use logout::revoke_sessions_for_actor_device as revoke_sessions_for_hard_logout_device;
+pub(crate) use logout::revoke_sessions_for_account_device as revoke_sessions_for_hard_logout_device;
 mod revocation;
 mod sessions;
 
@@ -58,7 +58,7 @@ pub(crate) use revocation::purge_device_delivery_state;
 #[cfg(any(test, feature = "conformance-harness"))]
 pub use revocation::token_for;
 pub use revocation::{
-    revoke_devices_for_actor, revoke_sessions_for_actor, session_credential_hash,
+    revoke_devices_for_account, revoke_sessions_for_account, session_credential_hash,
 };
 pub(super) use sessions::request_requires_fresh_introspection;
 pub use sessions::{auth_or_render, authenticated_session};

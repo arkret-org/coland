@@ -14,10 +14,5 @@ pub trait PushDeviceStore: Send + Sync {
         push_key: Option<&str>,
         app_id: Option<&str>,
     ) -> PersistenceResult<usize>;
-    async fn purge_principal_device(
-        &self,
-        actor: &str,
-        device_id: &str,
-    ) -> PersistenceResult<usize>;
     async fn snapshot_all(&self) -> PersistenceResult<Vec<Value>>;
 }

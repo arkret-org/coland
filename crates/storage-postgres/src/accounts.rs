@@ -12,9 +12,9 @@ pub struct PgAccountStore {
     pub pool: PgPool,
 }
 
-/// Native Agent account storage and its immutable admission key share the
+/// Native holder account storage and its immutable admission key share the
 /// accepted genesis transaction. Reads never manufacture this private key.
-pub(crate) async fn create_agent_holder_account_in_connection(
+pub(crate) async fn create_native_holder_account_in_connection(
     conn: &mut diesel_async::AsyncPgConnection,
     account: &arkret_wire::AccountId,
     accepted_at: chrono::DateTime<chrono::Utc>,
@@ -35,13 +35,26 @@ pub(crate) async fn create_agent_holder_account_in_connection(
     .map_err(PersistenceError::database)?;
     if inserted.is_none() {
         return Err(PersistenceError::Conflict(
-            "failed_precondition: native Agent account already exists".to_owned(),
+            "failed_precondition: native holder account already exists".to_owned(),
         ));
     }
     Ok(())
 }
 #[async_trait]
 impl AccountStore for PgAccountStore {
+    async fn require_private_owner(
+        &self,
+        account_id: &arkret_wire::AccountId,
+    ) -> PersistenceResult<()> {
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, crate::PgTransactionError, _>(async |conn| {
+            crate::pcr_private_authority::require_active_account_owner(conn, account_id).await?;
+            Ok(())
+        })
+        .await
+        .map_err(crate::PgTransactionError::into_persistence)
+    }
+
     async fn get(
         &self,
         account_id: &arkret_wire::AccountId,
@@ -71,7 +84,13 @@ impl AccountStore for PgAccountStore {
     }
 
     async fn put(&self, record: &AccountRecord) -> PersistenceResult<AccountPk> {
-        let mut conn = crate::pg_db(&self.pool);
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_,crate::PgTransactionError,_>(async |conn| {
+        let result: PersistenceResult<AccountPk> = async {
+        // First creation also participates in the missing-row fence. Take it
+        // before the Account UPSERT can own an exclusive row lock.
+        let owner=arkret_wire::AccountId::new(record.principal_id.clone(),record.station_id.clone());
+        crate::pcr_private_authority::lock_optional_account_private_tuple(conn,&owner).await?;
         let payload = serde_json::json!({
             "biography": record.biography,
             "avatar_blob_ref": record.avatar_blob_ref,
@@ -81,6 +100,7 @@ impl AccountStore for PgAccountStore {
              VALUES ($1, $2, $3, $4, $5, $5) \
              ON CONFLICT (station_id, principal_id) DO UPDATE SET \
              display_name = EXCLUDED.display_name, payload = EXCLUDED.payload, updated_at = NOW() \
+             WHERE lock_active_account_private_state(accounts.principal_id,accounts.station_id) \
              RETURNING pk), private_key AS (INSERT INTO invite_new_source_hmac_keys(account_pk,key_bytes) \
              SELECT pk,$6 FROM account ON CONFLICT(account_pk) DO NOTHING) SELECT pk FROM account",
         )
@@ -90,14 +110,24 @@ impl AccountStore for PgAccountStore {
         .bind::<Jsonb, _>(&payload)
         .bind::<Timestamptz, _>(record.created_at)
         .bind::<sql_types::Binary, _>(rand::random::<[u8;32]>().to_vec())
-        .get_result::<AccountIdRow>(&mut conn)
-        .await
-        .map_err(PersistenceError::database)?;
+        .get_result::<AccountIdRow>(&mut *conn)
+        .await.optional()
+        .map_err(crate::persistence_query_error)?;
+        let row = match row {
+            Some(row) => row,
+            None => {
+                // ON CONFLICT already owns this Account row. Its pure current
+                // predicate refused before profile/HMAC/alias writes occurred.
+                let owner=arkret_wire::AccountId::new(record.principal_id.clone(),record.station_id.clone());
+                crate::pcr_private_authority::require_active_account_owner(conn,&owner).await?;
+                return Err(PersistenceError::Internal("Account profile upsert returned no row for an active owner".into()));
+            }
+        };
 
         if record.localpart.trim().is_empty() {
             sql_query("DELETE FROM account_localparts WHERE account_pk = $1")
                 .bind::<BigInt, _>(row.pk)
-                .execute(&mut conn)
+                .execute(&mut *conn)
                 .await
                 .map_err(PersistenceError::database)?;
         } else {
@@ -107,7 +137,7 @@ impl AccountStore for PgAccountStore {
             )
             .bind::<BigInt, _>(row.pk)
             .bind::<Text, _>(&record.localpart)
-            .execute(&mut conn)
+            .execute(&mut *conn)
             .await
             .map_err(PersistenceError::database)?;
             let assigned = sql_query(
@@ -123,7 +153,7 @@ impl AccountStore for PgAccountStore {
             .bind::<BigInt, _>(row.pk)
             .bind::<Text, _>(&record.localpart)
             .bind::<Timestamptz, _>(record.created_at)
-            .get_result::<LocalpartOnlyRow>(&mut conn)
+            .get_result::<LocalpartOnlyRow>(&mut *conn)
             .await
             .optional()
             .map_err(PersistenceError::database)?;
@@ -136,6 +166,9 @@ impl AccountStore for PgAccountStore {
             }
         }
         Ok(AccountPk(row.pk))
+        }.await;
+        Ok(result?)
+        }).await.map_err(crate::PgTransactionError::into_persistence)
     }
 
     async fn list(&self) -> PersistenceResult<Vec<AccountRecord>> {
@@ -147,17 +180,6 @@ impl AccountStore for PgAccountStore {
         .await
         .map_err(PersistenceError::database)?;
         rows.into_iter().map(AccountRecord::try_from).collect()
-    }
-
-    async fn delete(&self, account_id: &arkret_wire::AccountId) -> PersistenceResult<()> {
-        let mut conn = crate::pg_db(&self.pool);
-        sql_query("DELETE FROM accounts WHERE station_id = $1 AND principal_id = $2")
-            .bind::<Text, _>(account_id.station_id.as_str())
-            .bind::<Text, _>(account_id.principal_id.as_str())
-            .execute(&mut conn)
-            .await
-            .map(|_| ())
-            .map_err(PersistenceError::database)
     }
 }
 pub struct PgAccountLocalpartStore {
@@ -204,11 +226,17 @@ impl AccountLocalpartStore for PgAccountLocalpartStore {
         localpart: &str,
         primary: bool,
     ) -> PersistenceResult<AccountLocalpartRecord> {
-        let mut conn = crate::pg_db(&self.pool);
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_,crate::PgTransactionError,_>(async |conn| {
+        let owner = sql_query("SELECT jsonb_build_object('principal_id',principal_id,'station_id',station_id) AS payload FROM accounts WHERE pk=$1")
+            .bind::<BigInt,_>(account_pk.get()).get_result::<crate::JsonPayloadRow>(&mut *conn).await?;
+        let account: arkret_wire::AccountId=serde_json::from_value(owner.payload).map_err(PersistenceError::database)?;
+        crate::pcr_private_authority::require_active_account_owner(conn,&account).await?;
+        let result: PersistenceResult<AccountLocalpartRecord> = async {
         let existing_owner =
             sql_query("SELECT account_pk AS pk FROM account_localparts WHERE localpart = $1")
                 .bind::<Text, _>(localpart)
-                .get_result::<AccountIdRow>(&mut conn)
+                .get_result::<AccountIdRow>(&mut *conn)
                 .await
                 .optional()
                 .map_err(PersistenceError::database)?;
@@ -223,7 +251,7 @@ impl AccountLocalpartStore for PgAccountLocalpartStore {
                  WHERE account_pk = $1",
             )
             .bind::<BigInt, _>(account_pk.get())
-            .execute(&mut conn)
+            .execute(&mut *conn)
             .await
             .map_err(PersistenceError::database)?;
         }
@@ -242,7 +270,7 @@ impl AccountLocalpartStore for PgAccountLocalpartStore {
         .bind::<BigInt, _>(account_pk.get())
         .bind::<Text, _>(localpart)
         .bind::<Bool, _>(primary)
-        .get_result::<AccountLocalpartRow>(&mut conn)
+        .get_result::<AccountLocalpartRow>(&mut *conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?;
@@ -250,6 +278,9 @@ impl AccountLocalpartStore for PgAccountLocalpartStore {
             PersistenceError::Conflict(format!("localpart `{localpart}` is already assigned"))
         })?;
         AccountLocalpartRecord::try_from(assigned)
+        }.await;
+        Ok(result?)
+        }).await.map_err(crate::PgTransactionError::into_persistence)
     }
 
     async fn remove(&self, account_pk: AccountPk, localpart: &str) -> PersistenceResult<()> {
@@ -296,6 +327,12 @@ impl AccountLocalpartStore for PgAccountLocalpartStore {
 pub struct PgAccountLifecycleStore {
     pub pool: PgPool,
 }
+#[derive(QueryableByName)]
+struct LifecycleWriteOutcomeRow {
+    #[diesel(sql_type = Text)]
+    outcome: String,
+}
+
 #[async_trait]
 impl AccountLifecycleStore for PgAccountLifecycleStore {
     async fn put(
@@ -304,21 +341,23 @@ impl AccountLifecycleStore for PgAccountLifecycleStore {
         record: &AccountLifecycleRecord,
     ) -> PersistenceResult<()> {
         let mut conn = crate::pg_db(&self.pool);
-        // Active public push handoff transactions hold FOR SHARE on this
-        // account row. Take the conflicting lock before changing lifecycle
-        // state, so an in-flight active intent or receipt cannot straddle a
-        // completed deactivation transition.
-        let written = sql_query(
+        // Every lifecycle projection uses the same Account row barrier.
+        // The terminal cache is absorbing even for a stale active-restoration
+        // or suspended/locked callback that began before erasure completed.
+        let row = sql_query(
             "WITH locked_account AS MATERIALIZED ( \
-                 SELECT pk FROM accounts WHERE pk = $1 FOR UPDATE \
-             ) INSERT INTO account_lifecycle \
-             (account_pk, state, reason, changed_by, changed_at) \
-             SELECT pk, $2, $3, $4, $5 FROM locked_account WHERE true \
-             ON CONFLICT (account_pk) DO UPDATE SET \
-               state = EXCLUDED.state, \
-               reason = EXCLUDED.reason, \
-               changed_by = EXCLUDED.changed_by, \
-               changed_at = EXCLUDED.changed_at",
+                 SELECT pk FROM accounts WHERE pk=$1 FOR UPDATE \
+             ), written AS (INSERT INTO account_lifecycle \
+             (account_pk,state,reason,changed_by,changed_at) \
+             SELECT pk,$2,$3,$4,$5 FROM locked_account WHERE TRUE \
+             ON CONFLICT(account_pk) DO UPDATE SET \
+               state=EXCLUDED.state,reason=EXCLUDED.reason, \
+               changed_by=EXCLUDED.changed_by,changed_at=EXCLUDED.changed_at \
+             WHERE account_lifecycle.state<>'erasure_pending' \
+             RETURNING account_pk) \
+             SELECT CASE WHEN EXISTS(SELECT 1 FROM written) THEN 'written' \
+                 WHEN EXISTS(SELECT 1 FROM locked_account) THEN 'preserved_terminal' \
+                 ELSE 'missing' END AS outcome",
         )
         .bind::<BigInt, _>(account_pk.get())
         .bind::<Text, _>(&record.state)
@@ -329,28 +368,27 @@ impl AccountLifecycleStore for PgAccountLifecycleStore {
                 .as_ref()
                 .map(serde_json::to_value)
                 .transpose()
-                .map_err(|error| PersistenceError::database(format!("changed_by JSON: {error}")))?,
+                .map_err(PersistenceError::database)?,
         )
         .bind::<Timestamptz, _>(record.changed_at)
-        .execute(&mut conn)
+        .get_result::<LifecycleWriteOutcomeRow>(&mut conn)
         .await
-        .map_err(PersistenceError::database)?;
-        if written != 1 {
-            return Err(PersistenceError::NotFound(
-                "account lifecycle account".to_owned(),
-            ));
+        .map_err(crate::persistence_query_error)?;
+        match row.outcome.as_str() {
+            "written" | "preserved_terminal" => Ok(()),
+            "missing" => Err(PersistenceError::NotFound(
+                "account lifecycle account".into(),
+            )),
+            _ => Err(PersistenceError::Internal(
+                "Account lifecycle write returned an unknown outcome".into(),
+            )),
         }
-        Ok(())
     }
 
     async fn delete(&self, account_pk: AccountPk) -> PersistenceResult<()> {
         let mut conn = crate::pg_db(&self.pool);
-        sql_query("DELETE FROM account_lifecycle WHERE account_pk = $1")
-            .bind::<BigInt, _>(account_pk.get())
-            .execute(&mut conn)
-            .await
-            .map(|_| ())
-            .map_err(PersistenceError::database)
+        sql_query("WITH locked_account AS MATERIALIZED (SELECT pk FROM accounts WHERE pk=$1 FOR UPDATE) DELETE FROM account_lifecycle l USING locked_account a WHERE l.account_pk=a.pk AND l.state<>'erasure_pending'")
+            .bind::<BigInt,_>(account_pk.get()).execute(&mut conn).await.map(|_|()).map_err(crate::persistence_query_error)
     }
 
     async fn snapshot_all(
@@ -914,3 +952,7 @@ pub(crate) async fn compare_account_data_in_transaction(
             .get_result::<AccountDataStorageRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?.map(AccountDataRecord::from);
     Ok(AccountDataCasResult::Conflict(current))
 }
+
+#[cfg(test)]
+#[path = "accounts/profile_erasure_tests.rs"]
+mod profile_erasure_tests;

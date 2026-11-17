@@ -250,7 +250,7 @@ async fn read_at_cut(
     request: &AgentSessionAuthorityRequest,
     at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<AgentSessionAuthorityView> {
-    let source = sql_query("SELECT e.envelope,c.commit_json,a.requested_scope,EXISTS(SELECT 1 FROM agent_key_current_states k CROSS JOIN LATERAL jsonb_array_elements(k.value->'authorizations') d WHERE k.realm_id=a.principal_control_realm_id AND d->>'tag_id'=$3||':1' AND d->'value'=e.envelope->'payload') AS active FROM agent_principals a JOIN agent_status_current_states s ON s.realm_id=a.principal_control_realm_id AND s.agent_id=a.id JOIN canonical_events e ON e.envelope->>'event_id'=$3 AND e.state='committed' JOIN realm_commits c ON c.event_pk=e.pk AND c.realm_id=a.principal_control_realm_id WHERE a.id=$1 AND a.controller_principal_id=$2 AND s.value='\"active\"'::jsonb")
+    let source = sql_query("SELECT e.envelope,c.commit_json,a.requested_scope,EXISTS(SELECT 1 FROM agent_key_current_states k CROSS JOIN LATERAL jsonb_array_elements(k.value->'authorizations') d WHERE k.realm_id=a.principal_control_realm_id AND d->>'tag_id'=$3||':1' AND d->'value'=e.envelope->'payload') AS active FROM agent_principals a JOIN agent_status_current_states s ON s.realm_id=a.principal_control_realm_id AND s.agent_id=a.id JOIN canonical_events e ON e.envelope->>'event_id'=$3 AND e.state='committed' JOIN realm_commits c ON c.event_pk=e.pk AND c.realm_id=a.principal_control_realm_id WHERE a.id=$1 AND a.controller_principal_id=$2 AND a.requested_scope IS NOT NULL AND s.value='\"active\"'::jsonb")
         .bind::<Text,_>(request.agent_account_id.principal_id.as_str())
         .bind::<Text,_>(request.controller_account_id.principal_id.as_str())
         .bind::<Text,_>(request.agent_key_authorization_ref.as_str())

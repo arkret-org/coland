@@ -9,6 +9,12 @@ pub trait SessionStore: Send + Sync {
         token: &str,
     ) -> PersistenceResult<Option<crate::DeviceRevocationGateSelector>>;
     async fn delete(&self, token: &str) -> PersistenceResult<()>;
+    async fn revoke_account(
+        &self,
+        account: &arkret_wire::AccountId,
+        device_id: Option<&str>,
+        revoked_at: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<usize>;
     async fn cleanup_expired(&self) -> PersistenceResult<usize>;
     async fn snapshot_all(&self) -> PersistenceResult<Vec<SessionRecord>>;
 }

@@ -12,14 +12,9 @@ use crate::state::AppState;
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 const FANOUT_LIFECYCLE_STATES: [&str; 2] = ["deactivated", "erasure_pending"];
 
-async fn reconcile_account(state: &AppState, did: &str) -> bool {
-    let result = async {
-        let principal = arkret_wire::DidCoreId::new(did.to_owned())
-            .map_err(|error| crate::error::AppError::internal(error.to_string()))?;
-        let account = arkret_wire::AccountId::new(principal, state.service_core_id());
-        crate::routing::interop::confirm_deactivated_account_push_revocations(state, &account).await
-    }
-    .await;
+async fn reconcile_account(state: &AppState, account: &arkret_wire::AccountId) -> bool {
+    let result =
+        crate::routing::interop::confirm_deactivated_account_push_revocations(state, account).await;
     let complete = match result {
         Ok(complete) => complete,
         Err(error) => {
@@ -27,14 +22,14 @@ async fn reconcile_account(state: &AppState, did: &str) -> bool {
             false
         }
     };
-    state.set_deactivation_push_partial(did, !complete);
+    state.set_deactivation_push_partial(account.principal_id.as_str(), !complete);
     complete
 }
 
 /// Preserve the lifecycle result while reporting unavailable or unverified
 /// Gateway receipts as partial. Durable opaque tombstones remain retryable.
-pub async fn ensure_fanout(state: &AppState, did: &str) {
-    let _ = reconcile_account(state, did).await;
+pub async fn ensure_fanout(state: &AppState, account: &arkret_wire::AccountId) -> bool {
+    reconcile_account(state, account).await
 }
 
 /// Recover terminal accounts from durable lifecycle state after restart.
@@ -54,7 +49,11 @@ impl Worker {
         for (did, lifecycle) in self.state.identities().account_lifecycles_snapshot() {
             if FANOUT_LIFECYCLE_STATES.contains(&lifecycle.state.as_str()) {
                 let was_partial = self.state.deactivation_push_partial(&did);
-                if reconcile_account(&self.state, &did).await && was_partial {
+                let Ok(principal) = arkret_wire::DidCoreId::new(did.clone()) else {
+                    continue;
+                };
+                let account = arkret_wire::AccountId::new(principal, self.state.service_core_id());
+                if reconcile_account(&self.state, &account).await && was_partial {
                     completed += 1;
                 }
             }

@@ -54,15 +54,27 @@ pub(crate) fn message_redaction_current_value(
 
 /// Admit `ak.message.redact` and add its assertion to the Message's
 /// `object_redaction` set. Every other kind is left to its own writer.
-pub(crate) async fn commit_message_redact_current_state_in_connection(
+#[inline(never)]
+pub(crate) fn commit_message_redact_current_state_in_connection<'a>(
+    conn: &'a mut AsyncPgConnection,
+    event: &'a arkret_wire::Event,
+    commit: &'a arkret_wire::RealmCommit,
+    prepared: Option<&'a coland_storage::EventApprovalCommit>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = PersistenceResult<()>> + Send + 'a>> {
+    if event.kind != arkret_wire::EventKind::MessageRedact {
+        return Box::pin(std::future::ready(Ok(())));
+    }
+    crate::boxed_future(|| {
+        commit_message_redact_current_state_in_connection_inner(conn, event, commit, prepared)
+    })
+}
+
+async fn commit_message_redact_current_state_in_connection_inner(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
     prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<()> {
-    if event.kind != arkret_wire::EventKind::MessageRedact {
-        return Ok(());
-    }
     require_message_write_carrier(event, commit)?;
     let payload: MessageRedactPayload = serde_json::from_value(
         serde_json::to_value(&event.payload).map_err(PersistenceError::database)?,

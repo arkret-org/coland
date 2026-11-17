@@ -158,6 +158,8 @@ impl crate::key_backup::PgKeyBackupStore {
             .await
             .map_err(PersistenceError::database)?;
         conn.transaction::<_,PgTransactionError,_>(async move |conn| {
+            let owner:arkret_wire::AccountId=serde_json::from_value(backup["actor_id"]["account_id"].clone()).map_err(PersistenceError::database)?;
+            crate::pcr_private_authority::require_active_account_owner(conn,&owner).await?;
             let historical = matches!(basis, coland_storage::KeyBackupUnlockBasis::CurrentHumanPcrHistory { .. });
             let mut history_expires = None;
             let current_device = match basis {
@@ -260,6 +262,7 @@ pub(crate) async fn validate_recovery_unlock_policy(
     let station = arkret_wire::DidCoreId::new(field(session, "station_id")?.to_owned())
         .map_err(PersistenceError::database)?;
     let account = arkret_wire::AccountId::new(principal, station);
+    crate::pcr_private_authority::require_active_account_owner(conn, &account).await?;
     let canonical =
         arkret_canonical::canonical_json_string(&account).map_err(PersistenceError::database)?;
     sql_query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
@@ -577,6 +580,9 @@ pub(crate) async fn issue_unlock_in_connection(
     now: chrono::DateTime<Utc>,
 ) -> Result<Value, PgTransactionError> {
     let request = issuance_request(&challenge)?;
+    let owner: arkret_wire::AccountId = serde_json::from_value(challenge["account_id"].clone())
+        .map_err(PersistenceError::database)?;
+    crate::pcr_private_authority::require_active_account_owner(conn, &owner).await?;
     let id = field(&challenge, "challenge_id")?.to_owned();
     let backup_id = field(&challenge, "backup_id")?.to_owned();
     let device = field(&challenge, "requesting_device_id")?.to_owned();

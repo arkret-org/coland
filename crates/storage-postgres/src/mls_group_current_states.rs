@@ -182,15 +182,37 @@ async fn write_group(
 /// Install the transition of an accepted `ak.mls.genesis` or `ak.mls.commit`
 /// and queue every Welcome it carries, after its Event and RealmCommit were
 /// written in the same transaction.
-pub(crate) async fn commit_mls_group_current_state_in_connection(
+#[inline(never)]
+pub(crate) fn commit_mls_group_current_state_in_connection<'a>(
+    conn: &'a mut AsyncPgConnection,
+    transaction: &'a AuthorityCommitTransaction,
+    prepared: Option<&'a coland_storage::EventApprovalCommit>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = PersistenceResult<()>> + Send + 'a>> {
+    let event = &transaction.event;
+    if !matches!(event.kind, EventKind::MlsGenesis | EventKind::MlsCommit) {
+        return Box::pin(std::future::ready(Ok(())));
+    }
+    crate::boxed_future(|| {
+        commit_mls_group_current_state_in_connection_inner(conn, transaction, prepared)
+    })
+}
+
+async fn commit_mls_group_current_state_in_connection_inner(
     conn: &mut AsyncPgConnection,
     transaction: &AuthorityCommitTransaction,
     prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<()> {
+    let installation =
+        crate::boxed_future(|| qualify_mls_group(conn, transaction, prepared)).await?;
+    crate::boxed_future(|| install_authorized_mls_group(conn, transaction, installation)).await
+}
+
+async fn qualify_mls_group<'a>(
+    conn: &mut AsyncPgConnection,
+    transaction: &'a AuthorityCommitTransaction,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
+) -> PersistenceResult<&'a coland_storage::MlsStateInstallation> {
     let event = &transaction.event;
-    if !matches!(event.kind, EventKind::MlsGenesis | EventKind::MlsCommit) {
-        return Ok(());
-    }
     if event.kind == EventKind::MlsCommit
         && event
             .as_mls_commit()
@@ -245,6 +267,16 @@ pub(crate) async fn commit_mls_group_current_state_in_connection(
         )
         .await?;
     }
+    Ok(installation)
+}
+
+async fn install_authorized_mls_group(
+    conn: &mut AsyncPgConnection,
+    transaction: &AuthorityCommitTransaction,
+    installation: &coland_storage::MlsStateInstallation,
+) -> PersistenceResult<()> {
+    let event = &transaction.event;
+    let commit = &transaction.commit;
     let key = scope_key(&event.scope_ref)?;
     let current = locked_group(conn, &key).await?;
     let payload = serde_json::to_value(&event.payload).map_err(PersistenceError::database)?;

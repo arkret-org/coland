@@ -132,12 +132,14 @@ pub(crate) async fn current(
 }
 
 /// Callers that write must already hold the parent Realm authority lock.
-pub(crate) async fn current_in_connection(
-    conn: &mut AsyncPgConnection,
-    actor: &ActorId,
-    device: &DeviceId,
+pub(crate) fn current_in_connection<'a>(
+    conn: &'a mut AsyncPgConnection,
+    actor: &'a ActorId,
+    device: &'a DeviceId,
     now: chrono::DateTime<chrono::Utc>,
-) -> Result<Option<AppletManagedDeviceAuthority>, PgTransactionError> {
+) -> impl std::future::Future<Output = Result<Option<AppletManagedDeviceAuthority>, PgTransactionError>>
++ Send
++ 'a {
     current_with_gate_in_connection(
         conn,
         actor,
@@ -145,15 +147,16 @@ pub(crate) async fn current_in_connection(
         now,
         DeviceCredentialGate::ActiveBusiness,
     )
-    .await
 }
 
-pub(crate) async fn backup_put_credential_in_connection(
-    conn: &mut AsyncPgConnection,
-    actor: &ActorId,
-    device: &DeviceId,
+pub(crate) fn backup_put_credential_in_connection<'a>(
+    conn: &'a mut AsyncPgConnection,
+    actor: &'a ActorId,
+    device: &'a DeviceId,
     now: chrono::DateTime<chrono::Utc>,
-) -> Result<Option<AppletManagedDeviceAuthority>, PgTransactionError> {
+) -> impl std::future::Future<Output = Result<Option<AppletManagedDeviceAuthority>, PgTransactionError>>
++ Send
++ 'a {
     current_with_gate_in_connection(
         conn,
         actor,
@@ -161,7 +164,6 @@ pub(crate) async fn backup_put_credential_in_connection(
         now,
         DeviceCredentialGate::NativeBackupPutOutcome,
     )
-    .await
 }
 
 pub(crate) async fn backup_put_credential(

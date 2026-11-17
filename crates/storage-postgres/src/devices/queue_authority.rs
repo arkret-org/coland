@@ -79,6 +79,13 @@ pub(crate) async fn enqueue_mls_welcome_in_connection(
     welcome.validate_shape().map_err(|error| {
         PersistenceError::SchemaViolation(format!("invalid MLS Welcome: {error}"))
     })?;
+    // A replicated accepted Commit is retained even when its recipient has
+    // become terminal. Its private delivery copy must not be recreated.
+    if let Some(account) = welcome.recipient_actor_id.as_account_id()
+        && !crate::pcr_private_authority::is_active_human_account(conn, account).await?
+    {
+        return Ok(());
+    }
     let delivery_json = serde_json::to_value(welcome).map_err(PersistenceError::database)?;
     let existing = sql_query(
         "SELECT delivery_json FROM mls_welcome_deliveries WHERE welcome_id=$1 FOR UPDATE",
@@ -388,6 +395,11 @@ pub(super) async fn current_binding(
     else {
         return Ok(None);
     };
+    let account =
+        arkret_wire::AccountId::new(binding.principal_id.clone(), binding.station_id.clone());
+    if !crate::pcr_private_authority::is_active_human_account(conn, &account).await? {
+        return Ok(None);
+    }
     if crate::gate_status_in_transaction(conn, &binding).await?
         != DeviceRevocationGateStatus::Active
     {
@@ -867,4 +879,58 @@ pub(super) fn realm_device_binding(
         "authorization_ref": authority.authorization_ref,
         "device_generation": authority.current_device_generation_ref,
     }))
+}
+
+/// The caller already owns the established device artifact locks. Acquire all
+/// complete Account barriers before taking a shared queue table lock.
+pub(super) async fn require_active_accounts_in_transaction(
+    conn: &mut AsyncPgConnection,
+    selectors: &[&DeviceRevocationGateSelector],
+) -> PersistenceResult<()> {
+    let accounts = selectors
+        .iter()
+        .map(|selector| {
+            let account = arkret_wire::AccountId::new(
+                selector.principal_id.clone(),
+                selector.station_id.clone(),
+            );
+            (account.to_string(), account)
+        })
+        .collect::<BTreeMap<_, _>>();
+    for account in accounts.values() {
+        crate::pcr_private_authority::require_active_account_owner(conn, account).await?;
+    }
+    Ok(())
+}
+
+/// Client batches distinguish the authenticated sender's terminal refusal
+/// from an unavailable recipient. The returned set suppresses only new queue
+/// rows; existing exact idempotency outcomes keep their original meaning.
+pub(super) async fn inactive_batch_recipient_accounts(
+    conn: &mut AsyncPgConnection,
+    sender: Option<&arkret_wire::AccountId>,
+    selectors: &[&DeviceRevocationGateSelector],
+) -> PersistenceResult<BTreeSet<String>> {
+    let mut accounts = selectors
+        .iter()
+        .map(|selector| {
+            let account = arkret_wire::AccountId::new(
+                selector.principal_id.clone(),
+                selector.station_id.clone(),
+            );
+            (account.to_string(), account)
+        })
+        .collect::<BTreeMap<_, _>>();
+    if let Some(sender) = sender {
+        accounts.insert(sender.to_string(), sender.clone());
+    }
+    let mut inactive = BTreeSet::new();
+    for account in accounts.values() {
+        if sender == Some(account) {
+            crate::pcr_private_authority::require_active_account_owner(conn, account).await?;
+        } else if !crate::pcr_private_authority::is_active_human_account(conn, account).await? {
+            inactive.insert(account.to_string());
+        }
+    }
+    Ok(inactive)
 }

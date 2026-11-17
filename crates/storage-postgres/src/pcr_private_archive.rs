@@ -40,6 +40,12 @@ const TABLES: &[(&str, &str)] = &[
     ("realm_meta", "t.realm_id=v.realm_id"),
     ("principal_resolutions", "t.pcr_realm_id=v.realm_id"),
     (
+        "principal_resolution_current_states",
+        "t.pcr_realm_id=v.realm_id",
+    ),
+    ("organization_pcr_genesis_sources", "t.realm_id=v.realm_id"),
+    ("event_approval_private_audit", "t.realm_id=v.realm_id"),
+    (
         "principal_resolution_events",
         "t.principal_id=v.holder->>'principal_id' AND t.station_id=v.holder->>'station_id'",
     ),
@@ -262,6 +268,7 @@ pub(crate) async fn verify_import(
             "manifest differs from the actual frozen holder inception cut",
         ));
     }
+    verify_frozen_organization_sources(conn, &manifest.realm_id).await?;
     let state = native_state(conn, &manifest.holder_account_id, &manifest.realm_id).await?;
     if Hash::new(arkret_canonical::canonical_sha256(&state).map_err(invalid)?).map_err(invalid)?
         != manifest.state_digest
@@ -283,6 +290,7 @@ impl PgAuthorityCommitStore {
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_, PgTransactionError, _>(async |conn| {
             let cut = crate::pcr_private_authority::lock_frozen_holder(conn, holder).await?;
+            verify_frozen_organization_sources(conn, &cut.realm_id).await?;
             let state = native_state(conn, holder, &cut.realm_id).await?;
             let bytes = arkret_canonical::canonical_json_bytes(&state).map_err(invalid)?;
             let manifest = PcrPrivateHandoffManifest {
@@ -354,6 +362,18 @@ impl PgAuthorityCommitStore {
             .map_err(crate::pcr_private_authority::refused)?;
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_,PgTransactionError,_>(async |conn| {
+            let holder = &manifest.holder_account_id;
+            crate::pcr_private_authority::lock_optional_account_private_tuple(conn, holder).await?;
+            let existing = sql_query("SELECT pk FROM accounts WHERE principal_id=$1 AND station_id=$2")
+                .bind::<Text, _>(holder.principal_id.as_str())
+                .bind::<Text, _>(holder.station_id.as_str())
+                .get_result::<Pk>(&mut *conn)
+                .await
+                .optional()
+                .map_err(PersistenceError::database)?;
+            if existing.is_some() {
+                crate::pcr_private_authority::require_active_account_owner(conn, holder).await?;
+            }
             let lock=format!("pcr-native-import:{}",manifest.realm_id);
             sql_query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))").bind::<Text,_>(lock).execute(&mut *conn).await?;
             let keys=foreign_keys(conn).await?;
@@ -394,4 +414,37 @@ impl PgAuthorityCommitStore {
             Ok(())
         }).await.map_err(PgTransactionError::into_persistence)
     }
+}
+
+/// Preserve and reprove the complete native change source before private
+/// export/import activation. A public old-G signature never substitutes for
+/// the original private finite authorization and nonce records.
+async fn verify_frozen_organization_sources(
+    conn: &mut AsyncPgConnection,
+    realm: &RealmId,
+) -> PersistenceResult<()> {
+    if !matches!(
+        crate::pcr_private_authority::accepted_governance(conn, realm).await?,
+        arkret_wire::GenesisGovernance::Organization
+    ) {
+        return Ok(());
+    }
+    #[derive(diesel::QueryableByName)]
+    struct Original {
+        #[diesel(sql_type=Jsonb)]
+        envelope: Value,
+        #[diesel(sql_type=Jsonb)]
+        commit_json: Value,
+    }
+    let rows=sql_query("SELECT e.envelope,c.commit_json FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk WHERE c.realm_id=$1 AND e.state='committed' AND e.kind='ak.realm.governance_station.change' ORDER BY c.stream_position")
+        .bind::<Text,_>(realm.as_str()).load::<Original>(&mut *conn).await.map_err(crate::persistence_query_error)?;
+    for row in rows {
+        let event = serde_json::from_value(row.envelope).map_err(invalid)?;
+        let commit = serde_json::from_value(row.commit_json).map_err(invalid)?;
+        crate::organization_pcr_governance_change::verify_accepted_in_connection(
+            conn, &event, &commit,
+        )
+        .await?;
+    }
+    Ok(())
 }

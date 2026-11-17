@@ -158,6 +158,21 @@ pub trait ActorProfileStore: Send + Sync {
         write: AgentProvisionAdmissionWrite,
     ) -> PersistenceResult<AgentProvisionAdmissionOutcome>;
 
+    /// Read the exact accepted Organization create from its immutable native
+    /// authority, producer and hosting-source closure, without a new admission.
+    async fn organization_pcr_genesis_original(
+        &self,
+        request: &arkret_models_collaboration::authority_commit::PeerAuthorityForwardEventRequestBody,
+        source_service_id: &DidCoreId,
+    ) -> PersistenceResult<Option<arkret_wire::AuthoritySubmitResponseBody>>;
+
+    /// Accept exactly one Organization create with full native authority,
+    /// original producer and authenticated hosting-source closure in one transaction.
+    async fn admit_organization_pcr_genesis(
+        &self,
+        write: crate::OrganizationPcrGenesisAdmissionWrite,
+    ) -> PersistenceResult<arkret_wire::AuthoritySubmitResponseBody>;
+
     /// Admit one Agent PCR genesis: an accepted provision in the controller's
     /// PCR declares its realm id, the controller's signing device is active
     /// at the Commit, and the Realm authority, genesis Commit and create

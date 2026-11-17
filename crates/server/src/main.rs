@@ -158,6 +158,37 @@ async fn run(raw_args: Vec<String>) -> anyhow::Result<()> {
         return run_healthcheck(&raw_args).await;
     }
 
+    if raw_args.get(1).map(String::as_str) == Some("organization-pcr")
+        && matches!(
+            raw_args.get(2).map(String::as_str),
+            Some("accept-hosting" | "inspect-consent")
+        )
+    {
+        anyhow::ensure!(
+            raw_args.len() >= 4,
+            "usage: coland organization-pcr <accept-hosting|inspect-consent> <request.json> [deployment configuration options]"
+        );
+        let values = coland::process_config::load(&raw_args)?;
+        let config = AppConfig::from_values(
+            &values,
+            StartupOverrides {
+                bind: None,
+                first_provisioning: false,
+            },
+        )?;
+        let db = Db::connect(config.database_url.as_deref(), Default::default()).await?;
+        let report = if raw_args[2] == "inspect-consent" {
+            serde_json::to_value(
+                crate::bootstrap::organization_hosting::inspect_consent(&config, db, &raw_args[3])
+                    .await?,
+            )?
+        } else {
+            crate::bootstrap::organization_hosting::accept(&config, db, &raw_args[3]).await?
+        };
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
     if raw_args.get(1).map(String::as_str) == Some("service-identity")
         && raw_args.get(2).map(String::as_str) == Some("migrate-base")
     {

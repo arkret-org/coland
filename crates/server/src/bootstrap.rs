@@ -5,6 +5,8 @@
 //! signing and control secrets remain in a durable SDK `KeyStore`. Configuration
 //! never supplies or pins the resulting DID.
 
+mod operator;
+pub mod organization_hosting;
 pub mod public_base;
 
 use std::sync::Arc;

@@ -391,7 +391,21 @@ pub(super) async fn mimi_consent_request(
         })
         .await
         .map_err(|error| {
-            AppError::internal(format!("persist MIMI consent correlation: {error}"))
+            if matches!(
+                error.conflict_code(),
+                Some(
+                    coland_storage::ConflictCode::AccountErased
+                        | coland_storage::ConflictCode::AccountDeactivated
+                )
+            ) {
+                mimi_consent_correlation_unavailable()
+            } else if error.conflict_code()
+                == Some(coland_storage::ConflictCode::TemporarilyUnavailable)
+            {
+                crate::routing::identity::consent::consent_error(error)
+            } else {
+                AppError::internal(format!("persist MIMI consent correlation: {error}"))
+            }
         })?;
     let _receipt = mimi_receipt(
         state,
@@ -853,6 +867,19 @@ fn mimi_consent_correlation_unavailable() -> AppError {
     AppError::not_found("MIMI consent correlation is unavailable")
 }
 
+fn mimi_correlation_binding_error(error: coland_storage::PersistenceError) -> AppError {
+    if matches!(
+        &error,
+        coland_storage::PersistenceError::Database(_)
+            | coland_storage::PersistenceError::Internal(_)
+    ) || error.conflict_code() == Some(coland_storage::ConflictCode::TemporarilyUnavailable)
+    {
+        crate::routing::identity::consent::consent_error(error.into())
+    } else {
+        mimi_consent_correlation_unavailable()
+    }
+}
+
 fn mimi_consent_source_class(
     authenticated_session: Option<&coland_services::identity::SessionIdentityState>,
 ) -> coland_storage::MimiConsentSourceClass {
@@ -966,7 +993,7 @@ async fn verify_mimi_consent_correlation(
             false,
         )
         .await
-        .map_err(|_| mimi_consent_correlation_unavailable())?
+        .map_err(mimi_correlation_binding_error)?
     {
         if correlation.expires_at.is_some_and(|expiry| expiry <= now())
             && crate::state::authority_consent::accepted_original(state, &body.consent_event)
@@ -1038,7 +1065,7 @@ async fn verify_mimi_consent_correlation(
             true,
         )
         .await
-        .map_err(|_| mimi_consent_correlation_unavailable())?;
+        .map_err(mimi_correlation_binding_error)?;
     Ok(())
 }
 
@@ -1244,6 +1271,35 @@ mod consent_proof_tests {
 
     use super::*;
 
+    #[test]
+    fn private_correlation_refusal_keeps_terminal_opaque_and_infrastructure_distinct() {
+        use coland_storage::{ConflictCode, PersistenceError};
+        for code in [
+            ConflictCode::AccountErased,
+            ConflictCode::AccountDeactivated,
+            ConflictCode::DuplicateConflict,
+        ] {
+            let error = mimi_correlation_binding_error(PersistenceError::Conflict(format!(
+                "{code}: private refused"
+            )));
+            assert_eq!(error.code, ErrorCode::NotFound);
+        }
+        let busy = mimi_correlation_binding_error(PersistenceError::Conflict(format!(
+            "{}: concurrent cut",
+            ConflictCode::TemporarilyUnavailable
+        )));
+        assert_eq!(busy.code, ErrorCode::TemporarilyUnavailable);
+        for error in [
+            PersistenceError::Database("database failed".into()),
+            PersistenceError::Internal("internal failed".into()),
+        ] {
+            assert_eq!(
+                mimi_correlation_binding_error(error).code,
+                ErrorCode::InternalError
+            );
+        }
+    }
+
     fn state() -> AppState {
         let mut config = crate::config::AppConfig::test_default();
         config.development_mode = true;
@@ -1368,6 +1424,30 @@ mod consent_proof_tests {
         purpose: &str,
         expires_at: Option<chrono::DateTime<chrono::Utc>>,
     ) {
+        // This is only the holder's local private-cache fixture. Current
+        // signer/Consent authority is still independently admitted below.
+        if state
+            .identities()
+            .account(holder_account_id)
+            .await
+            .unwrap()
+            .is_none()
+        {
+            state
+                .identities()
+                .save_account(coland_services::identity::AccountProfileState {
+                    pk: coland_storage::AccountPk(0),
+                    principal_id: holder_account_id.principal_id.clone(),
+                    account_id: holder_account_id.clone(),
+                    localpart: format!("mimi-holder-{}", uuid::Uuid::now_v7().simple()),
+                    display_name: None,
+                    biography: None,
+                    avatar_blob_ref: None,
+                    created_at: now(),
+                })
+                .await
+                .unwrap();
+        }
         state
             .consents()
             .save_mimi_correlation(MimiConsentCorrelation {

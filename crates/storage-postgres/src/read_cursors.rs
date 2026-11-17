@@ -226,6 +226,7 @@ async fn advance_in_connection(
     conn: &mut AsyncPgConnection,
     advance: &ReadCursorAdvance,
 ) -> Result<ReadCursorAdvanceOutcome, PgTransactionError> {
+    crate::pcr_private_authority::require_active_account_owner(conn, &advance.owner).await?;
     let account_key = advance.owner.to_string();
     let realm_id = advance.cursor.realm_id.as_str();
     let read_scope_key = scope_key(&advance.cursor)?;

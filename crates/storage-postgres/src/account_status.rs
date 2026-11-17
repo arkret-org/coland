@@ -1,3 +1,5 @@
+mod erasure;
+
 use arkret_models_collaboration::account_status::{AccountStatusReceipt, AccountStatusRecord};
 use coland_storage::{
     AccountStatusAffectedServiceObservation, AccountStatusPropagationProjection,
@@ -171,6 +173,14 @@ fn encode_account_id(account: &arkret_wire::AccountId) -> PersistenceResult<serd
 
 #[async_trait]
 impl AccountStatusReplicaStore for PgAccountStatusReplicaStore {
+    async fn complete_erasure(
+        &self,
+        pending: &coland_storage::AccountErasureExecution,
+        sign: coland_storage::AccountErasureCompletionSigner<'_>,
+    ) -> PersistenceResult<coland_storage::AccountErasureExecution> {
+        erasure::complete(&self.pool, pending, sign).await
+    }
+
     async fn append(
         &self,
         record: &AccountStatusRecord,
@@ -240,6 +250,9 @@ impl AccountStatusReplicaStore for PgAccountStatusReplicaStore {
             .execute(&mut *conn)
             .await
             .map_err(PersistenceError::database)?;
+            if record.status == arkret_models_collaboration::objects::account_status::AccountStatus::ErasurePending {
+                erasure::retain_reject_only_account_projection(conn,&record,&receipt).await?;
+            }
             Ok(AccountStatusReplicaAppend::Accepted(receipt))
         })
         .await
@@ -419,18 +432,16 @@ impl AccountStatusReplicaStore for PgAccountStatusReplicaStore {
         let account_actor = arkret_wire::ActorId::account(account_id.clone()).to_string();
         let account = encode_account_id(account_id)?;
         let local_sources = sql_query(
-            "SELECT 'session'::text AS source WHERE EXISTS (SELECT 1 FROM sessions WHERE actor_id = $1) \
-             UNION ALL SELECT 'device'::text WHERE EXISTS (SELECT 1 FROM devices WHERE actor_id = $1) \
-             UNION ALL SELECT 'key_package'::text WHERE EXISTS (SELECT 1 FROM mls_key_packages WHERE actor_id = $1) \
-             UNION ALL SELECT 'to_device'::text WHERE EXISTS (SELECT 1 FROM device_messages WHERE sender = $1 OR recipient = $1) \
-             UNION ALL SELECT 'push_route'::text WHERE EXISTS (SELECT 1 FROM push_devices WHERE payload->'account_id' = $2) \
-             UNION ALL SELECT 'principal_locator'::text WHERE EXISTS (SELECT 1 FROM invite_locators WHERE subject_id = $1 OR recipient_id = $1)",
+            "SELECT 'session'::text AS source WHERE EXISTS (SELECT 1 FROM sessions s JOIN accounts a ON a.pk=s.account_pk WHERE a.principal_id=$3 AND a.station_id=$4 AND s.actor_id=a.principal_id) \
+             UNION ALL SELECT 'device'::text WHERE EXISTS (SELECT 1 FROM devices WHERE actor_id=$3 AND station_id=$4) \
+             UNION ALL SELECT 'key_package'::text WHERE EXISTS (SELECT 1 FROM mls_key_packages WHERE owner_actor_id=$1::jsonb) \
+             UNION ALL SELECT 'to_device'::text WHERE EXISTS (SELECT 1 FROM device_messages WHERE content->'sender_account_id'=$2 OR content->'recipient_account_id'=$2) \
+             UNION ALL SELECT 'push_route'::text WHERE EXISTS (SELECT 1 FROM push_devices WHERE payload->'account_id'=$2) \
+             UNION ALL SELECT 'principal_locator'::text WHERE EXISTS (SELECT 1 FROM invite_locators WHERE subject_id=$3 AND recipient_id=$4)",
         )
-        .bind::<Text, _>(&account_actor)
-        .bind::<Jsonb, _>(&account)
-        .load::<AffectedSourceRow>(&mut conn)
-        .await
-        .map_err(PersistenceError::database)?;
+        .bind::<Text,_>(&account_actor).bind::<Jsonb,_>(&account)
+        .bind::<Text,_>(account_id.principal_id.as_str()).bind::<Text,_>(account_id.station_id.as_str())
+        .load::<AffectedSourceRow>(&mut conn).await.map_err(PersistenceError::database)?;
 
         let mut observations = Vec::new();
         for row in local_sources {
@@ -469,13 +480,9 @@ impl AccountStatusReplicaStore for PgAccountStatusReplicaStore {
         // Session audiences are explicit service identities. They are not
         // inferred from a URL or deployment config.
         let session_candidates = sql_query(
-            "SELECT DISTINCT 'session'::text AS source, audience AS candidate \
-             FROM sessions WHERE actor_id = $1",
-        )
-        .bind::<Text, _>(&account_actor)
-        .load::<AffectedCandidateRow>(&mut conn)
-        .await
-        .map_err(PersistenceError::database)?;
+            "SELECT DISTINCT 'session'::text AS source,s.audience AS candidate FROM sessions s JOIN accounts a ON a.pk=s.account_pk WHERE a.principal_id=$1 AND a.station_id=$2 AND s.actor_id=a.principal_id",
+        ).bind::<Text,_>(account_id.principal_id.as_str()).bind::<Text,_>(account_id.station_id.as_str())
+            .load::<AffectedCandidateRow>(&mut conn).await.map_err(PersistenceError::database)?;
         for row in session_candidates {
             if let Ok(service_id) = arkret_wire::DidCoreId::new(row.candidate) {
                 push_unique_observation(
@@ -487,22 +494,14 @@ impl AccountStatusReplicaStore for PgAccountStatusReplicaStore {
             }
         }
 
-        // To-device and locator rows can name a peer only through the typed
-        // counterpart ActorId. Malformed or principal-only strings do not
-        // broaden the affected set.
-        let actor_candidates = sql_query(
-            "SELECT DISTINCT 'to_device'::text AS source, \
-                 CASE WHEN sender = $1 THEN recipient ELSE sender END AS candidate \
-             FROM device_messages WHERE sender = $1 OR recipient = $1 \
-             UNION ALL \
-             SELECT DISTINCT 'principal_locator'::text AS source, \
-                 CASE WHEN subject_id = $1 THEN recipient_id ELSE subject_id END AS candidate \
-             FROM invite_locators WHERE subject_id = $1 OR recipient_id = $1",
-        )
-        .bind::<Text, _>(&account_actor)
-        .load::<AffectedCandidateRow>(&mut conn)
-        .await
-        .map_err(PersistenceError::database)?;
+        // A locator's recipient column is its owning Account Station, not
+        // another peer. Only the stored closed message envelope can name a
+        // counterpart Account here. Native Agent routes are never guessed
+        // from their principal or verification-method string; authenticated
+        // affected-service observations retain those distinct relationships.
+        let actor_candidates=sql_query(
+            "SELECT DISTINCT 'to_device'::text AS source,jsonb_build_object('kind','account','account_id',CASE WHEN content->'sender_account_id'=$1 THEN content->'recipient_account_id' ELSE content->'sender_account_id' END)::text AS candidate FROM device_messages WHERE content->'sender_account_id'=$1 OR content->'recipient_account_id'=$1",
+        ).bind::<Jsonb,_>(&account).load::<AffectedCandidateRow>(&mut conn).await.map_err(PersistenceError::database)?;
         for row in actor_candidates {
             let Ok(actor) = serde_json::from_str::<arkret_wire::ActorId>(&row.candidate) else {
                 continue;

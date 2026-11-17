@@ -27,6 +27,45 @@ pub fn build_app_state(
     service_resolution_commitment: arkret_models_identity::ResolutionCommitment,
     resolved_signing_seed: [u8; 32],
 ) -> anyhow::Result<AppState> {
+    build_app_state_with_notifications(
+        config,
+        db,
+        persistence,
+        service_identity,
+        service_resolution_commitment,
+        resolved_signing_seed,
+        event_broadcast,
+    )
+}
+
+pub(crate) fn build_operator_app_state(
+    config: AppConfig,
+    db: Db,
+    persistence: PersistenceHandle,
+    service_identity: arkret_identity::service_identity::DidCoreIdentityState,
+    service_resolution_commitment: arkret_models_identity::ResolutionCommitment,
+    resolved_signing_seed: [u8; 32],
+) -> anyhow::Result<AppState> {
+    build_app_state_with_notifications(
+        config,
+        db,
+        persistence,
+        service_identity,
+        service_resolution_commitment,
+        resolved_signing_seed,
+        |_, _, capacity| EventBroadcast::new(capacity),
+    )
+}
+
+fn build_app_state_with_notifications(
+    config: AppConfig,
+    db: Db,
+    persistence: PersistenceHandle,
+    service_identity: arkret_identity::service_identity::DidCoreIdentityState,
+    service_resolution_commitment: arkret_models_identity::ResolutionCommitment,
+    resolved_signing_seed: [u8; 32],
+    notifications: fn(Option<PgPool>, Option<String>, usize) -> EventBroadcast,
+) -> anyhow::Result<AppState> {
     let serving_identity = service_identity
         .identity()
         .ok_or_else(|| anyhow::anyhow!("runtime requires a serving service identity"))?;
@@ -42,7 +81,7 @@ pub fn build_app_state(
     // `AppConfig::from_env_and_args` already resolved `DATABASE_URL`, and it
     // dropped a blank value to `None`. Re-reading the environment here only
     // reintroduced the blank case as `Some("")`.
-    let event_broadcast = event_broadcast(db.pool.clone(), config.database_url.clone(), 1024);
+    let event_broadcast = notifications(db.pool.clone(), config.database_url.clone(), 1024);
     let storage_mode = db.mode();
     let pool = db.pool.clone();
 
@@ -197,7 +236,15 @@ impl EventNotificationRelay for PgEventNotificationRelay {
 }
 
 impl PgEventNotificationWorker {
-    async fn publish(&self, notification: EventNotification) -> anyhow::Result<()> {
+    async fn publish(&self, mut notification: EventNotification) -> anyhow::Result<()> {
+        // Subscribers re-read authorized durable state; the relay stores only wakeups.
+        use coland_http::state::EventNotificationKind;
+        if matches!(
+            notification.kind,
+            EventNotificationKind::Event { .. } | EventNotificationKind::EpochRotation { .. }
+        ) {
+            notification.kind = EventNotificationKind::RealmRefreshHint;
+        }
         let payload = serde_json::to_string(&PgEventNotificationEnvelope {
             origin: self.origin.clone(),
             notification,
@@ -293,7 +340,7 @@ mod notification_tests {
     }
 
     #[tokio::test]
-    async fn independent_listeners_forward_large_events_without_origin_echo() {
+    async fn independent_listeners_forward_only_wakeups_without_origin_echo() {
         let database = coland_storage_postgres::TestDatabase::lease().await;
         let make_worker = |origin: &str| {
             Arc::new(PgEventNotificationWorker {
@@ -340,12 +387,10 @@ mod notification_tests {
                         tokio::time::timeout(Duration::from_millis(100), first_rx.recv()).await
                 {
                     assert_eq!(notification.realm_id, "from-second");
-                    let coland_http::state::EventNotificationKind::Event { event_payload, .. } =
-                        notification.kind
-                    else {
-                        panic!("expected event");
-                    };
-                    assert_eq!(event_payload, large_body);
+                    assert!(matches!(
+                        notification.kind,
+                        coland_http::state::EventNotificationKind::RealmRefreshHint
+                    ));
                     received_first = true;
                 }
                 if !received_second
@@ -353,12 +398,10 @@ mod notification_tests {
                         tokio::time::timeout(Duration::from_millis(100), second_rx.recv()).await
                 {
                     assert_eq!(notification.realm_id, "from-first");
-                    let coland_http::state::EventNotificationKind::Event { event_payload, .. } =
-                        notification.kind
-                    else {
-                        panic!("expected event");
-                    };
-                    assert_eq!(event_payload, large_body);
+                    assert!(matches!(
+                        notification.kind,
+                        coland_http::state::EventNotificationKind::RealmRefreshHint
+                    ));
                     received_second = true;
                 }
             }

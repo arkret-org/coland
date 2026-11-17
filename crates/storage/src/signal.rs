@@ -28,7 +28,7 @@ pub trait SignalRelayStore: Send + Sync {
     /// a lower value is ignored).
     async fn advance(
         &self,
-        actor: &str,
+        account: &arkret_wire::AccountId,
         device: &str,
         realm_id: &str,
         position: u64,

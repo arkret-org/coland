@@ -692,6 +692,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn realm_refresh_wakeup_reads_the_actual_durable_commit() {
+        let (state, session, mut realm) = fixture_task().await.unwrap();
+        let selected = selection(&format!("realm_ids={}", realm.head.event.realm_id)).unwrap();
+        let mut result = Response::new();
+        Box::pin(response(
+            state.clone(),
+            session,
+            None,
+            selected,
+            &mut result,
+        ))
+        .await;
+        let mut body = result.take_body();
+        assert_eq!(next(&mut body).await.kind, Kind::Checkpoint);
+        let peer = coland_test_support::pcr_genesis::PcrGenesisFixture::new(state.service_did());
+        Box::pin(peer.admit_into(state.test_persistence().as_ref()))
+            .await
+            .unwrap();
+        Box::pin(realm.member_state(
+            &state,
+            state.test_persistence().as_ref(),
+            &peer.history,
+            &peer.history.account,
+            "join",
+        ))
+        .await;
+        assert!(state.publish_realm_refresh_hint(realm.head.event.realm_id.to_string()));
+        // A refresh may publish the old checkpoint first; the durable Commit
+        // follows from the next authorization-checked stream read.
+        let first = next(&mut body).await;
+        let event = if first.kind == Kind::Checkpoint {
+            next(&mut body).await
+        } else {
+            first
+        };
+        assert_eq!(event.kind, Kind::CommittedEvent);
+        assert_eq!(
+            event.committed_event().unwrap().commit(),
+            &realm.head.commit
+        );
+    }
+
+    #[tokio::test]
+    async fn realm_refresh_wakeup_rechecks_the_revoked_session_before_reading() {
+        let (state, session, realm) = fixture_task().await.unwrap();
+        let selected = selection(&format!("realm_ids={}", realm.head.event.realm_id)).unwrap();
+        let mut result = Response::new();
+        Box::pin(response(
+            state.clone(),
+            session.clone(),
+            None,
+            selected,
+            &mut result,
+        ))
+        .await;
+        let mut body = result.take_body();
+        assert_eq!(next(&mut body).await.kind, Kind::Checkpoint);
+        assert!(
+            state
+                .sessions()
+                .revoke_session(&session.token_hash, Utc::now())
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(state.publish_realm_refresh_hint(realm.head.event.realm_id.to_string()));
+        let denied = next(&mut body).await;
+        assert_eq!(denied.kind, Kind::Unauthorized);
+        assert!(denied.cursor.is_none());
+        assert!(body.next().await.is_none());
+    }
+
+    #[tokio::test]
     async fn established_stream_ends_at_original_session_expiry() {
         let (state, mut session, realm) = fixture_task().await.unwrap();
         session.expires_at = arkret_canonical::normalize_timestamp_canonical(

@@ -1167,7 +1167,7 @@ impl crate::events::InviteLocatorPort for PersistenceInviteLocators {
 
     async fn rotate(
         &self,
-        subject_id: &str,
+        account_id: &arkret_wire::AccountId,
         old_locator_id: &str,
         mutation: &crate::events::InviteLocatorRotateCommand,
         now: chrono::DateTime<chrono::Utc>,
@@ -1175,20 +1175,20 @@ impl crate::events::InviteLocatorPort for PersistenceInviteLocators {
         Ok(self
             .0
             .invite_locators()
-            .rotate(subject_id, old_locator_id, mutation, now)
+            .rotate(account_id, old_locator_id, mutation, now)
             .await?)
     }
 
     async fn revoke(
         &self,
-        subject_id: &str,
+        account_id: &arkret_wire::AccountId,
         locator_id: &str,
         now: chrono::DateTime<chrono::Utc>,
     ) -> crate::ServiceResult<Option<crate::events::InviteLocatorState>> {
         Ok(self
             .0
             .invite_locators()
-            .revoke(subject_id, locator_id, now)
+            .revoke(account_id, locator_id, now)
             .await?)
     }
 }

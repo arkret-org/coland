@@ -214,27 +214,32 @@ impl SignalRelayStore for PgSignalRelayStore {
 
     async fn advance(
         &self,
-        actor: &str,
+        account: &arkret_wire::AccountId,
         device: &str,
         realm_id: &str,
         position: u64,
     ) -> PersistenceResult<()> {
-        let mut conn = crate::pg_db(&self.pool);
-        sql_query(
-            "INSERT INTO signal_relay_watermark \
-             (actor_id, device_id, realm_id, delivered_through, updated_at) \
-             VALUES ($1, $2, $3, $4, NOW()) \
-             ON CONFLICT (actor_id, device_id, realm_id) DO UPDATE SET \
-                delivered_through = GREATEST(signal_relay_watermark.delivered_through, EXCLUDED.delivered_through), \
-                updated_at = NOW()",
-        )
-        .bind::<Text, _>(actor)
-        .bind::<Text, _>(device)
-        .bind::<Text, _>(realm_id)
-        .bind::<BigInt, _>(position as i64)
-        .execute(&mut conn)
-        .await
-        .map(|_| ())
-        .map_err(PersistenceError::database)
+        #[derive(QueryableByName)]
+        struct Allowed {
+            #[diesel(sql_type=sql_types::Bool)]
+            allowed: bool,
+        }
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_,PgTransactionError,_>(async |conn| {
+            let allowed=sql_query("SELECT lock_account_private_projection($1,$2) AS allowed")
+                .bind::<Text,_>(account.principal_id.as_str()).bind::<Text,_>(account.station_id.as_str())
+                .get_result::<Allowed>(&mut *conn).await.map_err(crate::persistence_query_error)?;
+            if !allowed.allowed { return Ok(()); }
+            let actor=arkret_wire::ActorId::account(account.clone()).to_string();
+            sql_query("INSERT INTO signal_relay_watermark(actor_id,device_id,realm_id,delivered_through,updated_at) VALUES($1,$2,$3,$4,NOW()) ON CONFLICT(actor_id,device_id,realm_id) DO UPDATE SET delivered_through=GREATEST(signal_relay_watermark.delivered_through,EXCLUDED.delivered_through),updated_at=NOW()")
+                .bind::<Text,_>(&actor).bind::<Text,_>(device).bind::<Text,_>(realm_id)
+                .bind::<BigInt,_>(i64::try_from(position).map_err(PersistenceError::database)?)
+                .execute(&mut *conn).await.map_err(crate::persistence_query_error)?;
+            Ok(())
+        }).await.map_err(PgTransactionError::into_persistence)
     }
 }
+
+#[cfg(test)]
+#[path = "signal/watermark_tests.rs"]
+mod watermark_tests;

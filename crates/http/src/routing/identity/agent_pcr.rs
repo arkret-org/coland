@@ -298,51 +298,26 @@ pub(crate) async fn agent_controller_account(
     state: &AppState,
     record: &AgentPrincipalRecord,
 ) -> Result<AccountId, AppError> {
-    // The initial provision reservation precedes pairing's account-PK field.
-    // Its accepted controller Account is retained in provision_event_refs.
-    let declared = record
-        .provision_event_refs
-        .as_ref()
-        .and_then(|refs| refs.get("controller_authority"))
-        .map(|value| serde_json::from_value::<AccountId>(value.clone()))
-        .transpose()
-        .map_err(|_| schema_error("stored Agent controller Account is invalid"))?;
-    let account = if let Some(pk) = record.controller_account_pk {
-        state.identities().account_by_id(pk).await
-    } else if let Some(authority) = declared.as_ref() {
-        state.identities().account(authority).await
-    } else {
-        return Err(failed_precondition(
-            "Agent controller Account binding is missing",
-            "agent_controller_binding_missing",
-        ));
-    }
-    .map_err(|error| {
-        AppError::internal(format!("Agent controller Account lookup failed: {error}"))
-    })?
-    .ok_or_else(|| {
-        failed_precondition(
-            "Agent controller Account no longer exists",
-            "agent_controller_binding_missing",
-        )
-    })?;
-    if account.account_id.principal_id
-        != managed_controller_core_id(&record.controller_principal_id)?
-        || record
-            .controller_account_pk
-            .is_some_and(|pk| pk != account.pk)
-        || account.principal_id != account.account_id.principal_id
-        || account.account_id.station_id != state.service_core_id()
-        || declared
-            .as_ref()
-            .is_some_and(|authority| authority != &account.account_id)
+    let account = state
+        .agent_pairings()
+        .controller_account(&record.id)
+        .await
+        .map_err(|error| crate::state::actor_private_refusal(error))?
+        .ok_or_else(|| {
+            failed_precondition(
+                "Agent accepted controller Account binding is missing",
+                "agent_controller_binding_missing",
+            )
+        })?;
+    if account.principal_id != managed_controller_core_id(&record.controller_principal_id)?
+        || account.station_id != state.service_core_id()
     {
         return Err(failed_precondition(
             "Agent controller Account binding does not match",
             "agent_controller_binding_mismatch",
         ));
     }
-    Ok(account.account_id)
+    Ok(account)
 }
 
 fn agent_actor_for_account(
@@ -932,72 +907,116 @@ fn failed_precondition(message: impl Into<String>, reason: &str) -> AppError {
 #[cfg(test)]
 mod tests {
     #[tokio::test]
-    async fn agent_account_binding_rejects_same_principal_at_another_station() {
-        let state = crate::state::AppState::new(
-            crate::config::AppConfig::test_default(),
-            coland_storage_postgres::Db { pool: None },
+    async fn agent_account_binding_uses_the_original_source_and_rejects_another_station() {
+        let fixture = Box::pin(coland_test_support::agent_origin::OriginFixture::new()).await;
+        fixture.stage(&fixture.provision).await;
+        fixture.admit_provision().await;
+        fixture.stage(&fixture.genesis).await;
+        fixture.admit_genesis().await.unwrap();
+        use arkret_identity::service_identity::{
+            DidCoreIdentityKeyRef, DidCoreIdentityState, LocalDidCoreIdentity,
+        };
+        use arkret_models_identity::service_identity::{
+            CanonicalServiceUrl, ServiceRegistrationKey,
+        };
+        let config = crate::config::AppConfig {
+            public_base_url: "https://origin.example/".into(),
+            ..crate::config::AppConfig::test_default()
+        };
+        let key_ref = DidCoreIdentityKeyRef::new("fixture:coland:service-signing-key").unwrap();
+        let identity = DidCoreIdentityState::Ready {
+            identity: LocalDidCoreIdentity {
+                service_id: fixture.station.clone(),
+                did: fixture.station_did.clone(),
+                registration_key: ServiceRegistrationKey::new(
+                    arkret_wire::ServiceKind::Station,
+                    CanonicalServiceUrl::new("https://origin.example/").unwrap(),
+                )
+                .unwrap(),
+                provider: None,
+                signing_key_refs: vec![key_ref.clone()],
+                active_signing_key_ref: key_ref,
+                control_key_ref: DidCoreIdentityKeyRef::new("fixture:coland:webvh-control-key")
+                    .unwrap(),
+                version_id: fixture.inception_log["versionId"].as_str().unwrap().into(),
+                last_verified_at: chrono::Utc::now(),
+            },
+        };
+        let commitment = arkret_models_identity::ResolutionCommitment {
+            did: fixture.station_did.clone(),
+            method_history_head: arkret_canonical::canonical_sha256(&fixture.inception_log)
+                .unwrap(),
+            version_id: fixture.inception_log["versionId"].as_str().unwrap().into(),
+        };
+        let state = crate::state::AppState::new_with_service_identity(
+            config,
+            coland_storage_postgres::Db {
+                pool: Some(fixture.pool.clone()),
+            },
+            std::sync::Arc::new(coland_storage_postgres::PgPersistenceStore::new(
+                fixture.pool.clone(),
+            )),
+            identity,
+            commitment,
+            fixture.issuer.to_bytes(),
         );
-        let local = super::AccountId::new(
-            super::DidCoreId::new(CONTROLLER).unwrap(),
-            state.service_core_id(),
-        );
+        let local = fixture.controller.history.account.clone();
         let foreign = super::AccountId::new(
             local.principal_id.clone(),
             super::DidCoreId::new("ak:did_core:web:other-station.example").unwrap(),
         );
-        for (label, account_id) in [("local", local.clone()), ("foreign", foreign.clone())] {
-            state
-                .identities()
-                .save_account(coland_services::identity::AccountProfileState {
-                    // The store assigns the primary key.
-                    pk: coland_storage::AccountPk(0),
-                    principal_id: account_id.principal_id.clone(),
-                    account_id,
-                    localpart: format!("controller-{label}"),
-                    display_name: None,
-                    biography: None,
-                    avatar_blob_ref: None,
-                    created_at: chrono::Utc::now(),
-                })
-                .await
-                .unwrap();
-        }
-        let local_pk = state
+        state
             .identities()
-            .account(&local)
+            .save_account(coland_services::identity::AccountProfileState {
+                pk: coland_storage::AccountPk(0),
+                principal_id: foreign.principal_id.clone(),
+                account_id: foreign.clone(),
+                localpart: "foreign-controller".into(),
+                display_name: None,
+                biography: None,
+                avatar_blob_ref: None,
+                created_at: chrono::Utc::now(),
+            })
             .await
-            .expect("local account lookup")
-            .expect("local account was just saved")
-            .pk;
+            .unwrap();
         let foreign_pk = state
             .identities()
             .account(&foreign)
             .await
-            .expect("foreign account lookup")
-            .expect("foreign account was just saved")
+            .unwrap()
+            .unwrap()
             .pk;
         let mut record = super::AgentPrincipalRecord::new(
-            AGENT.into(),
-            CONTROLLER.into(),
-            PCR.into(),
-            super::controller_authorization_ref(&super::Did::new(AGENT_DID).unwrap()).unwrap(),
+            fixture.agent.principal_id.to_string(),
+            local.principal_id.to_string(),
+            fixture.genesis.event.realm_id.to_string(),
+            serde_json::from_value(
+                fixture.provision.event.payload["controller_authorization_ref"].clone(),
+            )
+            .unwrap(),
             super::AgentLifecycleState::Active,
             chrono::Utc::now(),
         );
-        // Pre-genesis reservation has no PK yet, but has its exact accepted Account.
-        record.provision_event_refs = Some(serde_json::json!({"controller_authority":local}));
+        let mut unsupported = record.clone();
+        unsupported.id = AGENT.into();
+        unsupported.provision_event_refs = Some(serde_json::json!({"controller_authority":local}));
+        unsupported.controller_account_pk = Some(foreign_pk);
+        assert!(
+            super::agent_controller_account(&state, &unsupported)
+                .await
+                .is_err()
+        );
+        state
+            .agent_pairings()
+            .save_accepted_agent_projection(record.clone())
+            .await
+            .unwrap();
         assert_eq!(
             super::agent_controller_account(&state, &record)
                 .await
                 .unwrap(),
             local
         );
-        record.controller_account_pk = Some(local_pk);
-        state
-            .agent_pairings()
-            .save_agent(record.clone())
-            .await
-            .unwrap();
         let actor = super::agent_actor_for_account(&record, &local).unwrap();
         assert!(
             super::agent_record_for_actor(&state, &actor)
@@ -1006,8 +1025,8 @@ mod tests {
                 .is_some()
         );
         let foreign_actor = super::ActorId::account(arkret_wire::AccountId::new(
-            actor.signing_principal_id().clone(),
-            super::DidCoreId::new("ak:did_core:web:other-station.example").unwrap(),
+            fixture.agent.principal_id.clone(),
+            foreign.station_id.clone(),
         ));
         assert!(
             super::agent_record_for_actor(&state, &foreign_actor)
@@ -1015,23 +1034,35 @@ mod tests {
                 .is_err()
         );
         assert!(
-            super::agent_record_for_controller_account_pcr(&state, &local, PCR)
-                .await
-                .unwrap()
-                .is_some()
+            super::agent_record_for_controller_account_pcr(
+                &state,
+                &local,
+                fixture.genesis.event.realm_id.as_str()
+            )
+            .await
+            .unwrap()
+            .is_some()
         );
         assert!(
-            super::agent_record_for_controller_account_pcr(&state, &foreign, PCR)
-                .await
-                .unwrap()
-                .is_none()
+            super::agent_record_for_controller_account_pcr(
+                &state,
+                &foreign,
+                fixture.genesis.event.realm_id.as_str()
+            )
+            .await
+            .unwrap()
+            .is_none()
         );
+        // Optional local PKs and private saga JSON cannot replace public origin.
         record.controller_account_pk = Some(foreign_pk);
-        assert!(
+        record.provision_event_refs = Some(serde_json::json!({"controller_authority":foreign}));
+        assert_eq!(
             super::agent_controller_account(&state, &record)
                 .await
-                .is_err()
+                .unwrap(),
+            local
         );
+        assert!(state.agent_pairings().save_agent(record).await.is_err());
     }
 
     use serde_json::json;

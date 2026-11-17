@@ -320,6 +320,7 @@ pub(super) async fn commit_rotation_upload_in_connection(
             .await?;
     }
 
+    crate::pcr_private_authority::require_active_account_owner(conn, account).await?;
     let actor = ActorId::account(account.clone());
     crate::key_backup::lock_backup_series_in_connection(conn, &actor).await?;
     let series_id = chain[0].0.series_id.clone();

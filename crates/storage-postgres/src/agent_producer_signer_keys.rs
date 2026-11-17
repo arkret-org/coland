@@ -979,6 +979,9 @@ fn producer_fact_outcome(
             "not_found: private control signer facts are unavailable through public signer queries"
                 .into(),
         )),
+        Fact::OrganizationGenesis(_) => Err(PersistenceError::Conflict(
+            "not_found: Org Genesis source is disclosed only by its authority certificate".into(),
+        )),
         Fact::AgentRuntime(_) => Err(PersistenceError::Conflict(
             "not_found: minimal recovery signer facts are disclosed only with the recovery roster"
                 .into(),
@@ -1100,6 +1103,21 @@ pub(crate) async fn producer_source_for_commit_in_connection(
 ) -> PersistenceResult<
     Option<arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact>,
 > {
+    if event.kind == arkret_wire::EventKind::RealmCreate
+        && matches!(
+            arkret_wire::GenesisGovernance::from_genesis(event),
+            Ok(arkret_wire::GenesisGovernance::Organization)
+        )
+    {
+        let fact = match crate::organization_pcr_genesis::fact_for_commit_in_connection(conn, event, commit).await? {
+            Some(fact) => Some(fact),
+            None if crate::organization_hosting::has_accepted_source_in_connection(conn, &event.realm_id).await? =>
+                crate::organization_hosting::fact_for_commit_in_connection(conn, event, commit).await?,
+            None => None,
+        }.map(arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact::OrganizationGenesis);
+        validate_producer_fact_binding(event, commit, fact.as_ref())?;
+        return Ok(fact);
+    }
     let row = if matches!(
         commit.stream_ref,
         arkret_wire::CommitStreamRef::RealmControl { .. }

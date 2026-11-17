@@ -86,6 +86,35 @@ impl TryFrom<ContactVerifiedMirrorRow> for ContactVerifiedMirrorRecord {
     }
 }
 
+/// Private mirror ownership comes from the verified full Contact peer,
+/// not its principal-only index or an Agent controller routing binding.
+pub(crate) async fn private_mirror_allowed(
+    conn: &mut AsyncPgConnection,
+    mirror: &ContactVerifiedMirrorRecord,
+) -> PersistenceResult<bool> {
+    let actor = mirror.source_receipt.core.peer.contact_actor_id();
+    let account = actor.as_account_id().ok_or_else(|| {
+        PersistenceError::SchemaViolation("Contact mirror peer is not an Account actor".into())
+    })?;
+    if account.principal_id.as_str() != mirror.target_holder_principal_id {
+        return Err(PersistenceError::SchemaViolation(
+            "Contact mirror key differs from its exact source peer".into(),
+        ));
+    }
+    #[derive(QueryableByName)]
+    struct Allowed {
+        #[diesel(sql_type = diesel::sql_types::Bool)]
+        allowed: bool,
+    }
+    let row = sql_query("SELECT lock_account_private_projection($1,$2) AS allowed")
+        .bind::<Text, _>(account.principal_id.as_str())
+        .bind::<Text, _>(account.station_id.as_str())
+        .get_result::<Allowed>(&mut *conn)
+        .await
+        .map_err(crate::persistence_query_error)?;
+    Ok(row.allowed)
+}
+
 const CONTACT_VERIFIED_MIRROR_COLUMNS: &str = "target_holder_principal_id, request_event_id, request_digest, canonical_event_bytes, source_receipt, issuer_id, verified_at";
 
 #[async_trait]
@@ -109,7 +138,12 @@ impl ContactVerifiedMirrorStore for PgContactVerifiedMirrorStore {
     }
 
     async fn put_verified(&self, record: &ContactVerifiedMirrorRecord) -> PersistenceResult<()> {
-        let mut conn = crate::pg_db(&self.pool);
+        use diesel_async::AsyncConnection as _;
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, crate::PgTransactionError, _>(async |conn| {
+        if !private_mirror_allowed(conn, record).await? {
+            return Ok(());
+        }
         let source_receipt = serde_json::to_value(&record.source_receipt).map_err(|error| {
             PersistenceError::SchemaViolation(format!(
                 "Contact request receipt encode failed: {error}"
@@ -131,16 +165,17 @@ impl ContactVerifiedMirrorStore for PgContactVerifiedMirrorStore {
         .bind::<Jsonb, _>(&source_receipt)
         .bind::<Text, _>(&record.issuer_id)
         .bind::<Timestamptz, _>(record.verified_at)
-        .get_result::<ContactVerifiedMirrorRow>(&mut conn)
+        .get_result::<ContactVerifiedMirrorRow>(&mut *conn)
         .await
         .optional()
-        .map_err(PersistenceError::database)?;
+        .map_err(crate::persistence_query_error)?;
         if row.is_none() {
             return Err(PersistenceError::Internal(
                 "cas_conflict: Contact verified mirror binding mismatch".to_owned(),
-            ));
+            ).into());
         }
         Ok(())
+        }).await.map_err(crate::PgTransactionError::into_persistence)
     }
 }
 #[derive(QueryableByName)]
@@ -381,7 +416,7 @@ pub(crate) async fn put_if_updated_at_in_connection(
         .bind::<Timestamptz, _>(expected_updated_at)
         .execute(&mut *conn)
         .await
-        .map_err(PersistenceError::database)?;
+        .map_err(crate::persistence_query_error)?;
     Ok(affected == 1)
 }
 
@@ -533,7 +568,7 @@ impl ContactStore for PgContactStore {
         .execute(&mut conn)
         .await
         .map(|_| ())
-        .map_err(PersistenceError::database)
+        .map_err(crate::persistence_query_error)
     }
 
     async fn put_if_updated_at(
@@ -637,24 +672,56 @@ impl TryFrom<MimiConsentCorrelationRow> for MimiConsentCorrelationRecord {
     }
 }
 
+async fn mimi_correlation_in_connection(
+    conn: &mut AsyncPgConnection,
+    consent_id: &str,
+) -> PersistenceResult<Option<MimiConsentCorrelationRecord>> {
+    sql_query("SELECT consent_id,requester_actor_id,holder_account_id,purpose,strand_id,source_id,source_class,created_at,expires_at FROM mimi_consent_correlations WHERE consent_id=$1")
+        .bind::<Text,_>(consent_id).get_result::<MimiConsentCorrelationRow>(&mut *conn).await.optional()
+        .map_err(PersistenceError::database)?.map(MimiConsentCorrelationRecord::try_from).transpose()
+}
+
+async fn lock_mimi_correlation_owners(
+    conn: &mut AsyncPgConnection,
+    record: &MimiConsentCorrelationRecord,
+) -> PersistenceResult<()> {
+    let holder: arkret_wire::AccountId =
+        serde_json::from_str(&record.holder_account_id).map_err(PersistenceError::database)?;
+    let requester: ActorId =
+        serde_json::from_str(&record.requester_actor_id).map_err(PersistenceError::database)?;
+    let mut owners = std::collections::BTreeMap::new();
+    owners.insert(holder.to_string(), holder);
+    if let Some(account) = requester.as_account_id() {
+        if !owners.contains_key(&account.to_string()) {
+            crate::pcr_private_authority::lock_optional_account_private_tuple(conn, account)
+                .await?;
+        }
+        #[derive(QueryableByName)]
+        struct Present {
+            #[diesel(sql_type=diesel::sql_types::Bool)]
+            present: bool,
+        }
+        let local=sql_query("SELECT EXISTS(SELECT 1 FROM accounts WHERE principal_id=$1 AND station_id=$2) AS present")
+            .bind::<Text,_>(account.principal_id.as_str()).bind::<Text,_>(account.station_id.as_str())
+            .get_result::<Present>(&mut *conn).await.map_err(PersistenceError::database)?;
+        if local.present {
+            owners.insert(account.to_string(), account.clone());
+        }
+    }
+    for owner in owners.values() {
+        crate::pcr_private_authority::require_active_account_owner(conn, owner).await?;
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl MimiConsentCorrelationStore for PgMimiConsentCorrelationStore {
     async fn get(
         &self,
         consent_id: &str,
     ) -> PersistenceResult<Option<MimiConsentCorrelationRecord>> {
-        let mut conn = crate::pg_db(&self.pool);
-        let row = sql_query(
-            "SELECT consent_id, requester_actor_id, holder_account_id, purpose, strand_id, \
-              source_id, source_class, created_at, expires_at \
-             FROM mimi_consent_correlations WHERE consent_id = $1",
-        )
-        .bind::<Text, _>(consent_id)
-        .get_result::<MimiConsentCorrelationRow>(&mut conn)
-        .await
-        .optional()
-        .map_err(PersistenceError::database)?;
-        row.map(MimiConsentCorrelationRecord::try_from).transpose()
+        let mut conn = pg_conn(&self.pool).await?;
+        mimi_correlation_in_connection(&mut conn, consent_id).await
     }
 
     async fn bind_decision(
@@ -671,17 +738,25 @@ impl MimiConsentCorrelationStore for PgMimiConsentCorrelationStore {
             #[diesel(sql_type=Jsonb)]
             submission: Value,
         }
-        let mut conn = crate::pg_db(&self.pool);
+        use diesel_async::AsyncConnection;
+        let mut conn = pg_conn(&self.pool).await?;
         let original = serde_json::to_value(submission).map_err(PersistenceError::database)?;
+        conn.transaction::<_,crate::PgTransactionError,_>(async |conn| {
+        let Some(before)=mimi_correlation_in_connection(conn,consent_id).await? else { return Ok(false); };
+        lock_mimi_correlation_owners(conn,&before).await?;
+        let Some(current)=mimi_correlation_in_connection(conn,consent_id).await? else { return Ok(false); };
+        if current!=before {
+            return Err(PersistenceError::Conflict("duplicate_conflict: MIMI correlation changed its immutable association".into()).into());
+        }
         if allow_new {
             sql_query("INSERT INTO mimi_consent_decision_attempts(consent_id,decision,event_id,submission) VALUES($1,$2,$3,$4) ON CONFLICT(consent_id) DO NOTHING")
-                .bind::<Text,_>(consent_id).bind::<Text,_>(decision).bind::<Text,_>(submission.event.event_id.as_str()).bind::<Jsonb,_>(&original).execute(&mut conn).await.map_err(PersistenceError::database)?;
+                .bind::<Text,_>(consent_id).bind::<Text,_>(decision).bind::<Text,_>(submission.event.event_id.as_str()).bind::<Jsonb,_>(&original).execute(&mut *conn).await.map_err(PersistenceError::database)?;
         }
         let old = sql_query(
             "SELECT decision,submission FROM mimi_consent_decision_attempts WHERE consent_id=$1",
         )
         .bind::<Text, _>(consent_id)
-        .get_result::<Attempt>(&mut conn)
+        .get_result::<Attempt>(&mut *conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?;
@@ -690,32 +765,64 @@ impl MimiConsentCorrelationStore for PgMimiConsentCorrelationStore {
             Some(old) if old.decision == decision && old.submission == original => Ok(true),
             Some(_) => Err(PersistenceError::Conflict(
                 "duplicate_conflict: correlation already binds another decision Event".into(),
-            )),
+            ).into()),
         }
+        }).await.map_err(crate::PgTransactionError::into_persistence)
     }
 
     async fn put(&self, record: &MimiConsentCorrelationRecord) -> PersistenceResult<()> {
-        let mut conn = crate::pg_db(&self.pool);
-        sql_query(
-            "INSERT INTO mimi_consent_correlations \
+        // Equality uses the same timestamp precision PostgreSQL persists.
+        let pg_time = |at: chrono::DateTime<chrono::Utc>| {
+            chrono::DateTime::from_timestamp_micros(at.timestamp_micros()).ok_or_else(|| {
+                PersistenceError::SchemaViolation(
+                    "MIMI correlation timestamp is outside storage precision".into(),
+                )
+            })
+        };
+        let mut record = record.clone();
+        record.created_at = pg_time(record.created_at)?;
+        record.expires_at = record.expires_at.map(pg_time).transpose()?;
+        use diesel_async::AsyncConnection;
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, crate::PgTransactionError, _>(async |conn| {
+            lock_mimi_correlation_owners(conn, &record).await?;
+            sql_query(
+                "INSERT INTO mimi_consent_correlations \
              (consent_id, requester_actor_id, holder_account_id, purpose, strand_id, \
               source_id, source_class, created_at, expires_at) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
              ON CONFLICT (consent_id) DO NOTHING",
-        )
-        .bind::<Text, _>(&record.consent_id)
-        .bind::<Text, _>(&record.requester_actor_id)
-        .bind::<Text, _>(&record.holder_account_id)
-        .bind::<Text, _>(&record.purpose)
-        .bind::<Nullable<Text>, _>(record.strand_id.as_deref())
-        .bind::<Nullable<Text>, _>(record.source_id.as_deref())
-        .bind::<Text, _>(record.source_class.as_str())
-        .bind::<Timestamptz, _>(record.created_at)
-        .bind::<Nullable<Timestamptz>, _>(record.expires_at)
-        .execute(&mut conn)
+            )
+            .bind::<Text, _>(&record.consent_id)
+            .bind::<Text, _>(&record.requester_actor_id)
+            .bind::<Text, _>(&record.holder_account_id)
+            .bind::<Text, _>(&record.purpose)
+            .bind::<Nullable<Text>, _>(record.strand_id.as_deref())
+            .bind::<Nullable<Text>, _>(record.source_id.as_deref())
+            .bind::<Text, _>(record.source_class.as_str())
+            .bind::<Timestamptz, _>(record.created_at)
+            .bind::<Nullable<Timestamptz>, _>(record.expires_at)
+            .execute(&mut *conn)
+            .await
+            .map_err(PersistenceError::database)?;
+            let original = mimi_correlation_in_connection(conn, &record.consent_id)
+                .await?
+                .ok_or_else(|| {
+                    PersistenceError::Internal(
+                        "MIMI correlation disappeared after insertion".into(),
+                    )
+                })?;
+            if original != record {
+                return Err(PersistenceError::Conflict(
+                    "duplicate_conflict: MIMI correlation names a different immutable association"
+                        .into(),
+                )
+                .into());
+            }
+            Ok(())
+        })
         .await
-        .map(|_| ())
-        .map_err(PersistenceError::database)
+        .map_err(crate::PgTransactionError::into_persistence)
     }
 }
 // ── Pg-backed invite-receive policy store ────────────────────────────────
@@ -882,3 +989,7 @@ struct ContactIndexedMaterial {
     #[diesel(sql_type=Jsonb)]
     material: Value,
 }
+
+#[cfg(test)]
+#[path = "contacts/mimi_erasure_tests.rs"]
+mod mimi_erasure_tests;

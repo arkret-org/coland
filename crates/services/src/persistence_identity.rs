@@ -117,14 +117,6 @@ impl crate::identity::AccountLookupPort for PersistenceAccountLookup {
         Ok(())
     }
 
-    async fn delete_account(
-        &self,
-        account_id: &arkret_wire::AccountId,
-    ) -> crate::ServiceResult<()> {
-        self.0.accounts().delete(account_id).await?;
-        Ok(())
-    }
-
     async fn account_localparts(
         &self,
         account_pk: AccountPk,
@@ -760,12 +752,39 @@ impl crate::identity::AgentPairingPort for PersistenceAgentPairing {
             .await?)
     }
 
+    async fn controller_account(
+        &self,
+        agent_id: &str,
+    ) -> crate::ServiceResult<Option<arkret_wire::AccountId>> {
+        Ok(self.0.agents().controller_account(agent_id).await?)
+    }
+
     async fn save_agent(
         &self,
         agent: crate::identity::AgentPairingState,
     ) -> crate::ServiceResult<()> {
         self.0.agents().put(agent).await?;
         Ok(())
+    }
+
+    async fn save_accepted_agent_projection(
+        &self,
+        agent: crate::identity::AgentPairingState,
+    ) -> crate::ServiceResult<()> {
+        self.0.agents().put_accepted_projection(agent).await?;
+        Ok(())
+    }
+
+    async fn commit_agent_pairing_preparation(
+        &self,
+        agent: crate::identity::AgentPairingState,
+        primary: &coland_storage::IdempotencyRecord,
+    ) -> crate::ServiceResult<coland_storage::IdempotencyRecord> {
+        Ok(self
+            .0
+            .agents()
+            .put_pairing_preparation(agent, primary)
+            .await?)
     }
 
     async fn store_runtime_approval(
@@ -835,6 +854,7 @@ impl crate::identity::AgentPairingPort for PersistenceAgentPairing {
             authorize_event_id: command.authorize_event_id.clone(),
             key_authorization_event: command.key_authorization_event.clone(),
             scope_custody_ref: command.scope_custody_ref.clone(),
+            prepared_scope_custody: command.prepared_scope_custody.clone(),
         };
         Ok(self
             .0
@@ -1211,45 +1231,29 @@ impl crate::identity::SessionIdentityPort for PersistenceSessions {
         Ok(Some(application_session_identity(session)?))
     }
 
-    async fn revoke_actor_sessions(
+    async fn revoke_account_sessions(
         &self,
-        actor_id: &str,
+        account_id: &arkret_wire::AccountId,
         revoked_at: chrono::DateTime<chrono::Utc>,
     ) -> crate::ServiceResult<usize> {
-        self.revoke_matching_sessions(actor_id, None, revoked_at)
-            .await
+        Ok(self
+            .0
+            .sessions()
+            .revoke_account(account_id, None, revoked_at)
+            .await?)
     }
 
-    async fn revoke_actor_device_sessions(
+    async fn revoke_account_device_sessions(
         &self,
-        actor_id: &str,
+        account_id: &arkret_wire::AccountId,
         device_id: &str,
         revoked_at: chrono::DateTime<chrono::Utc>,
     ) -> crate::ServiceResult<usize> {
-        self.revoke_matching_sessions(actor_id, Some(device_id), revoked_at)
-            .await
-    }
-}
-
-impl PersistenceSessions {
-    async fn revoke_matching_sessions(
-        &self,
-        actor_id: &str,
-        device_id: Option<&str>,
-        revoked_at: chrono::DateTime<chrono::Utc>,
-    ) -> crate::ServiceResult<usize> {
-        let sessions = self.0.sessions().snapshot_all().await?;
-        let mut count = 0;
-        for mut session in sessions.into_iter().filter(|session| {
-            session.actor == actor_id
-                && session.revoked_at.is_none()
-                && device_id.is_none_or(|device_id| session.device_id == device_id)
-        }) {
-            session.revoked_at = Some(revoked_at);
-            self.0.sessions().put(&session).await?;
-            count += 1;
-        }
-        Ok(count)
+        Ok(self
+            .0
+            .sessions()
+            .revoke_account(account_id, Some(device_id), revoked_at)
+            .await?)
     }
 }
 

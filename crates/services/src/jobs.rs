@@ -2,10 +2,9 @@ use std::sync::Arc;
 
 use arkret_identifiers::DidCoreId;
 use arkret_wire::ActorId;
-
-pub const INTERNAL_IDEMPOTENCY_OPERATION: &str = "coland://internal/idempotency";
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+pub use coland_storage::INTERNAL_IDEMPOTENCY_OPERATION;
 
 use crate::ServiceResult;
 

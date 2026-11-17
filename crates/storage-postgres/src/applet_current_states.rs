@@ -251,19 +251,31 @@ async fn retain_service_source(
     Ok(())
 }
 
-/// Preserve generic registration provenance. Only a genuinely exact active
-/// instance observed under the original accepting transaction receives Some(I).
-/// None is never accepted by the finite terminal-source consumer.
+/// Preserve generic registration provenance and return its actual installation
+/// source. The caller applies any registered first-admission scope requirement;
+/// unrelated generic grants may retain registration-only provenance.
 pub(crate) async fn retain_service_grant_source(
     conn: &mut AsyncPgConnection,
     realm: &arkret_wire::RealmId,
     grant: &arkret_models_collaboration::governance::grant_constraint::CapabilityGrant,
-) -> PersistenceResult<()> {
+) -> PersistenceResult<Option<String>> {
+    let installation = current_service_grant_installation(conn, realm, grant).await?;
+    retain_service_source(conn, realm, grant, installation.as_deref()).await?;
+    Ok(installation)
+}
+
+/// Read the exact active installation under the accepting transaction's
+/// existing Realm, registration, shared identity and installation locks.
+async fn current_service_grant_installation(
+    conn: &mut AsyncPgConnection,
+    realm: &arkret_wire::RealmId,
+    grant: &arkret_models_collaboration::governance::grant_constraint::CapabilityGrant,
+) -> PersistenceResult<Option<String>> {
     let Some((service, applet, epoch)) = service_parent_binding(grant)? else {
-        return Ok(());
+        return Ok(None);
     };
     let Some(scope) = exact_installation_scope(realm, grant) else {
-        return retain_service_source(conn, realm, grant, None).await;
+        return Ok(None);
     };
     #[derive(diesel::QueryableByName)]
     struct Row {
@@ -274,7 +286,7 @@ pub(crate) async fn retain_service_grant_source(
     let exists=sql_query("SELECT EXISTS(SELECT 1 FROM applet_installations WHERE applet_id=$1 AND effective_scope_key=$2 AND service_id=$3) AS present")
         .bind::<Text,_>(applet.as_str()).bind::<Text,_>(key).bind::<Text,_>(service.as_str()).get_result::<Row>(&mut *conn).await.map_err(PersistenceError::database)?;
     if !exists.present {
-        return retain_service_source(conn, realm, grant, None).await;
+        return Ok(None);
     }
     let (identity, installation) =
         lock_existing_installation(conn, applet, service, &scope).await?;
@@ -291,7 +303,7 @@ pub(crate) async fn retain_service_grant_source(
             .and_then(serde_json::Value::as_str)
             != Some(epoch.as_str())
     {
-        return retain_service_source(conn, realm, grant, None).await;
+        return Ok(None);
     }
     #[derive(diesel::QueryableByName)]
     struct CurrentInstance {
@@ -307,12 +319,12 @@ pub(crate) async fn retain_service_grant_source(
     let current=sql_query("SELECT EXISTS(SELECT 1 FROM applet_registration_current_states r JOIN applet_registration_instances a ON a.realm_id=r.realm_id AND a.applet_id=r.applet_id AND a.instance_event_ref=r.instance_event_ref WHERE r.realm_id=$1 AND r.applet_id=$2 AND r.service_id=$3 AND a.registration_event_ref=$4) AS matches")
         .bind::<Text,_>(realm.as_str()).bind::<Text,_>(applet.as_str()).bind::<Text,_>(service.as_str()).bind::<Text,_>(anchor).get_result::<CurrentInstance>(&mut *conn).await.map_err(PersistenceError::database)?;
     if !current.matches {
-        return retain_service_source(conn, realm, grant, None).await;
+        return Ok(None);
     }
     let id = installation["install_id"].as_str().ok_or_else(|| {
         PersistenceError::SchemaViolation("Applet installation ID is absent".into())
     })?;
-    retain_service_source(conn, realm, grant, Some(id)).await
+    Ok(Some(id.to_owned()))
 }
 
 /// This nonnullable ID belongs to the same verified installation transaction.

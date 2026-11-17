@@ -791,6 +791,38 @@ struct SourceEventRow {
     event_id: String,
 }
 
+/// A private receipt can be erased under its controller Account UPDATE.
+/// Take its exact storage-owner SHARE before any Realm/Agent/private row.
+/// This binds no new caller or Agent authority; all original gates follow.
+async fn lock_scope_evidence_owner(
+    conn: &mut AsyncPgConnection,
+    input: &coland_storage::AccountContentDeliveryInput,
+) -> PersistenceResult<()> {
+    if let (Some(endpoint), Some(evidence)) =
+        (&input.agent_endpoint, &input.qualified_agent_scope_evidence)
+    {
+        if evidence.command().requested_scope_disclosure.agent_id != endpoint.agent_id {
+            return Err(unavailable(
+                "Agent private scope belongs to another endpoint",
+            ));
+        }
+        if !crate::pcr_private_authority::is_active_human_account(
+            conn,
+            &evidence.accepted_binding().controller_account,
+        )
+        .await?
+        {
+            // The requesting Agent is not the controller Account whose state
+            // closed this private evidence. Keep that refusal opaque.
+            return Err(PersistenceError::Conflict(format!(
+                "{}: qualified private scope is unavailable",
+                coland_storage::ConflictCode::CapabilityDenied
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) async fn provision_scope_in_connection(
     conn: &mut AsyncPgConnection,
     endpoint: &coland_storage::AgentEndpointGuard,
@@ -931,6 +963,7 @@ pub(crate) async fn provision_scope_in_connection(
         || receipt.authorize_event_ref != evidence.accepted_authorization_ref().event_id.as_str()
         || receipt.request_digest != evidence.request_digest()
         || receipt.scope_custody_ref.as_ref() != Some(evidence.custody_ref())
+        || receipt.encrypted_scope_custody.is_none()
         || receipt.pairing_request_id != command.pairing_request_id
         || receipt.approval_request_id != command.approval_request_id
         || receipt.runtime_key_binding_digest != evidence.runtime_key_binding_digest()
@@ -1303,6 +1336,7 @@ async fn acquire_realm_actor_material(
         .execute(held.connection())
         .await
         .map_err(PersistenceError::database)?;
+    lock_scope_evidence_owner(held.connection(), input).await?;
     crate::realm_authorization_cut::lock_realm_authorization_cut(
         held.connection(),
         &authority.realm_id,
@@ -1587,6 +1621,7 @@ async fn acquire_remote_watch_delivery(
         .execute(held.connection())
         .await
         .map_err(PersistenceError::database)?;
+    lock_scope_evidence_owner(held.connection(), input).await?;
     #[derive(QueryableByName)]
     struct ObservedAuthority {
         #[diesel(sql_type=BigInt)]
@@ -3187,6 +3222,7 @@ async fn acquire_with_native_reply(
         .execute(guard.connection())
         .await
         .map_err(PersistenceError::database)?;
+    lock_scope_evidence_owner(guard.connection(), &input).await?;
     let mut realms = std::collections::BTreeSet::new();
     let candidates = input
         .realms

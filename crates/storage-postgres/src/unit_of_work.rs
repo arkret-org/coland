@@ -1452,7 +1452,7 @@ pub(crate) async fn commit_contact_projection(
         .bind::<Timestamptz, _>(expected_updated_at)
         .execute(&mut *conn)
         .await
-        .map_err(PersistenceError::database)?
+        .map_err(crate::persistence_query_error)?
     } else {
         sql_query(
             "INSERT INTO contacts \
@@ -1484,12 +1484,14 @@ pub(crate) async fn commit_contact_projection(
         .bind::<Timestamptz, _>(record.updated_at)
         .execute(&mut *conn)
         .await
-        .map_err(PersistenceError::database)?
+        .map_err(crate::persistence_query_error)?
     };
     if affected != 1 {
         return Err(conflict(conflict_code));
     }
-    if let Some(mirror) = verified_mirror {
+    if let Some(mirror) = verified_mirror
+        && crate::contacts::private_mirror_allowed(conn, &mirror).await?
+    {
         let source_receipt = serde_json::to_value(&mirror.source_receipt).map_err(|error| {
             PersistenceError::SchemaViolation(format!(
                 "Contact request receipt encode failed: {error}"
@@ -1517,7 +1519,7 @@ pub(crate) async fn commit_contact_projection(
         .get_result::<ContactMirrorCommitRow>(&mut *conn)
         .await
         .optional()
-        .map_err(PersistenceError::database)?;
+        .map_err(crate::persistence_query_error)?;
         if committed
             .as_ref()
             .is_none_or(|row| row.target_holder_principal_id != mirror.target_holder_principal_id)
@@ -2710,7 +2712,7 @@ fn commit_prepared_event<'a>(
 {
     Box::pin(commit_prepared_event_inner(
         conn,
-        request,
+        Box::new(request),
         realm_organization_proof,
         event_approvals,
         outcome,
@@ -2722,13 +2724,24 @@ fn commit_prepared_event<'a>(
     ))
 }
 
+struct PreparedEventSources<'a> {
+    realm_organization_proof: Option<&'a coland_storage::RealmOrganizationProofCommit>,
+    event_approvals: Option<&'a coland_storage::EventApprovalCommit>,
+    prepared_human:
+        Option<arkret_models_collaboration::authority_commit::AccountDeviceHistoricalSignerFact>,
+    prepared_service:
+        Option<arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact>,
+    service_approvals: Vec<crate::approval_admission::QualifiedApproval>,
+    audit_unit: Option<&'a coland_storage::RegisteredAuditCommit>,
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "Atomic Event commit retains distinct typed optional proofs and mutable outcome."
 )]
 async fn commit_prepared_event_inner(
     conn: &mut AsyncPgConnection,
-    request: EventCommitRequest,
+    mut request: Box<EventCommitRequest>,
     realm_organization_proof: Option<&coland_storage::RealmOrganizationProofCommit>,
     event_approvals: Option<&coland_storage::EventApprovalCommit>,
     outcome: &mut EventCommitOutcome,
@@ -2742,6 +2755,43 @@ async fn commit_prepared_event_inner(
     audit_unit: Option<&coland_storage::RegisteredAuditCommit>,
     fresh_claim_deadlines: &mut Vec<chrono::DateTime<chrono::Utc>>,
 ) -> Result<(), PgTransactionError> {
+    // Keep the request and its publication custody alive through both phases.
+    // Each phase uses the caller's unchanged transaction and held native cuts.
+    let sources = Box::new(PreparedEventSources {
+        realm_organization_proof,
+        event_approvals,
+        prepared_human,
+        prepared_service,
+        service_approvals,
+        audit_unit,
+    });
+    let authority_write =
+        crate::boxed_future(|| commit_prepared_event_authority(conn, &request, outcome, &sources))
+            .await?;
+    crate::boxed_future(|| {
+        commit_prepared_event_effects(
+            conn,
+            &mut request,
+            outcome,
+            &sources,
+            authority_write,
+            fresh_claim_deadlines,
+        )
+    })
+    .await
+}
+
+async fn commit_prepared_event_authority(
+    conn: &mut AsyncPgConnection,
+    request: &EventCommitRequest,
+    outcome: &mut EventCommitOutcome,
+    sources: &PreparedEventSources<'_>,
+) -> Result<AuthorityCommitWriteOutcome, PgTransactionError> {
+    let event_approvals = sources.event_approvals;
+    let audit_unit = sources.audit_unit;
+    let prepared_human = &sources.prepared_human;
+    let prepared_service = &sources.prepared_service;
+    let service_approvals = &sources.service_approvals;
     let event = &request.authority_commit.event;
 
     crate::realm_actor_control::admit_creation(conn, event, &request.authority_commit.commit)
@@ -3051,7 +3101,7 @@ async fn commit_prepared_event_inner(
                 conn,
                 event,
                 commit,
-                &service_approvals,
+                service_approvals,
                 &service_basis,
             )
         })
@@ -3134,14 +3184,33 @@ async fn commit_prepared_event_inner(
             )
             .await?;
         }
+    }
+    Ok(authority_write)
+}
 
-        Box::pin(commit_event_current_states_in_connection(
-            conn,
-            &request,
-            realm_organization_proof,
-            event_approvals,
-            audit_unit,
-        ))
+async fn commit_prepared_event_effects(
+    conn: &mut AsyncPgConnection,
+    request: &mut EventCommitRequest,
+    outcome: &mut EventCommitOutcome,
+    sources: &PreparedEventSources<'_>,
+    authority_write: AuthorityCommitWriteOutcome,
+    fresh_claim_deadlines: &mut Vec<chrono::DateTime<chrono::Utc>>,
+) -> Result<(), PgTransactionError> {
+    let event = &request.authority_commit.event;
+    let commit = &request.authority_commit.commit;
+    let realm_organization_proof = sources.realm_organization_proof;
+    let event_approvals = sources.event_approvals;
+    let audit_unit = sources.audit_unit;
+    if matches!(authority_write, AuthorityCommitWriteOutcome::Committed) {
+        crate::boxed_future(|| {
+            commit_event_current_states_in_connection(
+                conn,
+                &request,
+                realm_organization_proof,
+                event_approvals,
+                audit_unit,
+            )
+        })
         .await?;
 
         if !matches!(event.scope_ref, arkret_wire::ScopeRef::RealmControl { .. })
@@ -3150,21 +3219,24 @@ async fn commit_prepared_event_inner(
                 Some(coland_storage::RegisteredAuditCommit::Pair { .. })
             )
         {
-            outcome.outbox_inserted += crate::realm_fanout::plan_realm_fanout_in_connection(
-                conn,
-                event,
-                commit,
-                &request.authority_commit.expected_authority.service_id,
-                request.realm_fanout_source.as_ref(),
-                &request
-                    .authority_commit
-                    .welcomes
-                    .iter()
-                    .filter(|welcome| welcome.claim.is_none())
-                    .map(|welcome| &welcome.delivery)
-                    .collect::<Vec<_>>(),
-                commit.committed_at.timestamp(),
-            )
+            let fanout_welcomes = request
+                .authority_commit
+                .welcomes
+                .iter()
+                .filter(|welcome| welcome.claim.is_none())
+                .map(|welcome| &welcome.delivery)
+                .collect::<Vec<_>>();
+            outcome.outbox_inserted += crate::boxed_future(|| {
+                crate::realm_fanout::plan_realm_fanout_in_connection(
+                    conn,
+                    event,
+                    commit,
+                    &request.authority_commit.expected_authority.service_id,
+                    request.realm_fanout_source.as_ref(),
+                    &fanout_welcomes,
+                    commit.committed_at.timestamp(),
+                )
+            })
             .await?;
         }
     }
@@ -3181,7 +3253,7 @@ async fn commit_prepared_event_inner(
     }
     // An exact replay of the accepting Commit found the Contact effect
     // already installed by the first transaction.
-    if let Some(commit) = request.contact_projection
+    if let Some(commit) = request.contact_projection.take()
         && matches!(authority_write, AuthorityCommitWriteOutcome::Committed)
     {
         Box::pin(commit_contact_projection(
@@ -3196,7 +3268,7 @@ async fn commit_prepared_event_inner(
     // exact replay finds every projection row already present.
     if !request.projections.is_empty() {
         outcome.projections_inserted +=
-            append_projection_batch_in_connection(conn, request.projections)
+            append_projection_batch_in_connection(conn, std::mem::take(&mut request.projections))
                 .await?
                 .into_iter()
                 .filter(|appended| {
@@ -3369,13 +3441,13 @@ async fn commit_scope_current_states_inner(
     )
     .await?;
 
-    Box::pin(crate::call_state_current_states::commit_in_connection(
+    crate::call_state_current_states::commit_in_connection(
         conn,
         event,
         commit,
         prepared,
         request.verified_media_participant.as_ref(),
-    ))
+    )
     .await?;
 
     Box::pin(crate::circle_current_states::commit_in_connection(
@@ -3457,13 +3529,7 @@ async fn commit_object_current_states_inner(
 ) -> Result<(), PgTransactionError> {
     let event = &request.authority_commit.event;
     let commit = &request.authority_commit.commit;
-    Box::pin(crate::realm_actor_governance::commit(
-        conn,
-        event,
-        commit,
-        event_approvals,
-    ))
-    .await?;
+    crate::realm_actor_governance::commit(conn, event, commit, event_approvals).await?;
     Box::pin(commit_parent_membership_current_states(conn, event, commit)).await?;
     Box::pin(commit_schema_definition_in_connection(
         conn,
@@ -3479,12 +3545,10 @@ async fn commit_object_current_states_inner(
         ),
     )
     .await?;
-    Box::pin(
-        crate::mls_group_current_states::commit_mls_group_current_state_in_connection(
-            conn,
-            &request.authority_commit,
-            event_approvals,
-        ),
+    crate::mls_group_current_states::commit_mls_group_current_state_in_connection(
+        conn,
+        &request.authority_commit,
+        event_approvals,
     )
     .await?;
     Box::pin(
@@ -3621,31 +3685,25 @@ async fn commit_content_current_states_inner(
         conn, event, commit,
     ))
     .await?;
-    Box::pin(
-        crate::message_revision_current_states::commit_message_create_current_state_in_connection(
-            conn,
-            event,
-            commit,
-            event_approvals,
-        ),
+    crate::message_revision_current_states::commit_message_create_current_state_in_connection(
+        conn,
+        event,
+        commit,
+        event_approvals,
     )
     .await?;
-    Box::pin(
-        crate::message_revision_current_states::commit_message_revise_current_state_in_connection(
-            conn,
-            event,
-            commit,
-            event_approvals,
-        ),
+    crate::message_revision_current_states::commit_message_revise_current_state_in_connection(
+        conn,
+        event,
+        commit,
+        event_approvals,
     )
     .await?;
-    Box::pin(
-        crate::object_redaction_current_states::commit_message_redact_current_state_in_connection(
-            conn,
-            event,
-            commit,
-            event_approvals,
-        ),
+    crate::object_redaction_current_states::commit_message_redact_current_state_in_connection(
+        conn,
+        event,
+        commit,
+        event_approvals,
     )
     .await?;
     Box::pin(

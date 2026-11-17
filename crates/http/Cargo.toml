@@ -86,10 +86,10 @@ tracing.workspace = true
 url = "2.5"
 uuid = { workspace = true, features = ["v4", "v7", "serde"] }
 zeroize = { workspace = true, features = ["derive"] }
+chacha20poly1305.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
-chacha20poly1305.workspace = true
 arkret-bridge-runtime = { version = "0.3.0", path = "../../../bridges/crates/runtime", default-features = false, features = ["edge", "managed-authoring"] }
 garth = { version = "0.3.0", path = "../../../garth", default-features = false }
 rand_chacha = "0.10.0"

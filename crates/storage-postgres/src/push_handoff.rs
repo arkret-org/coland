@@ -241,21 +241,7 @@ pub(crate) async fn ensure_active_account_in_transaction(
     conn: &mut AsyncPgConnection,
     account_id: &AccountId,
 ) -> PersistenceResult<()> {
-    let account = sql_query(
-        "SELECT 'active' AS state FROM accounts a \
-         WHERE a.principal_id = $1 AND a.station_id = $2 FOR SHARE OF a",
-    )
-    .bind::<Text, _>(&account_id.principal_id)
-    .bind::<Text, _>(&account_id.station_id)
-    .get_result::<AccountLifecycleStateRow>(conn)
-    .await
-    .optional()
-    .map_err(PersistenceError::database)?;
-    if account.is_none() {
-        return Err(PersistenceError::Conflict(
-            "cas_conflict: public push handoff requires an active account".to_owned(),
-        ));
-    }
+    crate::pcr_private_authority::require_active_account_owner(conn, account_id).await?;
     // This separate statement must run after the account row lock is acquired,
     // so READ COMMITTED observes a lifecycle update that just released it.
     let lifecycle = sql_query(
@@ -1010,6 +996,11 @@ impl PushRegistrationHandoffStore for PgPushRegistrationHandoffStore {
         let session_revocation_ref = session_revocation_ref.map(str::to_owned);
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+            if candidate.desired_state
+                == arkret_models_integration::PushRegistrationHandoffState::Active
+            {
+                ensure_active_account_in_transaction(conn, &candidate.local_route.account_id).await?;
+            }
             crate::device_revocations::lock_artifact_devices_in_transaction(
                 conn,
                 &[&candidate.device_authorization],
@@ -1022,12 +1013,6 @@ impl PushRegistrationHandoffStore for PgPushRegistrationHandoffStore {
             .await?;
             if let Some(revocation_ref) = &session_revocation_ref {
                 ensure_logout_family_not_fenced(conn, revocation_ref).await?;
-            }
-            if candidate.desired_state
-                == arkret_models_integration::PushRegistrationHandoffState::Active
-            {
-                ensure_active_account_in_transaction(conn, &candidate.local_route.account_id)
-                    .await?;
             }
             sql_query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
                 .bind::<Text, _>(&account_lock_key)
@@ -1696,8 +1681,9 @@ impl PushRegistrationHandoffStore for PgPushRegistrationHandoffStore {
         let route_lock_key = local_route_lock_key(&source_station_id, &local_route)?;
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
-            // Lock order: live device gate, account/device, handoff route,
-            // handoff intent, then the local push-device route.
+            // Account owner precedes every Device or private-route lock.
+            // The remaining order is Device gate, account/device, route, intent.
+            ensure_active_account_in_transaction(conn, &registration.account_id).await?;
             crate::device_revocations::lock_artifact_devices_in_transaction(
                 conn,
                 &[&authorization],
@@ -1707,7 +1693,6 @@ impl PushRegistrationHandoffStore for PgPushRegistrationHandoffStore {
             if let Some(revocation_ref) = &session_revocation_ref {
                 ensure_logout_family_not_fenced(conn, revocation_ref).await?;
             }
-            ensure_active_account_in_transaction(conn, &registration.account_id).await?;
             sql_query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
                 .bind::<Text, _>(&account_lock_key)
                 .execute(conn)

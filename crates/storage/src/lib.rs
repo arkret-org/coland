@@ -37,6 +37,8 @@ mod account_status;
 mod accounts;
 mod actor_private_events;
 mod actor_profiles;
+mod organization_pcr_genesis;
+pub use organization_pcr_genesis::OrganizationPcrGenesisAdmissionWrite;
 mod agents;
 mod applet_widget_tokens;
 mod applets;

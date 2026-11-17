@@ -1905,6 +1905,21 @@ pub(crate) async fn commit_verified_agent_pcr_genesis_in_connection(
     .await
 }
 
+/// Only the Organization native one-create unit calls this after the
+/// authenticated hosting, native controller/quorum and original producer gates.
+pub(crate) async fn commit_verified_organization_pcr_genesis_in_connection(
+    conn: &mut AsyncPgConnection,
+    transaction: &AuthorityCommitTransaction,
+) -> Result<AuthorityCommitWriteOutcome, PgTransactionError> {
+    commit_transaction_in_connection_with_device_guard(
+        conn,
+        transaction,
+        VerifiedPcrUnit::OrganizationPcrGenesis,
+        None,
+    )
+    .await
+}
+
 /// Only the Actor Profile and accountability grant units may call this after
 /// rechecking the signing device and the kind's same-cut admission under the
 /// PCR authority lock; the same transaction then writes the typed result.
@@ -1942,6 +1957,7 @@ enum VerifiedPcrUnit {
     ContentHistoryGrant,
     AgentProvision,
     AgentPcrGenesis,
+    OrganizationPcrGenesis,
     AgentControl,
     Consent,
     IdentityResolution,
@@ -2169,6 +2185,16 @@ async fn commit_transaction_with_device_guard_inner(
         && verified_unit != VerifiedPcrUnit::Applet
     {
         return Err(PersistenceError::Conflict("applet_authoring_unit_required".to_owned()).into());
+    }
+    if matches!(
+        arkret_wire::GenesisGovernance::from_genesis(&transaction.event),
+        Ok(arkret_wire::GenesisGovernance::Organization)
+    ) && verified_unit != VerifiedPcrUnit::OrganizationPcrGenesis
+    {
+        return Err(PersistenceError::Conflict(
+            "failed_precondition: Organization PCR native unit required".into(),
+        )
+        .into());
     }
     // An Agent PCR genesis is admitted only by the unit that reverse-looks-up
     // its accepted provision declaration (key-management.md section 3.6.3).
@@ -3093,6 +3119,25 @@ pub(crate) async fn accepted_realm_roster_in_connection(
 
 #[async_trait]
 impl AuthorityCommitStore for PgAuthorityCommitStore {
+    async fn require_accepted_organization_hosting_account(
+        &self,
+        account: &arkret_wire::AccountId,
+        hosting: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<arkret_wire::RealmId> {
+        PgAuthorityCommitStore::require_accepted_organization_hosting_account(
+            self, account, hosting,
+        )
+        .await
+    }
+
+    async fn prepare_organization_hosting_device(
+        &self,
+        original: &arkret_wire::EventAdmissionSubmission,
+        hosting: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<Option<coland_storage::PreparedAccountDeviceForwardSource>> {
+        PgAuthorityCommitStore::prepare_organization_hosting_device(self, original, hosting).await
+    }
+
     async fn check_call_media_release(
         &self,
         request: &arkret_models_collaboration::objects::media::CallMediaTokenExchangeRequestBody,
@@ -6752,6 +6797,36 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
                 .execute(&mut *conn)
                 .await?;
             Ok(handoff_originals_in_connection(conn, realm_id).await?)
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
+
+    async fn organization_pcr_governance_change_original(
+        &self,
+        request:&arkret_models_collaboration::authority_commit::PeerAuthorityForwardEventRequestBody,
+        source: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<Option<arkret_wire::AuthoritySubmitResponseBody>> {
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async |conn| {
+            Ok(
+                crate::organization_pcr_governance_change::exact_original_in_connection(
+                    conn, request, source,
+                )
+                .await?,
+            )
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
+
+    async fn admit_organization_pcr_governance_change(
+        &self,
+        write: &coland_storage::OrganizationPcrGovernanceChangeAdmissionWrite,
+    ) -> PersistenceResult<arkret_wire::AuthoritySubmitResponseBody> {
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async |conn| {
+            crate::organization_pcr_governance_change::admit_in_connection(conn, write).await
         })
         .await
         .map_err(PgTransactionError::into_persistence)

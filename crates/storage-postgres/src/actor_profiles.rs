@@ -999,6 +999,36 @@ impl coland_storage::ActorProfileStore for PgActorProfileStore {
         .map_err(PgTransactionError::into_persistence)
     }
 
+    async fn organization_pcr_genesis_original(
+        &self,
+        request: &arkret_models_collaboration::authority_commit::PeerAuthorityForwardEventRequestBody,
+        source: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<Option<arkret_wire::AuthoritySubmitResponseBody>> {
+        let mut conn = pg_conn(&self.pool)
+            .await
+            .map_err(PersistenceError::database)?;
+        crate::organization_pcr_genesis::exact_original_in_connection(&mut conn, request, source)
+            .await
+    }
+
+    async fn admit_organization_pcr_genesis(
+        &self,
+        write: coland_storage::OrganizationPcrGenesisAdmissionWrite,
+    ) -> PersistenceResult<arkret_wire::AuthoritySubmitResponseBody> {
+        write
+            .transaction
+            .validate()
+            .map_err(|e| PersistenceError::SchemaViolation(e.to_string()))?;
+        let mut conn = pg_conn(&self.pool)
+            .await
+            .map_err(PersistenceError::database)?;
+        conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+            crate::organization_pcr_genesis::admit_in_connection(conn, &write).await
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
+
     async fn admit_agent_pcr_genesis(
         &self,
         write: coland_storage::AgentPcrGenesisAdmissionWrite,

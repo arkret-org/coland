@@ -538,15 +538,6 @@ diesel::table! {
 }
 
 diesel::table! {
-    device_message_lost_watermarks (recipient, device_id) {
-        recipient -> Text,
-        device_id -> Text,
-        lost_through -> Int8,
-        updated_at -> Timestamptz,
-    }
-}
-
-diesel::table! {
     device_message_txns (key) {
         key -> Text,
         request_digest -> Text,
@@ -1206,8 +1197,8 @@ diesel::table! {
     security_transaction_step_outcomes (transaction_id, step) {
         transaction_id -> Uuid,
         step -> Text,
-        canonical_request -> Binary,
-        response -> Jsonb,
+        canonical_request -> Nullable<Binary>,
+        response -> Nullable<Jsonb>,
         participant_outcome -> Nullable<Jsonb>,
     }
 }
@@ -1219,16 +1210,17 @@ diesel::table! {
         principal_id -> Text,
         station_id -> Text,
         authorizing_device_id -> Nullable<Text>,
-        expires_at -> Timestamptz,
+        expires_at -> Nullable<Timestamptz>,
         created_at -> Timestamptz,
-        request_digest -> Text,
-        prepared_plan -> Jsonb,
-        prepared_plan_digest -> Text,
-        accepted_steps -> Jsonb,
+        request_digest -> Nullable<Text>,
+        prepared_plan -> Nullable<Jsonb>,
+        prepared_plan_digest -> Nullable<Text>,
+        accepted_steps -> Nullable<Jsonb>,
         revoke_proposal -> Nullable<Jsonb>,
         revoke_command_outcome -> Nullable<Jsonb>,
         terminal_outcome -> Nullable<Jsonb>,
-        canonical_request -> Binary,
+        recovery_completion -> Nullable<Jsonb>,
+        canonical_request -> Nullable<Binary>,
     }
 }
 
@@ -1454,7 +1446,6 @@ diesel::allow_tables_to_appear_in_same_query!(
     contact_verified_mirrors,
     device_message_ack_tokens,
     device_message_idempotency,
-    device_message_lost_watermarks,
     device_message_txns,
     device_messages,
     device_revocation_cleanup_intents,

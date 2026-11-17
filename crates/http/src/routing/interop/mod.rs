@@ -8,6 +8,7 @@ mod push_handoff;
 pub(crate) mod webrtc;
 
 pub(crate) use blob::MAX_BLOB_UPLOAD_BYTES;
+pub(crate) use blob_resumable::erase_account_parts as erase_resumable_account_parts;
 pub use blob_resumable::spawn_resumable_upload_ttl_sweeper;
 pub use push_handoff::spawn_public_push_revoke_retry_worker;
 pub(crate) use push_handoff::{

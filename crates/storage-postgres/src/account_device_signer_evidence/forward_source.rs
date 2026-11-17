@@ -159,7 +159,7 @@ impl PreparedForwardDeviceSource {
 }
 
 /// Existing Human callers retain exactly the same signed-core contract.
-pub(super) async fn prepare_in_connection(
+pub(crate) async fn prepare_in_connection(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     destination: &arkret_wire::DidCoreId,

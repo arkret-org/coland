@@ -373,7 +373,7 @@ pub(crate) async fn admit_agent_pcr_genesis_in_connection(
         &resolution,
     )
     .await?;
-    crate::accounts::create_agent_holder_account_in_connection(conn, &agent, commit.committed_at)
+    crate::accounts::create_native_holder_account_in_connection(conn, &agent, commit.committed_at)
         .await?;
     crate::agent_producer_signer_keys::retain_self_outcome_in_connection(
         conn, event, commit, historical,

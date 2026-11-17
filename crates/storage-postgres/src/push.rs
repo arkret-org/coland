@@ -168,6 +168,11 @@ impl PushDeviceStore for PgPushDeviceStore {
             .await
             .map_err(PersistenceError::database)?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+            crate::pcr_private_authority::require_active_account_owner(
+                conn,
+                &registration.account_id,
+            )
+            .await?;
             crate::ensure_gate_allowed_in_transaction(conn, authorization).await?;
             let at = chrono::Utc::now();
             write_push_device_route_in_transaction(
@@ -204,33 +209,6 @@ impl PushDeviceStore for PgPushDeviceStore {
                 .bind::<Jsonb,_>(&account_value).bind::<Text,_>(device_id).bind::<Nullable<Text>,_>(push_key).bind::<Nullable<Text>,_>(app_id)
                 .execute(&mut *conn).await.map_err(PgTransactionError::from)
         }).await.map_err(PgTransactionError::into_persistence)
-    }
-
-    async fn purge_principal_device(
-        &self,
-        actor: &str,
-        device_id: &str,
-    ) -> PersistenceResult<usize> {
-        use diesel_async::AsyncConnection;
-        let lock_key = format!("push:{actor}:{device_id}");
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
-        conn.transaction::<_, PgTransactionError, _>(async move |conn| {
-            sql_query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-                .bind::<Text, _>(&lock_key)
-                .execute(&mut *conn)
-                .await
-                .map_err(PersistenceError::database)?;
-            sql_query("DELETE FROM push_devices WHERE public_handoff=FALSE AND actor_id = $1 AND device_id = $2")
-                .bind::<Text, _>(actor)
-                .bind::<Text, _>(device_id)
-                .execute(&mut *conn)
-                .await
-                .map_err(PgTransactionError::from)
-        })
-        .await
-        .map_err(PgTransactionError::into_persistence)
     }
 
     async fn snapshot_all(&self) -> PersistenceResult<Vec<Value>> {

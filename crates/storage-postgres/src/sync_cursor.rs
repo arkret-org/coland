@@ -605,6 +605,13 @@ pub(crate) async fn upsert_in_connection(
     record: &SyncCursorRecord,
     inputs: &[SyncCursorRecord],
 ) -> Result<(), crate::PgTransactionError> {
+    // A stored cursor is a private page snapshot. A predecessor or session
+    // cache cannot authorize a new snapshot after the Account barrier.
+    if let Some(subject) = record.binding_subject.as_deref()
+        && let Ok(account) = serde_json::from_str::<arkret_wire::AccountId>(subject)
+    {
+        crate::pcr_private_authority::require_active_account_owner(conn, &account).await?;
+    }
     let floors = retention::cursor_floors(record)?;
     if let Some((summary, global)) = floors {
         retention::check(conn, Some(summary), Some(global)).await?;

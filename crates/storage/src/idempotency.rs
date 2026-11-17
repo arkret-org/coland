@@ -1,3 +1,5 @@
+pub const INTERNAL_IDEMPOTENCY_OPERATION: &str = "coland://internal/idempotency";
+
 use super::{PersistenceResult, Utc, Value, async_trait};
 /// A persisted generic `Idempotency-Key` mapping (api-conventions.md §6).
 ///
@@ -36,6 +38,14 @@ pub trait IdempotencyStore: Send + Sync {
     /// concurrent first-writer race keeps the earliest landed row, so a later
     /// racer reads it back as a `Replay` instead of clobbering it.
     async fn record(&self, record: &IdempotencyRecord) -> PersistenceResult<()>;
+    /// Admit one private preparation and its optional corresponding context
+    /// row atomically. An existing same-hash primary returns its original
+    /// response without adding the racer's newly generated handle/context.
+    async fn record_preparation(
+        &self,
+        primary: &IdempotencyRecord,
+        context: Option<&IdempotencyRecord>,
+    ) -> PersistenceResult<IdempotencyRecord>;
     /// Commit a first response and its exact resource lookup together. Return
     /// the landed response under a race; either digest conflict rolls back both.
     async fn record_with_lookup(

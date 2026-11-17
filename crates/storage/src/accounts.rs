@@ -7,11 +7,13 @@ use super::{
 /// Trait for account storage operations.
 #[async_trait]
 pub trait AccountStore: Send + Sync {
+    /// Reuse the native full-Account private-write gate. A storage writer
+    /// holds its actual external resource separately through real IO/drain.
+    async fn require_private_owner(&self, account_id: &AccountId) -> PersistenceResult<()>;
     async fn get(&self, account_id: &AccountId) -> PersistenceResult<Option<AccountRecord>>;
     async fn get_by_pk(&self, account_pk: AccountPk) -> PersistenceResult<Option<AccountRecord>>;
     async fn put(&self, record: &AccountRecord) -> PersistenceResult<AccountPk>;
     async fn list(&self) -> PersistenceResult<Vec<AccountRecord>>;
-    async fn delete(&self, account_id: &AccountId) -> PersistenceResult<()>;
 }
 #[async_trait]
 pub trait AccountLocalpartStore: Send + Sync {

@@ -1787,14 +1787,14 @@ pub trait InviteLocatorPort: Send + Sync {
     ) -> ServiceResult<Option<InviteLocatorState>>;
     async fn rotate(
         &self,
-        subject_id: &str,
+        account_id: &arkret_wire::AccountId,
         old_locator_id: &str,
         mutation: &InviteLocatorRotateCommand,
         now: DateTime<Utc>,
     ) -> ServiceResult<Option<InviteLocatorState>>;
     async fn revoke(
         &self,
-        subject_id: &str,
+        account_id: &arkret_wire::AccountId,
         locator_id: &str,
         now: DateTime<Utc>,
     ) -> ServiceResult<Option<InviteLocatorState>>;
@@ -1831,23 +1831,23 @@ impl InviteLocatorService {
 
     pub async fn rotate_locator(
         &self,
-        subject_id: &str,
+        account_id: &arkret_wire::AccountId,
         old_locator_id: &str,
         mutation: &InviteLocatorRotateCommand,
         now: DateTime<Utc>,
     ) -> ServiceResult<Option<InviteLocatorState>> {
         self.locators
-            .rotate(subject_id, old_locator_id, mutation, now)
+            .rotate(account_id, old_locator_id, mutation, now)
             .await
     }
 
     pub async fn revoke_locator(
         &self,
-        subject_id: &str,
+        account_id: &arkret_wire::AccountId,
         locator_id: &str,
         now: DateTime<Utc>,
     ) -> ServiceResult<Option<InviteLocatorState>> {
-        self.locators.revoke(subject_id, locator_id, now).await
+        self.locators.revoke(account_id, locator_id, now).await
     }
 }
 

@@ -72,6 +72,19 @@ pub(crate) async fn current_in_connection(
         projection: serde_json::from_value(row.value).map_err(corrupt)?,
     };
     coland_storage::validate_principal_resolution_record(&record)?;
+    if matches!(
+        arkret_wire::GenesisGovernance::from_genesis(&record.genesis_event),
+        Ok(arkret_wire::GenesisGovernance::Organization)
+    ) {
+        if !crate::organization_hosting::has_accepted_source_in_connection(
+            conn,
+            &record.pcr_realm_id,
+        )
+        .await?
+        {
+            crate::pcr_private_authority::accepted_governance(conn, &record.pcr_realm_id).await?;
+        }
+    }
     if record.current_event.event_id != commit.event_ref || commit.realm_id != record.pcr_realm_id {
         return Err(corrupt(
             "resolution current differs from its covering Commit",

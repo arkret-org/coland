@@ -553,7 +553,7 @@ async fn send_device_messages(
             items: batch_items,
         })
         .await
-        .map_err(|error| AppError::internal(error.to_string()))?;
+        .map_err(crate::state::actor_private_refusal)?;
     let message_outcomes = match batch_outcome {
         DeviceMessageBatchCommitOutcome::Stored(outcomes) => {
             if prepared_targets
@@ -954,16 +954,9 @@ async fn get_device_messages(
         None => TO_DEVICE_DEFAULT_PAGE_LIMIT,
     };
     let selector = recipient_queue_selector(&session)?;
-    let lost_watermark = if matches!(&selector, RecipientQueueSelector::HumanDevice { .. }) {
-        state
-            .deliveries()
-            .device_message_lost_watermark(&session.actor, session.require_human_device_id())
-            .await
-            .map_err(|error| AppError::internal(error.to_string()))?
-    } else {
-        None
-    };
-    let lost = lost_watermark.is_some_and(|position| position > cursor_position);
+    // Retention keeps both queue branches until explicit cumulative ACK.
+    // There is no durable historical-loss producer in this implementation.
+    let lost = false;
     let queued = state
         .deliveries()
         .recipient_deliveries_after(&selector, cursor_position, page_limit + 1)
@@ -977,10 +970,7 @@ async fn get_device_messages(
         .map(|message| message.position)
         .max()
         .unwrap_or(cursor_position);
-    let mut to_device_position = delivered_position;
-    if lost && let Some(lost_watermark) = lost_watermark {
-        to_device_position = to_device_position.max(lost_watermark);
-    }
+    let to_device_position = delivered_position;
     // Current permission and future-material authority precede every private
     // ACK/cursor allocation, including continuation reads. Keep this same cut
     // through the original guarded response handoff.

@@ -1393,6 +1393,9 @@ pub(crate) async fn pending_signals_for_subscriber(
     else {
         return delivered;
     };
+    let Some(account_id) = actor.as_account_id() else {
+        return delivered;
+    };
     let actor_key = actor.to_string();
     let Ok(member_realms) = state
         .authority_commits()
@@ -1437,15 +1440,18 @@ pub(crate) async fn pending_signals_for_subscriber(
             delivered.push(record.envelope);
         }
         if highest > watermark {
-            let _ = state
+            if let Err(error) = state
                 .deliveries()
                 .advance_signal_watermark(
-                    &actor_key,
+                    account_id,
                     session.require_human_device_id(),
                     &realm_id,
                     highest,
                 )
-                .await;
+                .await
+            {
+                tracing::warn!(%error,"Signal subscriber watermark is unavailable");
+            }
         }
     }
     delivered

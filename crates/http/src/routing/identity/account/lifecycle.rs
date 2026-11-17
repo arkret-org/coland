@@ -101,7 +101,7 @@ pub(crate) async fn set_account_lifecycle_state(
         };
         persist_account_lifecycle_record(state, account.pk, principal_id_value, &record).await?;
         if next_state == "deactivated" {
-            let fanout = run_account_deactivation_fanout(state, principal_id_value).await?;
+            let fanout = run_account_deactivation_fanout(state, &account.account_id).await?;
             sessions_revoked = fanout.sessions_revoked;
             devices_revoked = fanout.devices_revoked;
             keypackages_retired = fanout.keypackages_retired;
@@ -109,10 +109,10 @@ pub(crate) async fn set_account_lifecycle_state(
             to_device_messages_dropped = fanout.to_device_messages_dropped;
             identity_link_cache_invalidated = fanout.identity_link_cache_invalidated;
         } else if next_state == "locked" {
-            sessions_revoked = revoke_sessions_for_actor(state, principal_id_value)
+            sessions_revoked = revoke_sessions_for_account(state, &account.account_id)
                 .await
                 .map_err(AppError::internal)?;
-            devices_revoked = revoke_devices_for_actor(state, principal_id_value)
+            devices_revoked = revoke_devices_for_account(state, &account.account_id)
                 .await
                 .map_err(AppError::internal)?;
         }
@@ -166,6 +166,7 @@ fn parse_account_lifecycle_target_state(next_state: &str) -> Result<AccountStatu
 
 #[derive(Default)]
 struct AccountDeactivationFanout {
+    push_routes_complete: bool,
     sessions_revoked: usize,
     devices_revoked: usize,
     keypackages_retired: usize,
@@ -176,27 +177,23 @@ struct AccountDeactivationFanout {
 
 async fn run_account_deactivation_fanout(
     state: &AppState,
-    principal_id: &str,
+    account_id: &arkret_wire::AccountId,
 ) -> Result<AccountDeactivationFanout, AppError> {
-    let sessions_revoked = revoke_sessions_for_actor(state, principal_id)
+    let principal_id = account_id.principal_id.as_str();
+    let sessions_revoked = revoke_sessions_for_account(state, account_id)
         .await
         .map_err(AppError::internal)?;
-    let devices_revoked = revoke_devices_for_actor(state, principal_id)
+    let devices_revoked = revoke_devices_for_account(state, account_id)
         .await
         .map_err(AppError::internal)?;
-    let account_id = arkret_wire::AccountId::new(
-        arkret_wire::DidCoreId::new(principal_id.to_owned())
-            .map_err(|error| AppError::internal(error.to_string()))?,
-        state.service_core_id().clone(),
-    );
     state
         .persistence()
-        .begin_public_push_account_deactivation(&account_id, now())
+        .begin_public_push_account_deactivation(account_id, now())
         .await
         .map_err(|error| AppError::internal(error.to_string()))?;
     let (to_device_messages_dropped, push_routes_revoked) =
-        purge_delivery_state_for_actor(state, principal_id).await?;
-    let keypackages_retired = retire_owner_account_keypackages(state, account_id).await?;
+        purge_delivery_state_for_account(state, account_id).await?;
+    let keypackages_retired = retire_owner_account_keypackages(state, account_id.clone()).await?;
     let identity_link_cache_invalidated = state
         .invalidate_cached_handle_claims_for_subject(principal_id)
         .await;
@@ -206,8 +203,10 @@ async fn run_account_deactivation_fanout(
     // registered internal channel and report a processing result. A gateway
     // failure raises `deactivation_partial` (retried by the reconciliation
     // worker) instead of failing the deactivation.
-    crate::deactivation_push_fanout::ensure_fanout(state, principal_id).await;
+    let push_routes_complete =
+        crate::deactivation_push_fanout::ensure_fanout(state, account_id).await;
     Ok(AccountDeactivationFanout {
+        push_routes_complete,
         sessions_revoked,
         devices_revoked,
         keypackages_retired,
@@ -217,10 +216,11 @@ async fn run_account_deactivation_fanout(
     })
 }
 
-async fn purge_delivery_state_for_actor(
+async fn purge_delivery_state_for_account(
     state: &AppState,
-    principal_id: &str,
+    account_id: &arkret_wire::AccountId,
 ) -> Result<(usize, usize), AppError> {
+    let principal_id = account_id.principal_id.as_str();
     let devices = state
         .identities()
         .devices_for_actor(principal_id)
@@ -229,7 +229,7 @@ async fn purge_delivery_state_for_actor(
     let mut to_device_messages_dropped = 0usize;
     let mut push_routes_revoked = 0usize;
     for device in devices {
-        let purge = purge_device_delivery_state(state, principal_id, &device.device_id).await;
+        let purge = purge_device_delivery_state(state, account_id, &device.device_id).await?;
         to_device_messages_dropped += purge.to_device_messages_dropped;
         push_routes_revoked += purge.push_registrations_removed;
     }
@@ -486,90 +486,30 @@ fn deterministic_erasure_receipt_id(
     )
 }
 
-/// Execute the physical side effects authorized by one already accepted
-/// `erasure_pending` account-status record. The caller owns durable leasing and
-/// exact replay; this function is intentionally transport-free and returns the
-/// exact package to persist before receipt fanout.
-pub(crate) async fn execute_account_status_erasure(
+/// Drain the original retryable external prerequisites before the same-PG
+/// Account-private evidence purge and first signed completion.
+pub(crate) async fn prepare_account_status_erasure(
+    state: &AppState,
+    account_id: &arkret_wire::AccountId,
+) -> Result<(), AppError> {
+    let fanout = run_account_deactivation_fanout(state, account_id).await?;
+    if !fanout.push_routes_complete {
+        return Err(crate::app_error!(
+            TemporarilyUnavailable,
+            "Account erasure is waiting for verified Gateway revoke receipts"
+        ));
+    }
+    crate::routing::interop::erase_resumable_account_parts(state, account_id).await?;
+    Ok(())
+}
+
+pub(crate) fn account_status_erasure_package(
     state: &AppState,
     account_id: &arkret_wire::AccountId,
     triggering_status_record_id: &arkret_wire::AccountStatusRecordId,
+    completed_at: chrono::DateTime<chrono::Utc>,
 ) -> Result<ErasureReceiptPackage, AppError> {
     let actor = account_id.principal_id.as_str();
-    let mut account = state
-        .identities()
-        .account(account_id)
-        .await
-        .map_err(|error| AppError::internal(error.to_string()))?
-        .ok_or_else(|| AppError::not_found("erasure account not found"))?;
-    if account.account_id != *account_id {
-        return Err(AppError::conflict("erasure account identity mismatch"));
-    }
-    let account_pk = account.pk;
-    let previous_localpart = account.localpart.clone();
-    account.display_name = Some("[user erased]".to_owned());
-    account.biography = None;
-    account.avatar_blob_ref = None;
-    account.localpart = String::new();
-    state
-        .identities()
-        .save_account(account)
-        .await
-        .map_err(|error| AppError::internal(error.to_string()))?;
-    state
-        .identities()
-        .clear_localparts(account_pk)
-        .await
-        .map_err(|error| AppError::internal(error.to_string()))?;
-    if !previous_localpart.is_empty() {
-        record_handle_release(state, &previous_localpart)
-            .await
-            .map_err(|error| AppError::internal(error.to_string()))?;
-    }
-    // Fence new active handoffs before the fanout. The fanout is retryable
-    // after a crash, but a registration admitted during it could otherwise
-    // escape its terminal tombstone scan.
-    let changed_at = now();
-    persist_account_lifecycle_record(
-        state,
-        account_pk,
-        actor,
-        &AccountLifecycleState {
-            state: "erasure_pending".to_owned(),
-            reason: Some("account_status_erasure".to_owned()),
-            changed_by: None,
-            changed_at,
-        },
-    )
-    .await?;
-    let fanout = run_account_deactivation_fanout(state, actor).await?;
-    // `consent-model.md` section 6.1.1.4 -- erasure MUST drop the holder's
-    // whole seen-source ledger. Consent revoke and source list edits must not,
-    // which is why this lives here and not in those paths.
-    state
-        .persistence()
-        .invite_new_source_ledger_store()
-        .delete_for_holder(account_id)
-        .await
-        .map_err(|error| AppError::internal(error.to_string()))?;
-    let memberships_removed = remove_realm_memberships_for_actor(state, actor);
-    append_audit_log(
-        state,
-        Some(actor),
-        "org.arkret.coland.audit.erasure_executed",
-        json!({
-            "account_id": account_id,
-            "actor": actor,
-            "triggering_status_record_id": triggering_status_record_id,
-            "memberships_removed": memberships_removed,
-            "sessions_revoked": fanout.sessions_revoked,
-            "devices_revoked": fanout.devices_revoked,
-        }),
-        "accepted",
-    )
-    .await;
-    append_audit_redaction_marker(state, actor).await;
-    let completed_at = now();
     let package = build_erasure_receipt_package(
         state,
         deterministic_erasure_receipt_id(
@@ -660,52 +600,6 @@ async fn enqueue_erasure_receipt_to_targets(
         .map_err(|error| AppError::internal(error.to_string()))?;
     }
     Ok(())
-}
-
-/// Remove the erased actor from every in-memory Realm membership set.
-/// Returns the count of realms touched so the audit row + response body
-/// can report it. Durable Realm membership lives in the projection
-/// rewrite worker; this is the v1 "memory ledger" cascade. Spec: A.3
-/// + identity/account-lifecycle.md.
-fn remove_realm_memberships_for_actor(state: &AppState, actor: &str) -> usize {
-    let actor_id = match arkret_identifiers::DidCoreId::new(actor.to_owned()) {
-        Ok(actor_id) => actor_id,
-        Err(_) => return 0,
-    };
-    state.realm_directory().remove_member_from_all(&actor_id)
-}
-
-/// Append a single audit row that marks every prior entry for `actor` as
-/// `redacted` while preserving timestamps + audit_ids. Spec: A.3.
-async fn append_audit_redaction_marker(state: &AppState, actor: &str) {
-    let prior = state
-        .governance()
-        .audit_entries_for_actor(actor)
-        .await
-        .unwrap_or_default();
-    let entries: Vec<Value> = prior
-        .iter()
-        .map(|entry| {
-            json!({
-                "audit_id": entry.get("audit_id").cloned().unwrap_or(Value::Null),
-                "created_at": entry.get("created_at").cloned().unwrap_or(Value::Null),
-                "action": entry.get("action").cloned().unwrap_or(Value::Null),
-                "redacted": true,
-            })
-        })
-        .collect();
-    append_audit_log(
-        state,
-        Some(actor),
-        "org.arkret.coland.audit.actor_audit_redacted",
-        json!({
-            "actor": actor,
-            "redacted_entry_count": entries.len(),
-            "entries": entries,
-        }),
-        "accepted",
-    )
-    .await;
 }
 
 fn build_erasure_receipt_package(

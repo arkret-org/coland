@@ -28,9 +28,9 @@ pub trait DeviceInventoryStore: Send + Sync {
         device_id: &str,
     ) -> PersistenceResult<Option<DeviceInventoryRecord>>;
     async fn put_metadata(&self, record: &DeviceInventoryMetadata) -> PersistenceResult<()>;
-    async fn revoke_actor(
+    async fn revoke_account(
         &self,
-        actor: &str,
+        account: &arkret_wire::AccountId,
         revoked_at: chrono::DateTime<Utc>,
     ) -> PersistenceResult<usize>;
     /// Insert a placeholder only when the actor/device row does not exist.
@@ -148,13 +148,6 @@ pub trait DeviceMessageStore: Send + Sync {
         selector: &RecipientQueueSelector,
         acknowledgement_token: &str,
     ) -> PersistenceResult<Option<usize>>;
-    /// Historical verified loss watermark, if any. Current v1 writers retain
-    /// unacknowledged deliveries until explicit ACK.
-    async fn lost_watermark(
-        &self,
-        recipient: &str,
-        device_id: &str,
-    ) -> PersistenceResult<Option<i64>>;
 }
 /// Long-term device key bundles (one per `(actor, device_id)`).
 #[async_trait]

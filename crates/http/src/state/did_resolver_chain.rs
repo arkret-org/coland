@@ -255,7 +255,7 @@ impl ColandDidResolver {
             .map(|(history, _)| history)
     }
 
-    async fn fetch_retained_webvh_history(
+    pub(crate) async fn fetch_retained_webvh_history(
         &self,
         did: &Did,
     ) -> Result<(arkret_identity::VerifiedDidWebvhLog, Vec<Value>), String> {

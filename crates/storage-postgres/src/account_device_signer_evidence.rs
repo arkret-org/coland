@@ -207,6 +207,9 @@ impl AccountDeviceSignerEvidenceStore for PgAccountDeviceSignerEvidenceArchive {
         let body = serde_json::to_value(evidence).map_err(PersistenceError::database)?;
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_,PgTransactionError,_>(async |conn| {
+            // The SDK-verified origin Account owns this first-forward private
+            // copy. Fence it before the PCR, candidate Event or evidence row.
+            crate::pcr_private_authority::require_active_account_owner(conn,&core.account_id).await?;
             crate::managed_forward_source::lock_source(conn,event).await?;
             for final_check in [false,true] {
                 let current=forward_source::prepare_in_connection(conn,event,&source.destination_service_id,&digest,core.attested_at).await?;

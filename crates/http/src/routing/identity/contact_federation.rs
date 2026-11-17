@@ -1087,20 +1087,31 @@ fn sync_contact_summary(record: &mut ContactRecord) {
         }
     }
 }
+/// Keep the old (requester Actor, wire key) namespace injectively while
+/// placing this peer-service continuation under its actual authenticated role.
+fn contact_control_identity(
+    requester: &ContactPeer,
+    wire_key: &str,
+) -> Result<(ActorId, String), AppError> {
+    let key = canonical::canonical_json_string(&(requester.contact_actor_id(), wire_key))
+        .map_err(contact_error)?;
+    Ok((
+        ActorId::service(requester.delivery_station_id().clone()),
+        key,
+    ))
+}
+
 async fn read_exact_control(
     state: &AppState,
     request: &PeerContactSubmitRequestBody,
     requester: &ContactPeer,
 ) -> Result<Option<PeerContactSubmitResponseBody>, AppError> {
-    let (key, _) = peer_contact_delivery_address(request);
+    let (wire_key, _) = peer_contact_delivery_address(request);
+    let (source_actor, key) = contact_control_identity(requester, wire_key)?;
     let digest = contact_control_request_digest(request)?;
     let record = state
         .jobs()
-        .scoped_idempotency_record(
-            &requester.contact_actor_id(),
-            CONTACT_CONTROL_OPERATION,
-            key,
-        )
+        .scoped_idempotency_record(&source_actor, CONTACT_CONTROL_OPERATION, &key)
         .await
         .map_err(|e| AppError::internal(e.to_string()))?;
     record
@@ -1120,10 +1131,12 @@ fn frozen_control_record(
     requester: &ContactPeer,
     outcome: &PeerContactSubmitResponseBody,
 ) -> Result<coland_storage::IdempotencyRecord, AppError> {
+    let (wire_key, _) = peer_contact_delivery_address(request);
+    let (source_actor, key) = contact_control_identity(requester, wire_key)?;
     Ok(coland_storage::IdempotencyRecord {
-        authenticated_actor: requester.contact_actor_id(),
+        authenticated_actor: source_actor,
         operation_id: CONTACT_CONTROL_OPERATION.into(),
-        idempotency_key: peer_contact_delivery_address(request).0.into(),
+        idempotency_key: key,
         request_hash: contact_control_request_digest(request)?.to_string(),
         response_status: 200,
         response_body: serde_json::to_value(outcome).map_err(contact_error)?,
@@ -3306,3 +3319,6 @@ async fn persist_authenticated_observation(
     }
     Ok(())
 }
+
+#[cfg(test)]
+pub(crate) mod pg_contracts;

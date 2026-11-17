@@ -107,7 +107,7 @@ pub(crate) async fn observe(
     }
     let mut conn = pg_conn(&store.pool).await?;
     conn.transaction::<_,PgTransactionError,_>(async |conn| {
-        crate::pcr_private_authority::require_transferable(conn,&request.realm_id).await?;
+        crate::organization_hosting::require_private_projection_source(conn,&request.realm_id).await?;
         let lock=format!("consent-private-host-cut:{}:{}",request.holder_account_id.principal_id,request.holder_account_id.station_id);
         sql_query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))").bind::<Text,_>(lock).execute(&mut *conn).await?;
         crate::pcr_private_authority::require_active_human_account(conn,&request.holder_account_id).await?;

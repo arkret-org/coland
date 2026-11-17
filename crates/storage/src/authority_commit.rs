@@ -1822,6 +1822,28 @@ pub struct NativeMessageReplyPreparation<'a> {
 
 #[async_trait]
 pub trait AuthorityCommitStore: Send + Sync {
+    /// Local H owner lookup for an already accepted immutable Org source.
+    async fn require_accepted_organization_hosting_account(
+        &self,
+        _account: &arkret_wire::AccountId,
+        _hosting: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<arkret_wire::RealmId> {
+        Err(PersistenceError::Conflict(
+            "unsupported_feature: Organization hosting source is unavailable".to_owned(),
+        ))
+    }
+
+    /// Existing H-local current Device preparation, before real peer evidence.
+    async fn prepare_organization_hosting_device(
+        &self,
+        _original: &arkret_wire::EventAdmissionSubmission,
+        _hosting: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<Option<crate::PreparedAccountDeviceForwardSource>> {
+        Err(PersistenceError::Conflict(
+            "unsupported_feature: Organization hosting Device source is unavailable".to_owned(),
+        ))
+    }
+
     async fn call_current_cut(
         &self,
         _realm: &arkret_wire::RealmId,
@@ -3661,6 +3683,25 @@ pub trait AuthorityCommitStore: Send + Sync {
         issuer: &arkret_wire::DidCoreId,
     ) -> PersistenceResult<MediaServiceAnchorRead>;
 
+    /// Exact accepted finite Org original. Transport/source authentication is
+    /// independently completed before entering this private store port.
+    async fn organization_pcr_governance_change_original(
+        &self,
+        _request: &arkret_models_collaboration::authority_commit::PeerAuthorityForwardEventRequestBody,
+        _source: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<Option<arkret_wire::AuthoritySubmitResponseBody>> {
+        Ok(None)
+    }
+
+    async fn admit_organization_pcr_governance_change(
+        &self,
+        _write: &OrganizationPcrGovernanceChangeAdmissionWrite,
+    ) -> PersistenceResult<arkret_wire::AuthoritySubmitResponseBody> {
+        Err(PersistenceError::Conflict(
+            "temporarily_unavailable: finite Organization native change is unavailable".into(),
+        ))
+    }
+
     /// Native PCR planned change: original device/root verification and freeze
     /// preparation belong to one authority transaction, without ordinary facts.
     async fn admit_pcr_governance_change(
@@ -3830,4 +3871,16 @@ mod mls_installation_tests {
         missing_state.public_state.clear();
         assert!(validate_mls_installation(&event, &missing_state).is_err());
     }
+}
+
+/// Process-local inputs, not a new wire protocol carrier or accepted marker.
+#[derive(Clone, Debug)]
+pub struct OrganizationPcrGovernanceChangeAdmissionWrite {
+    pub transaction: AuthorityCommitTransaction,
+    pub request:
+        arkret_models_collaboration::authority_commit::PeerAuthorityForwardEventRequestBody,
+    pub source_service_id: arkret_wire::DidCoreId,
+    pub organization_log_entries: Vec<serde_json::Value>,
+    pub organization_witness_records: Vec<serde_json::Value>,
+    pub producer_service_resolution: Option<arkret_models_identity::AuthenticatedServiceResolution>,
 }

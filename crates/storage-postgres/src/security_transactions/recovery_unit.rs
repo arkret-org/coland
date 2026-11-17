@@ -17,8 +17,19 @@ pub(super) async fn commit_recovery_unit_in_connection(
     conn: &mut AsyncPgConnection,
     write: RecoveryUnitCommitWrite,
 ) -> Result<SecurityTransactionRecord, PgTransactionError> {
+    crate::pcr_private_authority::require_active_account_owner(
+        conn,
+        write.transaction.resource.account_id(),
+    )
+    .await?;
     let transaction_id = write.transaction.resource.transaction_id().to_string();
     lock_transaction_identity(conn, &transaction_id).await?;
+    super::require_transaction_owner(
+        conn,
+        &transaction_id,
+        write.transaction.resource.account_id(),
+    )
+    .await?;
     if let Some(existing) = load_one(conn, &transaction_id, true).await? {
         super::super::classify_security_transaction_first_write(
             Some(&existing.canonical_request),

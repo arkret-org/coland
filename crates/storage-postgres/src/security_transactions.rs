@@ -40,7 +40,11 @@ impl PgSecurityTransactionStore {
         record: &SecurityTransactionRecord,
     ) -> PersistenceResult<()> {
         let mut conn = pg_conn(&self.pool).await?;
-        insert_one(&mut conn, record).await
+        conn.transaction::<_, PgTransactionError, _>(async |conn| {
+            Ok(insert_one(conn, record).await?)
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
     }
 }
 
@@ -263,6 +267,30 @@ async fn lock_transaction_identity(
     Ok(())
 }
 
+async fn require_transaction_owner(
+    conn: &mut AsyncPgConnection,
+    transaction_id: &str,
+    expected: &arkret_wire::AccountId,
+) -> PersistenceResult<()> {
+    let transaction_uuid = ids::parse_typed_uuid(transaction_id, "transaction")
+        .ok_or_else(|| PersistenceError::SchemaViolation("malformed transaction_id".into()))?;
+    let row = sql_query("SELECT jsonb_build_object('principal_id',principal_id,'station_id',station_id) AS payload FROM security_transactions WHERE id=$1")
+        .bind::<sql_types::Uuid,_>(transaction_uuid)
+        .get_result::<crate::JsonPayloadRow>(&mut *conn).await.optional()
+        .map_err(PersistenceError::database)?;
+    if let Some(row) = row {
+        let actual: arkret_wire::AccountId =
+            serde_json::from_value(row.payload).map_err(PersistenceError::database)?;
+        if &actual != expected {
+            return Err(PersistenceError::Conflict(
+                "duplicate_conflict: security transaction identity belongs to another Account"
+                    .into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) async fn load_one(
     conn: &mut AsyncPgConnection,
     transaction_id: &str,
@@ -275,16 +303,37 @@ pub(crate) async fn load_one(
                 "malformed transaction_id `{transaction_id}`"
             ))
         })?;
-    sql_query(format!(
-        "SELECT {COLUMNS} FROM security_transactions WHERE id = $1{lock}"
+    let owner = if for_update {
+        let owner = sql_query("SELECT jsonb_build_object('principal_id',principal_id,'station_id',station_id) AS payload FROM security_transactions WHERE id=$1")
+            .bind::<sql_types::Uuid,_>(transaction_uuid).get_result::<crate::JsonPayloadRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+        let Some(owner) = owner else {
+            return Ok(None);
+        };
+        let account: arkret_wire::AccountId =
+            serde_json::from_value(owner.payload).map_err(PersistenceError::database)?;
+        crate::pcr_private_authority::require_active_account_owner(conn, &account).await?;
+        Some(account)
+    } else {
+        None
+    };
+    let record = sql_query(format!(
+        "SELECT {COLUMNS} FROM security_transactions WHERE id = $1 AND canonical_request IS NOT NULL{lock}"
     ))
     .bind::<sql_types::Uuid, _>(transaction_uuid)
-    .get_result::<SecurityTransactionRow>(conn)
+    .get_result::<SecurityTransactionRow>(&mut *conn)
     .await
     .optional()
     .map_err(PersistenceError::database)?
     .map(SecurityTransactionRecord::try_from)
-    .transpose()
+    .transpose()?;
+    if let (Some(owner), Some(record)) = (&owner, &record)
+        && record.resource.account_id() != owner
+    {
+        return Err(PersistenceError::Conflict(
+            "duplicate_conflict: security transaction changed its immutable Account owner".into(),
+        ));
+    }
+    Ok(record)
 }
 
 async fn load_backup_erase_progress(
@@ -292,6 +341,9 @@ async fn load_backup_erase_progress(
     transaction_id: &str,
     for_update: bool,
 ) -> PersistenceResult<Option<BackupSeriesEraseProgressRecord>> {
+    if for_update && load_one(conn, transaction_id, true).await?.is_none() {
+        return Ok(None);
+    }
     let lock = if for_update { " FOR UPDATE" } else { "" };
     let transaction_uuid =
         ids::parse_typed_uuid(transaction_id, "transaction").ok_or_else(|| {
@@ -317,6 +369,8 @@ async fn insert_one(
     conn: &mut AsyncPgConnection,
     record: &SecurityTransactionRecord,
 ) -> PersistenceResult<()> {
+    crate::pcr_private_authority::require_active_account_owner(conn, record.resource.account_id())
+        .await?;
     let resource = &record.resource;
     let rotation = match resource {
         SecurityTransaction::SecurityRotation(r) => Some(r),
@@ -362,7 +416,8 @@ pub(crate) async fn load_step_outcome(
         })?;
     sql_query(
         "SELECT transaction_id, step, canonical_request, response, participant_outcome \
-         FROM security_transaction_step_outcomes WHERE transaction_id = $1 AND step = $2",
+         FROM security_transaction_step_outcomes WHERE transaction_id = $1 AND step = $2 \
+         AND canonical_request IS NOT NULL AND response IS NOT NULL",
     )
     .bind::<sql_types::Uuid, _>(transaction_uuid)
     .bind::<Text, _>(enum_text(step)?)
@@ -662,8 +717,9 @@ impl SecurityTransactionStore for PgSecurityTransactionStore {
         }
         let mut conn = pg_conn(&self.pool).await?;
         let rows = sql_query(
-            "SELECT id FROM security_transactions WHERE kind='security_rotation' \
+            "SELECT id FROM security_transactions WHERE kind='security_rotation' AND canonical_request IS NOT NULL \
              AND terminal_outcome IS NULL AND jsonb_array_length(accepted_steps) < 4 \
+             AND account_private_state_allowed(principal_id,station_id) \
              ORDER BY created_at, id LIMIT $1",
         )
         .bind::<sql_types::BigInt, _>(i64::from(limit))
@@ -709,9 +765,15 @@ impl SecurityTransactionStore for PgSecurityTransactionStore {
         let transaction_id = rotation.transaction_id.to_string();
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+            crate::pcr_private_authority::require_active_account_owner(
+                conn,
+                record.resource.account_id(),
+            )
+            .await?;
             // The advisory lock covers absence as well as existing rows. The
             // accepted identity is never overwritten by a racing first writer.
             lock_transaction_identity(conn, &transaction_id).await?;
+            require_transaction_owner(conn, &transaction_id, record.resource.account_id()).await?;
             if let Some(existing) = load_one(conn, &transaction_id, true).await? {
                 super::classify_security_transaction_first_write(
                     Some(&existing.canonical_request),
@@ -742,6 +804,7 @@ impl SecurityTransactionStore for PgSecurityTransactionStore {
         let mut conn = pg_conn(&self.pool).await?;
         let transaction_id = record.resource.transaction_id().as_str().to_owned();
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+            require_transaction_owner(conn, &transaction_id, record.resource.account_id()).await?;
             let existing = load_one(conn, &transaction_id, true)
                 .await?
                 .ok_or_else(|| {

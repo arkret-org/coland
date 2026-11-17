@@ -173,13 +173,72 @@ pub(crate) async fn retain_delivery_scope_with_runtime_seed(
     DeliveryScopeVault,
     coland_storage::VerifiedAgentScopeEvidence,
 ) {
+    retain_delivery_scope_with_receipt_probe(
+        pool,
+        station,
+        principal,
+        agent,
+        key_event,
+        scope,
+        endpoint,
+        activate_runtime,
+        runtime_seed,
+        false,
+    )
+    .await
+}
+
+pub(crate) async fn retain_delivery_scope_for_receipt_probe(
+    pool: &coland_storage_postgres::PgPool,
+    station: &historical_control_source::HistoricalControlStation,
+    principal: &device_authorization_history::DeviceHistoryFixture,
+    agent: &arkret_wire::AccountId,
+    key_event: &arkret_wire::Event,
+    scope: &arkret_models_collaboration::events_payloads::agent::AgentKeyScope,
+    endpoint: &coland_storage::AgentEndpointGuard,
+) -> (
+    DeliveryScopeVault,
+    coland_storage::VerifiedAgentScopeEvidence,
+) {
+    retain_delivery_scope_with_receipt_probe(
+        pool,
+        station,
+        principal,
+        agent,
+        key_event,
+        scope,
+        endpoint,
+        true,
+        &[0x61; 32],
+        true,
+    )
+    .await
+}
+
+async fn prepare_delivery_scope_custody(
+    pool: &coland_storage_postgres::PgPool,
+    station: &historical_control_source::HistoricalControlStation,
+    principal: &device_authorization_history::DeviceHistoryFixture,
+    agent: &arkret_wire::AccountId,
+    key_event: &arkret_wire::Event,
+    scope: &arkret_models_collaboration::events_payloads::agent::AgentKeyScope,
+    endpoint: &coland_storage::AgentEndpointGuard,
+    activate_runtime: bool,
+    runtime_seed: &[u8; 32],
+) -> Box<(
+    DeliveryScopeVault,
+    arkret_models_collaboration::agent_scope::AgentKeyPairRequestBody,
+    coland_storage::AgentPairingCommitIntent,
+    coland_storage::AgentPrincipalRecord,
+    Option<coland_storage::AgentRuntimeActivation>,
+)> {
     use std::sync::Arc;
 
     use arkret_models_collaboration::agent_scope::{
         AgentKeyPairRequestBody, AgentRequestedScopeDisclosure,
     };
     use coland_storage::{AgentStore as _, IdentityStoreRegistry as _};
-    use diesel::sql_types::{Jsonb, Text, Timestamptz};
+    use diesel::sql_types::{Jsonb, Text};
     use diesel_async::RunQueryDsl as _;
     let directory =
         std::env::temp_dir().join(format!("arkret-delivery-vault-{}", uuid::Uuid::now_v7()));
@@ -219,18 +278,19 @@ pub(crate) async fn retain_delivery_scope_with_runtime_seed(
     config.key_store = key_store_config.clone();
     let persistence = Arc::new(PgPersistenceStore::new(pool.clone()));
     let identity = station.install_runtime_identity(persistence.as_ref()).await;
+    let verifier_store = key_store_config
+        .open(coland_http::config::SERVICE_IDENTITY_KEYSTORE_APP)
+        .unwrap()
+        .unwrap();
+    // Explicit first-owner provisioning, never an implicit request fallback.
+    coland_http::config::provision_service_custody_key(&*verifier_store).unwrap();
     let state = coland_test_support::app_state_with_identity(
         config,
         persistence.clone(),
         identity,
         [83; 32],
     )
-    .with_verifier_private_keystore(Arc::from(
-        key_store_config
-            .open(coland_http::config::SERVICE_IDENTITY_KEYSTORE_APP)
-            .unwrap()
-            .unwrap(),
-    ));
+    .with_verifier_private_keystore(Arc::from(verifier_store));
     let key =
         arkret_models_collaboration::events_payloads::agent::AgentKeyAuthorizePayload::try_from(
             key_event,
@@ -387,34 +447,26 @@ pub(crate) async fn retain_delivery_scope_with_runtime_seed(
     };
     let custody_state = state.clone();
     let custody_body = body.clone();
-    let reference = fixture_step(fixture_future(|| async move {
-        Box::pin(custody_state.verify_and_retain_agent_scope_custody(&custody_body)).await
+    let prepared = fixture_step(fixture_future(|| async move {
+        Box::pin(custody_state.prepare_agent_scope_custody(&custody_body)).await
     }))
     .await
     .unwrap();
+    let reference = prepared.reference.clone();
     let request_digest =
         arkret_canonical::sha256_digest(&arkret_canonical::canonical_json_bytes(&body).unwrap());
-    let raw_key_digest = arkret_signatures::agent::agent_runtime_public_key_digest(
-        &serde_json::to_value(&key.public_key).unwrap(),
-    )
-    .unwrap();
-    if !activate_runtime {
-        // Native imported receipt fixture only. Physical runtime consumers below
-        // create awaiting_source_commit through the original intent trigger.
-        let mut conn = pool.get().await.unwrap();
-        diesel::sql_query("INSERT INTO agent_pairing_receipts(authorize_event_ref,agent_id,controller_principal_id,pairing_request_id,approval_request_id,runtime_key_binding_digest,request_digest,raw_key_digest,expires_at,activation_state,scope_custody_ref) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'active',$10)")
-        .bind::<Text,_>(key_event.event_id.as_str()).bind::<Text,_>(agent.principal_id.as_str())
-        .bind::<Text,_>(principal.account.principal_id.as_str()).bind::<Text,_>(pairing_request_id.as_str())
-        .bind::<Text,_>(approval_request_id.as_str()).bind::<Text,_>(runtime_digest.as_str())
-        .bind::<Text,_>(&request_digest).bind::<Text,_>(raw_key_digest.as_str())
-        .bind::<Timestamptz,_>(pairing_expires_at)
-        .bind::<Jsonb,_>(serde_json::to_value(&reference).unwrap()).execute(&mut conn).await.unwrap();
-        drop(conn);
-    }
-    if activate_runtime {
-        // The serving index must be settled by the original activation store,
-        // from this exact accepted KeyAuthorize and retained private receipt.
-        // Native current authorization alone is not a ready runtime session.
+    let intent = coland_storage::AgentPairingCommitIntent {
+        agent_id: agent.principal_id.to_string(),
+        approval_request_id: approval_request_id.clone(),
+        runtime_key_binding_digest: runtime_digest.to_string(),
+        pairing_request_id: pairing_request_id.clone(),
+        request_digest: request_digest.clone(),
+        authorize_event_id: key_event.event_id.to_string(),
+        key_authorization_event: key_event.clone(),
+        scope_custody_ref: Some(reference.clone()),
+        prepared_scope_custody: Some(prepared.clone()),
+    };
+    let activation = if activate_runtime {
         let accepted = PgAuthorityCommitStore { pool: pool.clone() }
             .committed_event(&key_event.event_id)
             .await
@@ -438,45 +490,151 @@ pub(crate) async fn retain_delivery_scope_with_runtime_seed(
             serde_json::from_value(jwk).unwrap(), accepted.commit.commit_id.clone(),
             accepted.commit.committed_at,
         ).unwrap();
-        assert!(
-            store
-                .put_pairing_commit_intent_if_compatible(
-                    &coland_storage::AgentPairingCommitIntent {
-                        agent_id: agent.principal_id.to_string(),
-                        approval_request_id: approval_request_id.clone(),
-                        runtime_key_binding_digest: runtime_digest.to_string(),
-                        pairing_request_id: pairing_request_id.clone(),
-                        request_digest: request_digest.clone(),
-                        authorize_event_id: key_event.event_id.to_string(),
-                        key_authorization_event: key_event.clone(),
-                        scope_custody_ref: Some(reference.clone()),
-                    }
+        Some(coland_storage::AgentRuntimeActivation {
+            agent_id: agent.principal_id.to_string(),
+            approval_request_id,
+            runtime_key_binding_digest: runtime_digest.to_string(),
+            pairing_request_id,
+            paired_request_digest: request_digest,
+            authorized_event_ref: key_event.event_id.to_string(),
+            authorized_verification_method: key.verification_method.to_string(),
+            authorized_public_key_digest:
+                arkret_signatures::agent::agent_runtime_public_key_digest(
+                    &serde_json::to_value(&key.public_key).unwrap(),
                 )
-                .await
                 .unwrap()
-                .is_some()
-        );
+                .to_string(),
+            frozen_authorize_event: key_event.clone(),
+            scope_custody_ref: Some(reference.clone()),
+            authorize_ref: endpoint.authorization_ref.clone(),
+            status: arkret_models_collaboration::agent_operations::AgentLifecycleState::Active,
+            authorized_key_event: key_event.clone(),
+            signer_resolution_evidence_ref: Some(signer.signer_evidence_ref().unwrap()),
+            current_signer_evidence: Some(signer),
+            authorized_at: accepted.commit.committed_at,
+        })
+    } else {
+        None
+    };
+    let vault = DeliveryScopeVault {
+        state,
+        config: key_store_config,
+        directory,
+    };
+    Box::new((vault, body, intent, record, activation))
+}
+
+/// Return the original verified producer/PoP and prepared ciphertext before
+/// the first receipt transaction. No receipt or runtime activation is accepted.
+pub(crate) async fn prepare_delivery_scope_for_disconnect(
+    pool: &coland_storage_postgres::PgPool,
+    station: &historical_control_source::HistoricalControlStation,
+    principal: &device_authorization_history::DeviceHistoryFixture,
+    agent: &arkret_wire::AccountId,
+    key_event: &arkret_wire::Event,
+    scope: &arkret_models_collaboration::events_payloads::agent::AgentKeyScope,
+    endpoint: &coland_storage::AgentEndpointGuard,
+) -> Box<(
+    DeliveryScopeVault,
+    coland_storage::AgentPairingCommitIntent,
+    coland_storage::AgentRuntimeActivation,
+)> {
+    let (vault, _body, intent, _record, activation) = *Box::pin(prepare_delivery_scope_custody(
+        pool,
+        station,
+        principal,
+        agent,
+        key_event,
+        scope,
+        endpoint,
+        true,
+        &[0x61; 32],
+    ))
+    .await;
+    Box::new((vault, intent, activation.unwrap()))
+}
+
+async fn retain_delivery_scope_with_receipt_probe(
+    pool: &coland_storage_postgres::PgPool,
+    station: &historical_control_source::HistoricalControlStation,
+    principal: &device_authorization_history::DeviceHistoryFixture,
+    agent: &arkret_wire::AccountId,
+    key_event: &arkret_wire::Event,
+    scope: &arkret_models_collaboration::events_payloads::agent::AgentKeyScope,
+    endpoint: &coland_storage::AgentEndpointGuard,
+    activate_runtime: bool,
+    runtime_seed: &[u8; 32],
+    receipt_probe: bool,
+) -> (
+    DeliveryScopeVault,
+    coland_storage::VerifiedAgentScopeEvidence,
+) {
+    use coland_storage::AgentStore as _;
+    use diesel::sql_types::{Jsonb, Text, Timestamptz};
+    use diesel_async::RunQueryDsl as _;
+    let (vault, body, intent, mut record, activation) = *Box::pin(prepare_delivery_scope_custody(
+        pool,
+        station,
+        principal,
+        agent,
+        key_event,
+        scope,
+        endpoint,
+        activate_runtime,
+        runtime_seed,
+    ))
+    .await;
+    let state = vault.state.clone();
+    let store = coland_storage_postgres::PgAgentStore { pool: pool.clone() };
+    let key =
+        arkret_models_collaboration::events_payloads::agent::AgentKeyAuthorizePayload::try_from(
+            key_event,
+        )
+        .unwrap();
+    let pairing_request_id = body.pairing_request_id.clone();
+    let approval_request_id = body.approval_request_id.clone();
+    let (_, pairing_expires_at) = native_pairing_instance(&key);
+    let runtime_digest = intent.runtime_key_binding_digest.clone();
+    let request_digest = intent.request_digest.clone();
+    let prepared = intent.prepared_scope_custody.as_ref().unwrap();
+    let mut reference = prepared.reference.clone();
+    let raw_key_digest = arkret_signatures::agent::agent_runtime_public_key_digest(
+        &serde_json::to_value(&key.public_key).unwrap(),
+    )
+    .unwrap();
+    if !activate_runtime {
+        // Explicit trusted private-receipt import only. The command/binding
+        // was actually verified above; this branch makes no serving-runtime,
+        // production-pairing-writer, erasure or physical-completion claim.
+        // Physical runtime consumers below use the real intent/activation API.
+        let mut conn = pool.get().await.unwrap();
+        diesel::sql_query("INSERT INTO agent_pairing_receipts(authorize_event_ref,agent_id,controller_principal_id,pairing_request_id,approval_request_id,runtime_key_binding_digest,request_digest,raw_key_digest,expires_at,activation_state,scope_custody_ref,encrypted_scope_custody) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'active',$10,$11)")
+        .bind::<Text,_>(key_event.event_id.as_str()).bind::<Text,_>(agent.principal_id.as_str())
+        .bind::<Text,_>(principal.account.principal_id.as_str()).bind::<Text,_>(pairing_request_id.as_str())
+        .bind::<Text,_>(approval_request_id.as_str()).bind::<Text,_>(runtime_digest.as_str())
+        .bind::<Text,_>(&request_digest).bind::<Text,_>(raw_key_digest.as_str())
+        .bind::<Timestamptz,_>(pairing_expires_at)
+        .bind::<Jsonb,_>(serde_json::to_value(&reference).unwrap())
+        .bind::<Jsonb,_>(serde_json::to_value(&prepared.evidence).unwrap()).execute(&mut conn).await.unwrap();
+        drop(conn);
+    }
+    if activate_runtime {
+        if receipt_probe {
+            reference = probe_original_receipt_transaction(pool, &state, &body, &intent).await;
+        } else {
+            assert!(
+                store
+                    .put_pairing_commit_intent_if_compatible(&intent)
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        let mut activation = activation.expect("the original live preparation verified PoP");
+        activation.scope_custody_ref = Some(reference.clone());
         assert!(
             store
-                .activate_runtime_if_current(&coland_storage::AgentRuntimeActivation {
-                    agent_id: agent.principal_id.to_string(),
-                    approval_request_id,
-                    runtime_key_binding_digest: runtime_digest.to_string(),
-                    pairing_request_id,
-                    paired_request_digest: request_digest,
-                    authorized_event_ref: key_event.event_id.to_string(),
-                    authorized_verification_method: key.verification_method.to_string(),
-                    authorized_public_key_digest: raw_key_digest.to_string(),
-                    frozen_authorize_event: key_event.clone(),
-                    scope_custody_ref: Some(reference.clone()),
-                    authorize_ref: endpoint.authorization_ref.clone(),
-                    status:
-                        arkret_models_collaboration::agent_operations::AgentLifecycleState::Active,
-                    authorized_key_event: key_event.clone(),
-                    signer_resolution_evidence_ref: Some(signer.signer_evidence_ref().unwrap()),
-                    current_signer_evidence: Some(signer),
-                    authorized_at: accepted.commit.committed_at,
-                })
+                .activate_runtime_if_current(&activation)
                 .await
                 .unwrap()
         );
@@ -514,11 +672,6 @@ pub(crate) async fn retain_delivery_scope_with_runtime_seed(
         record.paired_request_digest = Some(request_digest);
         store.put(record).await.unwrap();
     }
-    let vault = DeliveryScopeVault {
-        state,
-        config: key_store_config,
-        directory,
-    };
     let cold = vault.reopen();
     let query_endpoint = endpoint.clone();
     let evidence = fixture_step(fixture_future(|| async move {
@@ -578,4 +731,135 @@ pub(crate) fn protect_owned_test_path(path: &std::path::Path, mode: u32) {
             "owned test ACL protection failed"
         );
     }
+}
+
+/// This probe uses the original verified producer/PoP and the real production
+/// intent transaction. It is not the explicit imported-receipt branch.
+async fn probe_original_receipt_transaction(
+    pool: &coland_storage_postgres::PgPool,
+    state: &coland_http::state::AppState,
+    body: &arkret_models_collaboration::agent_scope::AgentKeyPairRequestBody,
+    intent: &coland_storage::AgentPairingCommitIntent,
+) -> coland_storage::AgentScopeCustodyRef {
+    use coland_storage::AgentStore as _;
+    use diesel::sql_types::Text;
+    use diesel_async::RunQueryDsl as _;
+    use futures_util::FutureExt as _;
+    let store = coland_storage_postgres::PgAgentStore { pool: pool.clone() };
+    let second = state.prepare_agent_scope_custody(body).await.unwrap();
+    let first = intent.prepared_scope_custody.as_ref().unwrap();
+    assert_eq!(first.reference.key_ref, second.reference.key_ref);
+    assert_ne!(first.evidence.nonce, second.evidence.nonce);
+    let mut second_intent = intent.clone();
+    second_intent.scope_custody_ref = Some(second.reference.clone());
+    second_intent.prepared_scope_custody = Some(second.clone());
+    let suffix = uuid::Uuid::now_v7().simple().to_string();
+    let function = format!("scope_receipt_fault_{suffix}");
+    let trigger = format!("scope_receipt_fault_{suffix}");
+    assert!(!intent.authorize_event_id.contains("'"));
+    let mut conn = pool.get().await.unwrap();
+    diesel::sql_query(format!("CREATE FUNCTION {function}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.authorize_event_ref='{}' THEN RAISE EXCEPTION 'owned scope receipt fault' USING ERRCODE='40001'; END IF; RETURN NEW; END $$",intent.authorize_event_id))
+        .execute(&mut conn).await.unwrap();
+    diesel::sql_query(format!("CREATE TRIGGER {trigger} BEFORE UPDATE OF encrypted_scope_custody ON agent_pairing_receipts FOR EACH ROW EXECUTE FUNCTION {function}()"))
+        .execute(&mut conn).await.unwrap();
+    drop(conn);
+    let attempted =
+        std::panic::AssertUnwindSafe(store.put_pairing_commit_intent_if_compatible(intent))
+            .catch_unwind()
+            .await;
+    let mut conn = pool.get().await.unwrap();
+    diesel::sql_query(format!("DROP TRIGGER {trigger} ON agent_pairing_receipts"))
+        .execute(&mut conn)
+        .await
+        .unwrap();
+    diesel::sql_query(format!("DROP FUNCTION {function}()"))
+        .execute(&mut conn)
+        .await
+        .unwrap();
+    drop(conn);
+    let result = match attempted {
+        Ok(result) => result,
+        Err(panic) => std::panic::resume_unwind(panic),
+    };
+    assert!(result.is_err());
+    assert!(
+        store
+            .pairing_receipt(&intent.authorize_event_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .get(&intent.agent_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .pending_pairing_commit_intent
+            .is_none()
+    );
+    let (left, right) = tokio::join!(
+        store.put_pairing_commit_intent_if_compatible(intent),
+        store.put_pairing_commit_intent_if_compatible(&second_intent),
+    );
+    let left = left.unwrap().unwrap();
+    let right = right.unwrap().unwrap();
+    let receipt = store
+        .pairing_receipt(&intent.authorize_event_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let winning_ref = receipt.scope_custody_ref.as_ref().unwrap();
+    let winning_body = receipt.encrypted_scope_custody.as_ref().unwrap();
+    assert!(
+        (winning_ref == &first.reference && winning_body == &first.evidence)
+            || (winning_ref == &second.reference && winning_body == &second.evidence)
+    );
+    for original in [&left, &right] {
+        assert_eq!(
+            original
+                .pending_pairing_commit_intent
+                .as_ref()
+                .unwrap()
+                .scope_custody_ref
+                .as_ref(),
+            Some(winning_ref)
+        );
+    }
+    second
+        .validate_first_winner(winning_ref, winning_body)
+        .unwrap();
+    let mut conflict = intent.clone();
+    conflict.request_digest = format!("sha256:{}", "f".repeat(64));
+    assert!(
+        store
+            .put_pairing_commit_intent_if_compatible(&conflict)
+            .await
+            .is_err()
+    );
+    let original = store
+        .pairing_receipt(&intent.authorize_event_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(original.scope_custody_ref.as_ref(), Some(winning_ref));
+    assert_eq!(
+        original.encrypted_scope_custody.as_ref(),
+        Some(winning_body)
+    );
+    #[derive(diesel::QueryableByName)]
+    struct Count {
+        #[diesel(sql_type=diesel::sql_types::BigInt)]
+        value: i64,
+    }
+    let mut conn = pool.get().await.unwrap();
+    let count = diesel::sql_query(
+        "SELECT count(*)::bigint AS value FROM agent_pairing_receipts WHERE authorize_event_ref=$1",
+    )
+    .bind::<Text, _>(&intent.authorize_event_id)
+    .get_result::<Count>(&mut conn)
+    .await
+    .unwrap();
+    assert_eq!(count.value, 1);
+    winning_ref.clone()
 }

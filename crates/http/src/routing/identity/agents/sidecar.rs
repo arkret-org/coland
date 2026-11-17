@@ -22,7 +22,7 @@ use arkret_models_collaboration::sidecar_operations::{
 #[cfg(test)]
 use arkret_models_crypto::MlsGovernanceBindingPayload;
 use arkret_models_crypto::SidecarMlsBinding;
-use arkret_wire::NonEmptyString;
+use arkret_wire::{ActorId, NonEmptyString};
 use coland_services::identity::{
     AgentSidecarContextState as AgentSidecarContextRecord, AgentSidecarState as AgentSidecarRecord,
 };
@@ -449,35 +449,32 @@ async fn store_sidecar_prepare(
     reservation_handle: &arkret_wire::ReservationHandle,
     expires_at: chrono::DateTime<chrono::Utc>,
     outcome: &SidecarEnsureResponseBody,
-) -> Result<(), AppError> {
-    let principal_id = arkret_wire::DidCoreId::new(principal_id.to_owned())
-        .map_err(|error| AppError::internal(format!("Sidecar principal id invalid: {error}")))?;
-    let response_body = serde_json::to_value(outcome)
-        .map_err(|error| AppError::internal(format!("Sidecar outcome encode: {error}")))?;
-    let created_at = chrono::Utc::now();
-    for key in [
-        idempotency_key.to_owned(),
-        sidecar_reservation_key(reservation_handle),
-    ] {
-        state
-            .jobs()
-            .store_idempotency_record(coland_services::jobs::IdempotencyState {
-                authenticated_actor: arkret_wire::ActorId::account(arkret_wire::AccountId::new(
-                    principal_id.clone(),
-                    state.service_core_id(),
-                )),
-                operation_id: "ak.self.agent.sidecar.command.ensure".to_owned(),
-                idempotency_key: key,
-                request_hash: request_hash.to_owned(),
-                response_status: StatusCode::OK.as_u16().into(),
-                response_body: response_body.clone(),
-                created_at,
-                expires_at,
-            })
-            .await
-            .map_err(|error| AppError::internal(format!("Sidecar reservation store: {error}")))?;
-    }
-    Ok(())
+) -> Result<SidecarEnsureResponseBody, AppError> {
+    let principal = arkret_wire::DidCoreId::new(principal_id.to_owned())
+        .map_err(|error| AppError::internal(error.to_string()))?;
+    let primary = coland_storage::IdempotencyRecord {
+        authenticated_actor: ActorId::account(arkret_wire::AccountId::new(
+            principal,
+            state.service_core_id(),
+        )),
+        operation_id: "ak.self.agent.sidecar.command.ensure".into(),
+        idempotency_key: idempotency_key.into(),
+        request_hash: request_hash.into(),
+        response_status: StatusCode::OK.as_u16().into(),
+        response_body: serde_json::to_value(outcome)
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        created_at: chrono::Utc::now(),
+        expires_at,
+    };
+    let mut context = primary.clone();
+    context.idempotency_key = sidecar_reservation_key(reservation_handle);
+    let original = state
+        .persistence()
+        .record_private_preparation(&primary, Some(&context))
+        .await
+        .map_err(|error| crate::state::actor_private_refusal(error.into()))?;
+    serde_json::from_value(original.response_body)
+        .map_err(|error| AppError::internal(error.to_string()))
 }
 
 async fn store_sidecar_final_outcome(
@@ -507,7 +504,13 @@ async fn store_sidecar_final_outcome(
             expires_at: created_at + chrono::Duration::hours(24),
         })
         .await
-        .map_err(|error| AppError::internal(format!("Sidecar outcome store: {error}")))
+        .or_else(|error| match error.conflict_code() {
+            Some(
+                coland_storage::ConflictCode::AccountErased
+                | coland_storage::ConflictCode::AccountDeactivated,
+            ) => Ok(()),
+            _ => Err(crate::state::actor_private_refusal(error)),
+        })
 }
 
 fn next_sidecar_context_version(
@@ -674,7 +677,7 @@ async fn prepare_sidecar(
         })
     };
     let outcome = prepared;
-    store_sidecar_prepare(
+    let outcome = store_sidecar_prepare(
         state,
         session.actor.as_str(),
         body.idempotency_key.as_str(),

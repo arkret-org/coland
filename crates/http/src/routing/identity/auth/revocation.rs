@@ -1,26 +1,29 @@
 use super::*;
 
-/// Revoke every active bearer session for an actor.
-pub async fn revoke_sessions_for_actor(state: &AppState, actor: &str) -> Result<usize, String> {
+/// Revoke cached sessions for one exact Account.
+pub async fn revoke_sessions_for_account(
+    state: &AppState,
+    account: &arkret_wire::AccountId,
+) -> Result<usize, String> {
     state
         .sessions()
-        .revoke_actor_sessions(actor, now())
+        .revoke_account_sessions(account, now())
         .await
         .map_err(|error| error.to_string())
 }
 
-/// Revoke every active device record for an actor.
-pub async fn revoke_devices_for_actor(state: &AppState, actor: &str) -> Result<usize, String> {
+/// Revoke local inventory rows without deleting public authorization history.
+pub async fn revoke_devices_for_account(
+    state: &AppState,
+    account: &arkret_wire::AccountId,
+) -> Result<usize, String> {
     state
         .persistence()
-        .revoke_local_devices(actor, now())
+        .revoke_local_devices(account, now())
         .await
         .map_err(|error| error.to_string())
 }
 
-// ── Development Session Credential Derivation ───────────────────────────────
-
-#[derive(Default)]
 pub(crate) struct DeviceDeliveryPurgeOutcome {
     pub to_device_messages_dropped: usize,
     pub push_registrations_removed: usize,
@@ -28,24 +31,18 @@ pub(crate) struct DeviceDeliveryPurgeOutcome {
 
 pub(crate) async fn purge_device_delivery_state(
     state: &AppState,
-    actor: &str,
+    account: &arkret_wire::AccountId,
     device_id: &str,
-) -> DeviceDeliveryPurgeOutcome {
-    let result = match state
+) -> Result<DeviceDeliveryPurgeOutcome, AppError> {
+    let result = state
         .deliveries()
-        .purge_device_delivery(actor, device_id)
+        .purge_device_delivery(account, device_id)
         .await
-    {
-        Ok(result) => result,
-        Err(error) => {
-            tracing::error!(%error, actor, device_id, "failed to purge device delivery state");
-            return DeviceDeliveryPurgeOutcome::default();
-        }
-    };
-    DeviceDeliveryPurgeOutcome {
+        .map_err(|error| AppError::internal(format!("device delivery purge failed: {error}")))?;
+    Ok(DeviceDeliveryPurgeOutcome {
         to_device_messages_dropped: result.to_device_messages_dropped,
         push_registrations_removed: result.push_registrations_removed,
-    }
+    })
 }
 
 /// Derive a single-use development session credential. The credential is opaque

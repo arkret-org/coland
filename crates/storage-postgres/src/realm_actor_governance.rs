@@ -20,15 +20,26 @@ pub(crate) fn is_command(event: &Event) -> bool {
     ) && event.actor_id.as_account_id().is_some()
 }
 /// Called only after the ordinary unit verified the local or forwarded real Device.
-pub(crate) async fn commit(
+#[inline(never)]
+pub(crate) fn commit<'a>(
+    conn: &'a mut AsyncPgConnection,
+    event: &'a Event,
+    commit: &'a RealmCommit,
+    prepared: Option<&'a EventApprovalCommit>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), PgTransactionError>> + Send + 'a>>
+{
+    if !is_command(event) {
+        return Box::pin(std::future::ready(Ok(())));
+    }
+    crate::boxed_future(|| commit_inner(conn, event, commit, prepared))
+}
+
+async fn commit_inner(
     conn: &mut AsyncPgConnection,
     event: &Event,
     commit: &RealmCommit,
     prepared: Option<&EventApprovalCommit>,
 ) -> Result<(), PgTransactionError> {
-    if !is_command(event) {
-        return Ok(());
-    }
     if event.executed_by.is_some()
         || event.scope_ref
             != (ScopeRef::RealmControl {

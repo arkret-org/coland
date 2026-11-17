@@ -266,7 +266,7 @@ pub(crate) async fn pairing_scope_receipt_in_connection(
         #[diesel(sql_type = Jsonb)]
         receipt: Value,
     }
-    let row = sql_query("SELECT jsonb_build_object('agent_id',agent_id,'controller_principal_id',controller_principal_id,'request_digest',request_digest,'authorize_event_ref',authorize_event_ref,'pairing_request_id',pairing_request_id,'approval_request_id',approval_request_id,'runtime_key_binding_digest',runtime_key_binding_digest,'scope_custody_ref',scope_custody_ref,'outcome',jsonb_build_object('activation_state',activation_state,'authorize_event_ref',authorize_event_ref)) AS receipt FROM agent_pairing_receipts WHERE authorize_event_ref=$1 FOR SHARE")
+    let row = sql_query("SELECT jsonb_build_object('agent_id',agent_id,'controller_principal_id',controller_principal_id,'request_digest',request_digest,'authorize_event_ref',authorize_event_ref,'pairing_request_id',pairing_request_id,'approval_request_id',approval_request_id,'runtime_key_binding_digest',runtime_key_binding_digest,'scope_custody_ref',scope_custody_ref,'encrypted_scope_custody',encrypted_scope_custody,'outcome',jsonb_build_object('activation_state',activation_state,'authorize_event_ref',authorize_event_ref)) AS receipt FROM agent_pairing_receipts WHERE authorize_event_ref=$1 FOR SHARE")
         .bind::<Text,_>(event_id).get_result::<Receipt>(conn).await.optional().map_err(PersistenceError::database)?;
     row.map(|row| serde_json::from_value(row.receipt).map_err(PersistenceError::database))
         .transpose()
@@ -274,6 +274,188 @@ pub(crate) async fn pairing_scope_receipt_in_connection(
 
 pub struct PgAgentStore {
     pub pool: PgPool,
+}
+
+#[derive(QueryableByName)]
+struct PrivateControllerSource {
+    #[diesel(sql_type = Text)]
+    principal_control_realm_id: String,
+}
+
+/// A full controller Account is recovered from the actual immutable accepted
+/// provision. The principal-only projection and nullable Account PK do not
+/// author this binding, and no private Agent row lock is acquired here.
+async fn accepted_controller_account(
+    conn: &mut super::AsyncPgConnection,
+    agent_id: &str,
+    agent_pcr: &str,
+) -> PersistenceResult<arkret_wire::AccountId> {
+    let pcr =
+        arkret_wire::RealmId::new(agent_pcr.to_owned()).map_err(PersistenceError::database)?;
+    let (_, provision, reference) =
+        crate::agent_provisioning::declared_agent_provision_snapshot_in_connection(conn, &pcr)
+            .await
+            .map_err(PgTransactionError::into_persistence)?
+            .ok_or_else(|| {
+                PersistenceError::Conflict(
+                    "failed_precondition: accepted Agent provision is unavailable".into(),
+                )
+            })?;
+    let accepted =
+        crate::committed_disclosure::accepted_full_event_in_connection(conn, &reference.event_id)
+            .await?
+            .ok_or_else(|| {
+                PersistenceError::Conflict(
+                    "failed_precondition: accepted Agent provision envelope is unavailable".into(),
+                )
+            })?;
+    provision
+        .validate_envelope(&accepted.event)
+        .map_err(PersistenceError::database)?;
+    let account = accepted.event.actor_id.as_account_id().ok_or_else(|| {
+        PersistenceError::SchemaViolation("accepted Agent controller is not an Account".into())
+    })?;
+    if provision.agent_id.as_str() != agent_id
+        || provision.controller_principal_id != account.principal_id
+        || provision.principal_control_realm_id != pcr
+    {
+        return Err(PersistenceError::SchemaViolation(
+            "accepted Agent private owner binding differs".into(),
+        ));
+    }
+    Ok(account.clone())
+}
+
+pub(crate) async fn private_controller_account(
+    conn: &mut super::AsyncPgConnection,
+    agent_id: &str,
+) -> PersistenceResult<Option<arkret_wire::AccountId>> {
+    let row = sql_query("SELECT principal_control_realm_id FROM agent_principals WHERE id=$1")
+        .bind::<Text, _>(agent_id)
+        .get_result::<PrivateControllerSource>(&mut *conn)
+        .await
+        .optional()
+        .map_err(PersistenceError::database)?;
+    if let Some(row) = row {
+        accepted_controller_account(conn, agent_id, &row.principal_control_realm_id)
+            .await
+            .map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
+fn minimize_controller_private_state(principal: &mut AgentPrincipalRecord) {
+    principal.requested_scope = None;
+    principal.pairing_request_id = None;
+    principal.paired_pairing_request_id = None;
+    principal.paired_request_digest = None;
+    principal.pending_pairing_commit_intent = None;
+    principal.pairing_code = None;
+    principal.pairing_expires_at = None;
+    principal.approval_request_id = None;
+    principal.recipient_id = None;
+    principal.runtime_key_binding_digest = None;
+    principal.runtime_public_key_digest = None;
+    principal.runtime_attestation_digest = None;
+    principal.runtime_proof_verified_at = None;
+    principal.approval_notification_id = None;
+    principal.runtime_key_request = None;
+    principal.approval_requested_at = None;
+    principal.provision_event_refs = None;
+}
+
+async fn write_agent_principal(
+    conn: &mut super::AsyncPgConnection,
+    principal: AgentPrincipalRecord,
+    owner: &arkret_wire::AccountId,
+) -> PersistenceResult<()> {
+    if principal.controller_principal_id != owner.principal_id.as_str() {
+        return Err(PersistenceError::SchemaViolation(
+            "Agent row differs from its accepted controller".into(),
+        ));
+    }
+    if let Some(pk) = principal.controller_account_pk {
+        #[derive(QueryableByName)]
+        struct AccountBinding {
+            #[diesel(sql_type=BigInt)]
+            pk: i64,
+        }
+        let binding = sql_query("SELECT pk FROM accounts WHERE principal_id=$1 AND station_id=$2")
+            .bind::<Text, _>(owner.principal_id.as_str())
+            .bind::<Text, _>(owner.station_id.as_str())
+            .get_result::<AccountBinding>(&mut *conn)
+            .await
+            .optional()
+            .map_err(PersistenceError::database)?;
+        if !binding.is_some_and(|binding| binding.pk == pk.get()) {
+            return Err(PersistenceError::SchemaViolation(
+                "Agent local Account PK differs from its full accepted controller".into(),
+            ));
+        }
+    }
+    let principal = AgentPrincipalRow::try_from(principal)?;
+    let agent_id = principal.id.clone();
+    let upsert = diesel::insert_into(agent_principals::table)
+        .values(&principal)
+        .on_conflict(agent_principals::id)
+        .do_update()
+        .set(&principal);
+    let affected = diesel::query_dsl::methods::FilterDsl::filter(
+        upsert,
+        agent_principals::controller_principal_id
+            .eq(&principal.controller_principal_id)
+            .and(
+                agent_principals::principal_control_realm_id
+                    .eq(&principal.principal_control_realm_id),
+            )
+            .and(
+                agent_principals::controller_authorization_ref
+                    .eq(&principal.controller_authorization_ref),
+            ),
+    )
+    .execute(&mut *conn)
+    .await
+    .map_err(PersistenceError::database)?;
+    if affected == 1 {
+        Ok(())
+    } else {
+        Err(PersistenceError::Conflict(format!(
+            "Agent `{agent_id}` controller/PCR authorization binding is immutable"
+        ))
+        .into())
+    }
+}
+
+async fn persist_agent_principal(
+    pool: &PgPool,
+    mut principal: AgentPrincipalRecord,
+    accepted_projection: bool,
+) -> PersistenceResult<()> {
+    let mut conn = pg_conn(pool).await?;
+    conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+        let owner =
+            accepted_controller_account(conn, &principal.id, &principal.principal_control_realm_id)
+                .await?;
+        if owner.principal_id.as_str() != principal.controller_principal_id {
+            return Err(PersistenceError::SchemaViolation(
+                "Agent projection controller differs from accepted provision".into(),
+            )
+            .into());
+        }
+        if accepted_projection {
+            if !crate::pcr_private_authority::is_active_human_account(conn, &owner).await? {
+                minimize_controller_private_state(&mut principal);
+            }
+        } else {
+            crate::pcr_private_authority::require_active_account_owner(conn, &owner).await?;
+        }
+        write_agent_principal(conn, principal, &owner)
+            .await
+            .map_err(Into::into)
+    })
+    .await
+    .map_err(PgTransactionError::into_persistence)
 }
 
 #[async_trait]
@@ -408,11 +590,13 @@ impl AgentStore for PgAgentStore {
             runtime_key_binding_digest: String,
             #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Jsonb>)]
             scope_custody_ref: Option<Value>,
+            #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Jsonb>)]
+            encrypted_scope_custody: Option<Value>,
         }
         let mut conn = crate::pg_db(&self.pool);
         sql_query("UPDATE agent_pairing_receipts SET activation_state = 'cancelled' WHERE authorize_event_ref = $1 AND activation_state = 'awaiting_source_commit' AND expires_at <= NOW()")
             .bind::<Text,_>(event_id).execute(&mut conn).await.map_err(PersistenceError::database)?;
-        let row = sql_query("SELECT agent_id, controller_principal_id, request_digest, authorize_event_ref, activation_state, scope_custody_ref, pairing_request_id, approval_request_id, runtime_key_binding_digest FROM agent_pairing_receipts WHERE authorize_event_ref = $1")
+        let row = sql_query("SELECT agent_id, controller_principal_id, request_digest, authorize_event_ref, activation_state, scope_custody_ref, encrypted_scope_custody, pairing_request_id, approval_request_id, runtime_key_binding_digest FROM agent_pairing_receipts WHERE authorize_event_ref = $1")
             .bind::<Text,_>(event_id).get_result::<Receipt>(&mut conn).await.optional().map_err(PersistenceError::database)?;
         row.map(|row| {
             let activation_state = match row.activation_state.as_str() {
@@ -427,6 +611,7 @@ impl AgentStore for PgAgentStore {
                 agent_id: row.agent_id,
                 controller_principal_id: row.controller_principal_id,
                 scope_custody_ref: row.scope_custody_ref.map(serde_json::from_value).transpose().map_err(PersistenceError::database)?,
+                encrypted_scope_custody: row.encrypted_scope_custody.map(serde_json::from_value).transpose().map_err(PersistenceError::database)?,
                 request_digest: row.request_digest,
                 authorize_event_ref: authorize_event_ref.to_string(),
                 pairing_request_id: OpaqueLocalId::new(row.pairing_request_id).map_err(PersistenceError::database)?,
@@ -488,37 +673,113 @@ impl AgentStore for PgAgentStore {
     }
 
     async fn put(&self, principal: AgentPrincipalRecord) -> PersistenceResult<()> {
-        let mut conn = crate::pg_db(&self.pool);
-        let principal = AgentPrincipalRow::try_from(principal)?;
-        let agent_id = principal.id.clone();
-        let upsert = diesel::insert_into(agent_principals::table)
-            .values(&principal)
-            .on_conflict(agent_principals::id)
-            .do_update()
-            .set(&principal);
-        let affected = diesel::query_dsl::methods::FilterDsl::filter(
-            upsert,
-            agent_principals::controller_principal_id
-                .eq(&principal.controller_principal_id)
-                .and(
-                    agent_principals::principal_control_realm_id
-                        .eq(&principal.principal_control_realm_id),
+        persist_agent_principal(&self.pool, principal, false).await
+    }
+
+    async fn put_accepted_projection(
+        &self,
+        principal: AgentPrincipalRecord,
+    ) -> PersistenceResult<()> {
+        persist_agent_principal(&self.pool, principal, true).await
+    }
+
+    async fn put_pairing_preparation(
+        &self,
+        principal: AgentPrincipalRecord,
+        primary: &coland_storage::IdempotencyRecord,
+    ) -> PersistenceResult<coland_storage::IdempotencyRecord> {
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+            let owner = accepted_controller_account(
+                conn,
+                &principal.id,
+                &principal.principal_control_realm_id,
+            )
+            .await?;
+            if primary.authenticated_actor != arkret_wire::ActorId::account(owner.clone())
+                || primary.operation_id != "ak.self.agent.command.provision"
+            {
+                return Err(PersistenceError::SchemaViolation(
+                    "Agent pairing preparation differs from its actual owner".into(),
                 )
-                .and(
-                    agent_principals::controller_authorization_ref
-                        .eq(&principal.controller_authorization_ref),
-                ),
-        )
-        .execute(&mut conn)
+                .into());
+            }
+            crate::pcr_private_authority::require_active_account_owner(conn, &owner).await?;
+            let identity = arkret_canonical::canonical_json_string(&(
+                &primary.authenticated_actor,
+                &primary.operation_id,
+                &primary.idempotency_key,
+            ))
+            .map_err(PersistenceError::database)?;
+            sql_query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+                .bind::<Text, _>(identity)
+                .execute(&mut *conn)
+                .await?;
+            if let Some(original) = crate::idempotency::preparation_record(conn, primary).await? {
+                if original.request_hash != primary.request_hash {
+                    return Err(PersistenceError::Conflict(
+                        "duplicate_conflict: Agent pairing preparation changed request".into(),
+                    )
+                    .into());
+                }
+                return Ok(original);
+            }
+            let outcome: arkret_models_collaboration::agent_operations::AgentProvisionResponseBody =
+                serde_json::from_value(primary.response_body.clone())
+                    .map_err(PersistenceError::database)?;
+            let arkret_models_collaboration::agent_operations::AgentProvisionResponseBody::Complete(
+                outcome,
+            ) = outcome
+            else {
+                return Err(PersistenceError::SchemaViolation(
+                    "Agent pairing preparation is not a complete provision outcome".into(),
+                )
+                .into());
+            };
+            if outcome.agent_id.as_str() != principal.id
+                || outcome.principal_control_realm_id.as_str()
+                    != principal.principal_control_realm_id
+                || Some(&outcome.pairing_request_id) != principal.pairing_request_id.as_ref()
+                || outcome.pairing_code != principal.pairing_code
+                || Some(outcome.expires_at) != principal.pairing_expires_at
+            {
+                return Err(PersistenceError::SchemaViolation(
+                    "Agent pairing private row differs from its first outcome".into(),
+                )
+                .into());
+            }
+            crate::idempotency::record_idempotency_in_connection(conn, primary).await?;
+            let original = crate::idempotency::preparation_record(conn, primary)
+                .await?
+                .ok_or_else(|| {
+                    PersistenceError::Internal("Agent pairing preparation was not stored".into())
+                })?;
+            if original.request_hash != primary.request_hash {
+                return Err(PersistenceError::Conflict(
+                    "duplicate_conflict: Agent pairing preparation changed request".into(),
+                )
+                .into());
+            }
+            if original.response_status != primary.response_status
+                || original.response_body != primary.response_body
+            {
+                return Ok(original);
+            }
+            write_agent_principal(conn, principal, &owner).await?;
+            Ok(original)
+        })
         .await
-        .map_err(PersistenceError::database)?;
-        if affected == 1 {
-            Ok(())
-        } else {
-            Err(PersistenceError::Conflict(format!(
-                "Agent `{agent_id}` controller/PCR authorization binding is immutable"
-            )))
-        }
+        .map_err(PgTransactionError::into_persistence)
+    }
+
+    async fn controller_account(
+        &self,
+        agent_id: &str,
+    ) -> PersistenceResult<Option<arkret_wire::AccountId>> {
+        let mut conn = pg_conn(&self.pool).await?;
+        // Read-only accepted provenance. Terminal status does not rewrite the
+        // controller of an already accepted independent Agent.
+        private_controller_account(&mut conn, agent_id).await
     }
 
     async fn get(&self, agent_id: &str) -> PersistenceResult<Option<AgentPrincipalRecord>> {
@@ -711,55 +972,112 @@ impl AgentStore for PgAgentStore {
         &self,
         intent: &AgentPairingCommitIntent,
     ) -> PersistenceResult<Option<AgentPrincipalRecord>> {
-        let mut conn = crate::pg_db(&self.pool);
-        if intent.scope_custody_ref.is_none() {
-            return Err(PersistenceError::SchemaViolation(
-                "Agent pairing lacks verifier-private scope custody".into(),
-            ));
-        }
-        let intent_value = serde_json::to_value(PendingAgentPairingCommitIntent {
-            request_digest: intent.request_digest.clone(),
-            authorize_event_id: intent.authorize_event_id.clone(),
-            key_authorization_event: Some(intent.key_authorization_event.clone()),
-            scope_custody_ref: intent.scope_custody_ref.clone(),
-        })
-        .map_err(|error| {
-            PersistenceError::Internal(format!(
-                "encode pending Agent pairing commit intent: {error}"
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async |conn| {
+            if intent.scope_custody_ref.is_none() {
+                return Err(PersistenceError::SchemaViolation(
+                    "Agent pairing lacks verifier-private scope custody".into(),
+                )
+                .into());
+            }
+            let Some(owner)=private_controller_account(conn,&intent.agent_id).await? else {return Ok(None);};
+            crate::pcr_private_authority::require_active_account_owner(conn,&owner).await?;
+            // Serialize the original receipt winner before selecting its ref.
+            // A new nonce/verified_at is not a different business intention.
+            let locked=agent_principals::table.filter(agent_principals::id.eq(&intent.agent_id))
+                .for_update().select(AgentPrincipalRow::as_select())
+                .get_result::<AgentPrincipalRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+            let Some(locked)=locked else {return Ok(None);};
+            if private_controller_account(conn,&intent.agent_id).await?.as_ref()!=Some(&owner) {
+                return Err(PersistenceError::Conflict("failed_precondition: Agent private owner changed before pairing".into()).into());
+            }
+            let supplied=intent.scope_custody_ref.as_ref().expect("checked above");
+            if intent.prepared_scope_custody.as_ref().is_some_and(|prepared|&prepared.reference!=supplied) {
+                return Err(PersistenceError::SchemaViolation("scope preparation and reference differ".into()).into());
+            }
+            let existing=pairing_scope_receipt_in_connection(conn,&intent.authorize_event_id).await?;
+            let winning_ref=if let Some(receipt)=existing.as_ref() {
+                let original=receipt.scope_custody_ref.as_ref().ok_or_else(||PersistenceError::Conflict("failed_precondition: original scope reference is unavailable".into()))?;
+                let evidence=receipt.encrypted_scope_custody.as_ref().ok_or_else(||PersistenceError::Conflict("failed_precondition: original scope evidence is unavailable".into()))?;
+                if receipt.agent_id!=intent.agent_id || receipt.controller_principal_id!=owner.principal_id.as_str()
+                    || receipt.request_digest!=intent.request_digest || receipt.authorize_event_ref!=intent.authorize_event_id
+                    || receipt.pairing_request_id!=intent.pairing_request_id || receipt.approval_request_id!=intent.approval_request_id
+                    || receipt.runtime_key_binding_digest!=intent.runtime_key_binding_digest || original.key_ref!=supplied.key_ref {
+                    return Err(PersistenceError::Conflict("duplicate_conflict: original Agent scope receipt differs".into()).into());
+                }
+                if let Some(prepared)=intent.prepared_scope_custody.as_ref() {
+                    prepared.validate_first_winner(original,evidence)?;
+                } else if original!=supplied {
+                    return Err(PersistenceError::Conflict("duplicate_conflict: exact scope receipt reference differs".into()).into());
+                }
+                original.clone()
+            } else {
+                let prepared=intent.prepared_scope_custody.as_ref().ok_or_else(||PersistenceError::Conflict("failed_precondition: first scope receipt has no verified encrypted evidence".into()))?;
+                prepared.validate_first_winner(&prepared.reference,&prepared.evidence)?;
+                prepared.reference.clone()
+            };
+            let intent_value=serde_json::to_value(PendingAgentPairingCommitIntent {
+                request_digest:intent.request_digest.clone(),authorize_event_id:intent.authorize_event_id.clone(),
+                key_authorization_event:Some(intent.key_authorization_event.clone()),scope_custody_ref:Some(winning_ref.clone()),
+            }).map_err(PersistenceError::database)?;
+            // Exact concurrent/retry winners return their original projection
+            // without another pending update or a new timestamp.
+            if existing.as_ref().is_some_and(|receipt|receipt.outcome.activation_state==arkret_models_collaboration::agent_operations::AgentKeyPairActivationState::AwaitingSourceCommit)
+                && locked.pending_pairing_commit_intent.as_ref()==Some(&intent_value)
+                && matches!(locked.state.as_str(),"active"|"paused")
+                && locked.approval_request_id.as_ref()==Some(&intent.approval_request_id)
+                && locked.runtime_key_binding_digest.as_deref()==Some(intent.runtime_key_binding_digest.as_str())
+                && locked.pairing_request_id.as_ref()==Some(&intent.pairing_request_id)
+                && locked.paired_pairing_request_id.as_ref()!=Some(&intent.pairing_request_id) {
+                return AgentPrincipalRecord::try_from(locked).map(Some).map_err(Into::into);
+            }
+            let record = diesel::update(
+                agent_principals::table
+                    .filter(agent_principals::id.eq(&intent.agent_id))
+                    .filter(agent_principals::state.eq_any(["active", "paused"]))
+                    .filter(
+                        agent_principals::approval_request_id
+                            .eq(intent.approval_request_id.as_str()),
+                    )
+                    .filter(
+                        agent_principals::runtime_key_binding_digest
+                            .eq(&intent.runtime_key_binding_digest),
+                    )
+                    .filter(
+                        agent_principals::pairing_request_id.eq(intent.pairing_request_id.as_str()),
+                    )
+                    .filter(
+                        agent_principals::paired_pairing_request_id
+                            .is_distinct_from(intent.pairing_request_id.as_str()),
+                    )
+                    .filter(
+                        agent_principals::pending_pairing_commit_intent
+                            .is_null()
+                            .or(agent_principals::pending_pairing_commit_intent.eq(&intent_value)),
+                    ),
+            )
+            .set((
+                agent_principals::pending_pairing_commit_intent.eq(&intent_value),
+                agent_principals::updated_at.eq(Utc::now()),
             ))
-        })?;
-        let record = diesel::update(
-            agent_principals::table
-                .filter(agent_principals::id.eq(&intent.agent_id))
-                .filter(agent_principals::state.eq_any(["active", "paused"]))
-                .filter(
-                    agent_principals::approval_request_id.eq(intent.approval_request_id.as_str()),
-                )
-                .filter(
-                    agent_principals::runtime_key_binding_digest
-                        .eq(&intent.runtime_key_binding_digest),
-                )
-                .filter(agent_principals::pairing_request_id.eq(intent.pairing_request_id.as_str()))
-                .filter(
-                    agent_principals::paired_pairing_request_id
-                        .is_distinct_from(intent.pairing_request_id.as_str()),
-                )
-                .filter(
-                    agent_principals::pending_pairing_commit_intent
-                        .is_null()
-                        .or(agent_principals::pending_pairing_commit_intent.eq(&intent_value)),
-                ),
-        )
-        .set((
-            agent_principals::pending_pairing_commit_intent.eq(&intent_value),
-            agent_principals::updated_at.eq(Utc::now()),
-        ))
-        .returning(AgentPrincipalRow::as_returning())
-        .get_result::<AgentPrincipalRow>(&mut conn)
+            .returning(AgentPrincipalRow::as_returning())
+            .get_result::<AgentPrincipalRow>(&mut *conn)
+            .await
+            .optional()
+            .map_err(PersistenceError::database)?;
+            if record.is_some() && existing.is_none() {
+                let prepared=intent.prepared_scope_custody.as_ref().expect("first receipt preparation checked above");
+                let rows=sql_query("UPDATE agent_pairing_receipts SET encrypted_scope_custody=$1 WHERE authorize_event_ref=$2 AND encrypted_scope_custody IS NULL AND scope_custody_ref=$3")
+                    .bind::<Jsonb,_>(serde_json::to_value(&prepared.evidence).map_err(PersistenceError::database)?)
+                    .bind::<Text,_>(&intent.authorize_event_id)
+                    .bind::<Jsonb,_>(serde_json::to_value(&winning_ref).map_err(PersistenceError::database)?)
+                    .execute(&mut *conn).await.map_err(PersistenceError::database)?;
+                if rows!=1 {return Err(PersistenceError::Conflict("failed_precondition: first scope evidence was not retained with its receipt".into()).into());}
+            }
+            record.map(TryInto::try_into).transpose().map_err(Into::into)
+        })
         .await
-        .optional()
-        .map_err(PersistenceError::database)?;
-        record.map(TryInto::try_into).transpose()
+        .map_err(PgTransactionError::into_persistence)
     }
 
     async fn clear_runtime_approval_notification_if_current(
@@ -789,69 +1107,84 @@ impl AgentStore for PgAgentStore {
         &self,
         write: &AgentRuntimeApprovalWrite,
     ) -> PersistenceResult<Option<AgentPrincipalRecord>> {
-        let mut conn = crate::pg_db(&self.pool);
-        let approval_notification_id =
-            ids::typed_uuid_part_expect_internal(&write.approval_notification_id);
-        let runtime_key_request =
-            serde_json::to_value(&write.runtime_key_request).map_err(|error| {
-                PersistenceError::Internal(format!(
-                    "encode typed Agent runtime key request: {error}"
-                ))
-            })?;
-        let runtime_key_material = pack_runtime_key_material(
-            Some(runtime_key_request),
-            Some(write.runtime_public_key_digest.clone()),
-            Some(write.runtime_attestation_digest.clone()),
-            Some(write.proof_verified_at),
-        )?;
-        let record = diesel::update(
-            agent_principals::table
-                .filter(agent_principals::id.eq(&write.agent_id))
-                .filter(agent_principals::state.eq_any(["active", "paused"]))
-                .filter(agent_principals::pairing_request_id.eq(write.pairing_request_id.as_str()))
-                .filter(
-                    agent_principals::paired_pairing_request_id
-                        .is_distinct_from(write.pairing_request_id.as_str()),
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async |conn| {
+            let approval_notification_id =
+                ids::typed_uuid_part_expect_internal(&write.approval_notification_id);
+            let runtime_key_request =
+                serde_json::to_value(&write.runtime_key_request).map_err(|error| {
+                    PersistenceError::Internal(format!(
+                        "encode typed Agent runtime key request: {error}"
+                    ))
+                })?;
+            let runtime_key_material = pack_runtime_key_material(
+                Some(runtime_key_request),
+                Some(write.runtime_public_key_digest.clone()),
+                Some(write.runtime_attestation_digest.clone()),
+                Some(write.proof_verified_at),
+            )?;
+            let Some(owner) = private_controller_account(conn, &write.agent_id).await? else {
+                return Ok(None);
+            };
+            crate::pcr_private_authority::require_active_account_owner(conn, &owner).await?;
+            let record = diesel::update(
+                agent_principals::table
+                    .filter(agent_principals::id.eq(&write.agent_id))
+                    .filter(agent_principals::state.eq_any(["active", "paused"]))
+                    .filter(
+                        agent_principals::pairing_request_id.eq(write.pairing_request_id.as_str()),
+                    )
+                    .filter(
+                        agent_principals::paired_pairing_request_id
+                            .is_distinct_from(write.pairing_request_id.as_str()),
+                    )
+                    .filter(
+                        agent_principals::runtime_key_binding_digest
+                            .is_null()
+                            .or(agent_principals::runtime_key_binding_digest
+                                .eq(&write.runtime_key_binding_digest)),
+                    ),
+            )
+            .set((
+                agent_principals::approval_request_id.eq(case_when::<_, _, Nullable<Text>>(
+                    agent_principals::approval_request_id.is_null(),
+                    Some(write.approval_request_id.as_str()),
                 )
-                .filter(
-                    agent_principals::runtime_key_binding_digest
-                        .is_null()
-                        .or(agent_principals::runtime_key_binding_digest
-                            .eq(&write.runtime_key_binding_digest)),
+                .otherwise(agent_principals::approval_request_id)),
+                agent_principals::approval_notification_id.eq(case_when::<
+                    _,
+                    _,
+                    Nullable<sql_types::Uuid>,
+                >(
+                    agent_principals::approval_notification_id.is_null(),
+                    Some(approval_notification_id),
+                )
+                .otherwise(agent_principals::approval_notification_id)),
+                agent_principals::approval_requested_at.eq(
+                    case_when::<_, _, Nullable<Timestamptz>>(
+                        agent_principals::approval_requested_at.is_null(),
+                        Some(write.approval_requested_at),
+                    )
+                    .otherwise(agent_principals::approval_requested_at),
                 ),
-        )
-        .set((
-            agent_principals::approval_request_id.eq(case_when::<_, _, Nullable<Text>>(
-                agent_principals::approval_request_id.is_null(),
-                Some(write.approval_request_id.as_str()),
-            )
-            .otherwise(agent_principals::approval_request_id)),
-            agent_principals::approval_notification_id.eq(case_when::<
-                _,
-                _,
-                Nullable<sql_types::Uuid>,
-            >(
-                agent_principals::approval_notification_id.is_null(),
-                Some(approval_notification_id),
-            )
-            .otherwise(agent_principals::approval_notification_id)),
-            agent_principals::approval_requested_at.eq(case_when::<_, _, Nullable<Timestamptz>>(
-                agent_principals::approval_requested_at.is_null(),
-                Some(write.approval_requested_at),
-            )
-            .otherwise(agent_principals::approval_requested_at)),
-            agent_principals::controller_account_pk.eq(write.controller_account_pk.get()),
-            agent_principals::recipient_id.eq(&write.recipient_id),
-            agent_principals::runtime_key_binding_digest.eq(&write.runtime_key_binding_digest),
-            agent_principals::runtime_key_material.eq(runtime_key_material),
-            agent_principals::updated_at.eq(Utc::now()),
-        ))
-        .returning(AgentPrincipalRow::as_returning())
-        .get_result::<AgentPrincipalRow>(&mut conn)
+                agent_principals::controller_account_pk.eq(write.controller_account_pk.get()),
+                agent_principals::recipient_id.eq(&write.recipient_id),
+                agent_principals::runtime_key_binding_digest.eq(&write.runtime_key_binding_digest),
+                agent_principals::runtime_key_material.eq(runtime_key_material),
+                agent_principals::updated_at.eq(Utc::now()),
+            ))
+            .returning(AgentPrincipalRow::as_returning())
+            .get_result::<AgentPrincipalRow>(&mut *conn)
+            .await
+            .optional()
+            .map_err(PersistenceError::database)?;
+            record
+                .map(TryInto::try_into)
+                .transpose()
+                .map_err(Into::into)
+        })
         .await
-        .optional()
-        .map_err(PersistenceError::database)?;
-        record.map(TryInto::try_into).transpose()
+        .map_err(PgTransactionError::into_persistence)
     }
 
     async fn enqueue_runtime_message_if_current(

@@ -34,6 +34,16 @@ pub struct PersistenceHandle {
 }
 
 impl PersistenceHandle {
+    pub async fn require_private_account_owner(
+        &self,
+        account: &arkret_wire::AccountId,
+    ) -> PersistenceResult<()> {
+        self.persistence
+            .accounts()
+            .require_private_owner(account)
+            .await
+    }
+
     pub async fn management_review_request(
         &self,
         caller: &arkret_wire::ActorId,
@@ -139,6 +149,17 @@ impl PersistenceHandle {
         self.persistence
             .federation_outbox()
             .erasure_receipt_feedback(receipt)
+            .await
+    }
+
+    pub async fn record_private_preparation(
+        &self,
+        primary: &coland_storage::IdempotencyRecord,
+        context: Option<&coland_storage::IdempotencyRecord>,
+    ) -> PersistenceResult<coland_storage::IdempotencyRecord> {
+        self.persistence
+            .idempotency_keys()
+            .record_preparation(primary, context)
             .await
     }
 
@@ -511,6 +532,28 @@ impl PersistenceHandle {
             .await
     }
 
+    pub async fn organization_pcr_genesis_original(
+        &self,
+        request: &arkret_models_collaboration::authority_commit::PeerAuthorityForwardEventRequestBody,
+        source: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<Option<arkret_wire::AuthoritySubmitResponseBody>> {
+        self.persistence
+            .actor_profiles()
+            .organization_pcr_genesis_original(request, source)
+            .await
+    }
+
+    /// Admit one independently authorized Organization PCR create through its native unit.
+    pub async fn admit_organization_pcr_genesis(
+        &self,
+        write: coland_storage::OrganizationPcrGenesisAdmissionWrite,
+    ) -> PersistenceResult<arkret_wire::AuthoritySubmitResponseBody> {
+        self.persistence
+            .actor_profiles()
+            .admit_organization_pcr_genesis(write)
+            .await
+    }
+
     /// Admit one controller-executed Agent PCR genesis through its unit.
     pub async fn admit_agent_pcr_genesis(
         &self,
@@ -771,6 +814,18 @@ impl PersistenceHandle {
             .persistence
             .account_status_replicas()
             .erasure_pending(limit)
+            .await?)
+    }
+
+    pub async fn complete_account_erasure(
+        &self,
+        pending: &coland_storage::AccountErasureExecution,
+        sign: coland_storage::AccountErasureCompletionSigner<'_>,
+    ) -> crate::ServiceResult<coland_storage::AccountErasureExecution> {
+        Ok(self
+            .persistence
+            .account_status_replicas()
+            .complete_erasure(pending, sign)
             .await?)
     }
 
@@ -1747,10 +1802,10 @@ impl PersistenceHandle {
 
     pub async fn revoke_local_devices(
         &self,
-        actor: &str,
+        account: &arkret_wire::AccountId,
         at: chrono::DateTime<chrono::Utc>,
     ) -> PersistenceResult<usize> {
-        self.persistence.devices().revoke_actor(actor, at).await
+        self.persistence.devices().revoke_account(account, at).await
     }
 
     pub fn member_identity_store(&self) -> &dyn coland_storage::MemberIdentityStore {

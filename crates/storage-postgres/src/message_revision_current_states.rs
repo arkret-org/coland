@@ -193,15 +193,27 @@ fn supported_plain_text_revision(payload: &Value) -> bool {
         && plain_text_content(object.get("content"))
 }
 
-pub(crate) async fn commit_message_create_current_state_in_connection(
+#[inline(never)]
+pub(crate) fn commit_message_create_current_state_in_connection<'a>(
+    conn: &'a mut AsyncPgConnection,
+    event: &'a arkret_wire::Event,
+    commit: &'a arkret_wire::RealmCommit,
+    prepared: Option<&'a coland_storage::EventApprovalCommit>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = PersistenceResult<()>> + Send + 'a>> {
+    if event.kind != arkret_wire::EventKind::MessageCreate {
+        return Box::pin(std::future::ready(Ok(())));
+    }
+    crate::boxed_future(|| {
+        commit_message_create_current_state_in_connection_inner(conn, event, commit, prepared)
+    })
+}
+
+async fn commit_message_create_current_state_in_connection_inner(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
     prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<()> {
-    if event.kind != arkret_wire::EventKind::MessageCreate {
-        return Ok(());
-    }
     arkret_schema::validate_event_for_submit(event)
         .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
     require_message_source_stream(event, commit)?;
@@ -857,15 +869,27 @@ pub(crate) fn require_message_write_carrier(
 /// the same plain-text content gate as create. The accepted carrier then
 /// replaces the row it locked, so the canonical revision is always the one at
 /// the greatest stream position of the chain.
-pub(crate) async fn commit_message_revise_current_state_in_connection(
+#[inline(never)]
+pub(crate) fn commit_message_revise_current_state_in_connection<'a>(
+    conn: &'a mut AsyncPgConnection,
+    event: &'a arkret_wire::Event,
+    commit: &'a arkret_wire::RealmCommit,
+    prepared: Option<&'a coland_storage::EventApprovalCommit>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = PersistenceResult<()>> + Send + 'a>> {
+    if event.kind != arkret_wire::EventKind::MessageRevise {
+        return Box::pin(std::future::ready(Ok(())));
+    }
+    crate::boxed_future(|| {
+        commit_message_revise_current_state_in_connection_inner(conn, event, commit, prepared)
+    })
+}
+
+async fn commit_message_revise_current_state_in_connection_inner(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
     prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<()> {
-    if event.kind != arkret_wire::EventKind::MessageRevise {
-        return Ok(());
-    }
     require_message_write_carrier(event, commit)?;
     let payload = serde_json::to_value(&event.payload).map_err(PersistenceError::database)?;
     let encrypted = payload.get("encrypted_content").is_some()

@@ -8,11 +8,11 @@ use super::{
     DeviceInventoryStore, DeviceKeyStore, DeviceMessageBatchCommitOutcome,
     DeviceMessageBatchInspection, DeviceMessageBatchRecord, DeviceMessageIntentRecord,
     DeviceMessageRecord, DeviceMessageStore, DeviceRevocationGateSelector,
-    DeviceRevocationGateStatus, Integer, JsonPayloadRow, Jsonb, MaxSeqRow, Nullable,
-    OneTimeKeyStore, OptionalExtension, PersistenceError, PersistenceResult, PgPool,
-    PgTransactionError, QueryableByName, RecipientDeliveryRecord, RecipientQueueSelector,
-    RunQueryDsl, Text, Timestamptz, Utc, Uuid, Value, async_trait, fresh_device_message_ack_token,
-    pg_conn, sql_query, sql_types,
+    DeviceRevocationGateStatus, Integer, JsonPayloadRow, Jsonb, Nullable, OneTimeKeyStore,
+    OptionalExtension, PersistenceError, PersistenceResult, PgPool, PgTransactionError,
+    QueryableByName, RecipientDeliveryRecord, RecipientQueueSelector, RunQueryDsl, Text,
+    Timestamptz, Utc, Uuid, Value, async_trait, fresh_device_message_ack_token, pg_conn, sql_query,
+    sql_types,
 };
 pub struct PgDeviceMessageStore {
     pub pool: PgPool,
@@ -131,6 +131,9 @@ impl DeviceMessageStore for PgDeviceMessageStore {
             let mut selectors = vec![&message.recipient_device_authorization];
             selectors.extend(device_revocation_gate);
             crate::device_revocations::lock_artifact_devices_in_transaction(conn, &selectors).await?;
+            // Every Account recipient joins the physical-erasure barrier before
+            // any shared queue or idempotency table lock is taken.
+            queue_authority::require_active_accounts_in_transaction(conn, &selectors).await?;
             crate::ensure_gate_allowed_in_transaction(conn, &message.recipient_device_authorization).await?;
             if let Some(selector) = device_revocation_gate {
                 crate::ensure_gate_allowed_in_transaction(conn, selector).await?;
@@ -242,6 +245,15 @@ impl DeviceMessageStore for PgDeviceMessageStore {
             .await
             .map_err(PersistenceError::database)?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+            let mut batch=batch;
+            let sender_account=if let Some(selector)=batch.device_revocation_gate.as_ref() {
+                Some(arkret_wire::AccountId::new(selector.principal_id.clone(),selector.station_id.clone()))
+            } else if let Some(guard)=batch.sender_agent_guard.as_ref() {
+                match crate::pcr_private_authority::accepted_governance(conn,&guard.pcr_realm_id).await? {
+                    arkret_wire::GenesisGovernance::Agent(account) if account.principal_id==guard.agent_id=>Some(account),
+                    _=>return Ok(DeviceMessageBatchCommitOutcome::SenderAgentUnauthorized),
+                }
+            } else {None};
             let mut selectors = Vec::new();
             selectors.extend(batch.device_revocation_gate.as_ref());
             for item in &batch.items {
@@ -252,6 +264,15 @@ impl DeviceMessageStore for PgDeviceMessageStore {
             }
             // Device locks always precede the shared idempotency ledger lock.
             crate::device_revocations::lock_artifact_devices_in_transaction(conn, &selectors).await?;
+            // Every Account recipient joins the physical-erasure barrier before
+            // any shared queue or idempotency table lock is taken.
+            let inactive=queue_authority::inactive_batch_recipient_accounts(conn,sender_account.as_ref(),&selectors).await?;
+            drop(selectors);
+            for item in &mut batch.items {
+                if item.message.as_ref().is_some_and(|message|inactive.contains(&message.envelope.recipient_account_id.to_string())) {
+                    item.message=None;
+                }
+            }
             sql_query(
                 "LOCK TABLE device_message_txns, device_message_idempotency \
                  IN SHARE ROW EXCLUSIVE MODE",
@@ -527,28 +548,9 @@ impl DeviceMessageStore for PgDeviceMessageStore {
     ) -> PersistenceResult<Option<usize>> {
         queue_authority::ack_recipient_with_token(&self.pool, selector, acknowledgement_token).await
     }
-
-    async fn lost_watermark(
-        &self,
-        recipient: &str,
-        device_id: &str,
-    ) -> PersistenceResult<Option<i64>> {
-        let mut conn = crate::pg_db(&self.pool);
-        sql_query(
-            "SELECT lost_through AS max_seq \
-             FROM device_message_lost_watermarks \
-             WHERE recipient = $1 AND device_id = $2",
-        )
-        .bind::<Text, _>(recipient)
-        .bind::<Text, _>(device_id)
-        .get_result::<MaxSeqRow>(&mut conn)
-        .await
-        .optional()
-        .map(|row| row.and_then(|row| row.max_seq))
-        .map_err(PersistenceError::database)
-    }
 }
-// ── G3.S1: in-memory MLS lifecycle stores ─────────────────────────────
+// â”€â”€ G3.S1: in-memory MLS lifecycle stores
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 pub struct PgDeviceInventoryStore {
     pub pool: PgPool,
@@ -588,22 +590,25 @@ impl DeviceInventoryStore for PgDeviceInventoryStore {
         if let Some(value) = record.last_key_upload_at {
             object.insert("last_key_upload_at".into(), serde_json::json!(value));
         }
-        let mut conn = crate::pg_db(&self.pool);
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async |conn| {
+        require_active_inventory_account(conn, &record.actor).await?;
         sql_query("INSERT INTO devices(id,actor_id,device_id,payload,verification_state,created_at,updated_at) VALUES($1,$2,$3,$4,'unverified',$5,$5) ON CONFLICT(actor_id,device_id) DO UPDATE SET payload=devices.payload || EXCLUDED.payload,updated_at=GREATEST(devices.updated_at,EXCLUDED.updated_at)")
             .bind::<sql_types::Uuid,_>(Uuid::now_v7()).bind::<Text,_>(&record.actor)
             .bind::<Text,_>(&record.device_id).bind::<Jsonb,_>(payload).bind::<Timestamptz,_>(record.updated_at)
-            .execute(&mut conn).await.map_err(PersistenceError::database)?;
+            .execute(&mut *conn).await.map_err(PersistenceError::database)?;
         Ok(())
+        }).await.map_err(PgTransactionError::into_persistence)
     }
 
-    async fn revoke_actor(
+    async fn revoke_account(
         &self,
-        actor: &str,
+        account: &arkret_wire::AccountId,
         revoked_at: chrono::DateTime<Utc>,
     ) -> PersistenceResult<usize> {
         let mut conn = crate::pg_db(&self.pool);
-        sql_query("UPDATE devices SET revoked_at=$2,updated_at=GREATEST(updated_at,$2) WHERE actor_id=$1 AND revoked_at IS NULL")
-            .bind::<Text,_>(actor).bind::<Timestamptz,_>(revoked_at).execute(&mut conn).await.map_err(PersistenceError::database)
+        sql_query("UPDATE devices SET revoked_at=$3,updated_at=GREATEST(updated_at,$3) WHERE actor_id=$1 AND station_id=$2 AND revoked_at IS NULL")
+            .bind::<Text,_>(account.principal_id.as_str()).bind::<Text,_>(account.station_id.as_str()).bind::<Timestamptz,_>(revoked_at).execute(&mut conn).await.map_err(PersistenceError::database)
     }
 
     async fn put_if_absent(&self, record: &DeviceInventoryRecord) -> PersistenceResult<bool> {
@@ -614,8 +619,10 @@ impl DeviceInventoryStore for PgDeviceInventoryStore {
                 "device placeholder cannot carry authorization".into(),
             ));
         }
-        let mut conn = crate::pg_db(&self.pool);
-        sql_query(
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async |conn| {
+        require_active_inventory_account(conn, &record.actor).await?;
+        let affected = sql_query(
             "INSERT INTO devices (id, actor_id, device_id, payload, verification_state, created_at, updated_at, revoked_at) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
              ON CONFLICT (actor_id, device_id) DO NOTHING",
@@ -628,10 +635,10 @@ impl DeviceInventoryStore for PgDeviceInventoryStore {
         .bind::<Timestamptz, _>(record.created_at)
         .bind::<Timestamptz, _>(record.updated_at)
         .bind::<Nullable<Timestamptz>, _>(record.revoked_at)
-        .execute(&mut conn)
-        .await
-        .map(|affected| affected > 0)
-        .map_err(PersistenceError::database)
+        .execute(&mut *conn)
+        .await?;
+        Ok(affected > 0)
+        }).await.map_err(PgTransactionError::into_persistence)
     }
 
     async fn list_for_actor(&self, actor: &str) -> PersistenceResult<Vec<DeviceInventoryRecord>> {
@@ -712,3 +719,16 @@ impl From<DeviceRow> for DeviceInventoryRecord {
 /// PostgreSQL-backed device key bundle store (`keys/upload`).
 mod key_material;
 pub use key_material::{PgDeviceKeyStore, PgOneTimeKeyStore};
+
+/// Inventory presentation rows use the immutable local Station assignment;
+/// the principal alone is never used to select a foreign Account barrier.
+async fn require_active_inventory_account(
+    conn: &mut AsyncPgConnection,
+    principal: &str,
+) -> PersistenceResult<()> {
+    let row = sql_query("SELECT jsonb_build_object('principal_id',$1::text,'station_id',current_device_inventory_station()) AS payload")
+        .bind::<Text,_>(principal).get_result::<JsonPayloadRow>(&mut *conn).await.map_err(PersistenceError::database)?;
+    let account: arkret_wire::AccountId =
+        serde_json::from_value(row.payload).map_err(PersistenceError::database)?;
+    crate::pcr_private_authority::require_active_account_owner(conn, &account).await
+}

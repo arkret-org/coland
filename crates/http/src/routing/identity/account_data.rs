@@ -832,10 +832,6 @@ mod tests {
             Ok(())
         }
 
-        async fn delete_account(&self, _account_id: &arkret_wire::AccountId) -> ServiceResult<()> {
-            Ok(())
-        }
-
         async fn account_localparts(
             &self,
             _account_pk: AccountPk,

@@ -1,5 +1,20 @@
 pub const SERVICE_IDENTITY_KEYSTORE_APP: &str = "coland.service-identity";
+/// Explicitly provisioned Service secret; runtime paths only load this key.
+pub const SERVICE_CUSTODY_KEY_REF: &str = "coland:service:scope-custody:v1";
 pub const CONFIGURED_SIGNING_KEY_REF: &str = "secret:COLAND_NOTARY_SIGNING_KEY";
+
+/// Explicit provisioning only. Runtime requests must never call this helper
+/// or infer a new deployment from the absence of private evidence rows.
+pub fn provision_service_custody_key(store: &dyn arkret_keystore::KeyStore) -> anyhow::Result<()> {
+    use rand::RngExt as _;
+    let mut bytes = zeroize::Zeroizing::new(vec![0u8; 32]);
+    rand::rng().fill(bytes.as_mut_slice());
+    let key = arkret_keystore::KeyBytes::new(std::mem::take(&mut *bytes));
+    if !store.compare_exchange(SERVICE_CUSTODY_KEY_REF, None, key.as_ref())? {
+        anyhow::bail!("Service custody key already exists; refusing to replace its original bytes");
+    }
+    Ok(())
+}
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -2680,5 +2695,59 @@ mod tests {
             "classical-x25519"
         )));
         assert!(!AppConfig::pq_hybrid_tls_probe_verified_from_value(None));
+    }
+}
+
+#[cfg(test)]
+mod service_custody_provision_tests {
+    use arkret_keystore::{EncryptedFileKeyStore, KeyStore as _};
+
+    use super::*;
+
+    #[test]
+    fn explicit_custody_provision_is_create_only_and_cold_reopen_keeps_original_secret() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("vault");
+        let master = rand::random();
+        let first =
+            EncryptedFileKeyStore::new(&path, SERVICE_IDENTITY_KEYSTORE_APP, master).unwrap();
+        provision_service_custody_key(&first).unwrap();
+        let original = first.load(SERVICE_CUSTODY_KEY_REF).unwrap();
+        assert_eq!(original.len(), 32);
+        assert!(provision_service_custody_key(&first).is_err());
+        assert_eq!(
+            first.load(SERVICE_CUSTODY_KEY_REF).unwrap().as_ref(),
+            original.as_ref()
+        );
+        drop(first);
+        let cold =
+            EncryptedFileKeyStore::new(&path, SERVICE_IDENTITY_KEYSTORE_APP, master).unwrap();
+        assert_eq!(
+            cold.load(SERVICE_CUSTODY_KEY_REF).unwrap().as_ref(),
+            original.as_ref()
+        );
+        assert!(provision_service_custody_key(&cold).is_err());
+    }
+
+    #[test]
+    fn custody_provision_preserves_corrupt_existing_value_and_real_backend_errors() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("vault");
+        let master = [27u8; 32];
+        let store =
+            EncryptedFileKeyStore::new(&path, SERVICE_IDENTITY_KEYSTORE_APP, master).unwrap();
+        store
+            .store(SERVICE_CUSTODY_KEY_REF, b"invalid original key")
+            .unwrap();
+        assert!(provision_service_custody_key(&store).is_err());
+        assert_eq!(
+            store.load(SERVICE_CUSTODY_KEY_REF).unwrap().as_ref(),
+            b"invalid original key"
+        );
+        let before = std::fs::read(&path).unwrap();
+        let wrong =
+            EncryptedFileKeyStore::new(&path, SERVICE_IDENTITY_KEYSTORE_APP, [28u8; 32]).unwrap();
+        assert!(provision_service_custody_key(&wrong).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 }

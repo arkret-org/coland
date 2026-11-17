@@ -4,77 +4,33 @@
 
 use std::sync::Arc;
 
-use arkret_models_collaboration::governance::erasure::{
-    ErasureReceiptPackage, ErasureStorageBoundary,
-};
+use arkret_models_collaboration::governance::erasure::ErasureStorageBoundary;
 use arkret_wire::AccountStatusRecordId;
 use chrono::{Duration, Utc};
-use serde::{Deserialize, Serialize};
+use coland_storage::{AccountErasureExecution, AccountErasureExecutionState as ExecutionState};
 
 use crate::error::AppError;
 use crate::state::AppState;
 
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum ExecutionState {
-    Pending,
-    Completed,
-    FanoutEnqueued,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AccountErasureExecution {
-    receiver_id: arkret_wire::DidCoreId,
-    account_authority_id: arkret_wire::DidCoreId,
-    account_id: arkret_wire::AccountId,
-    principal_id: arkret_wire::DidCoreId,
-    triggering_status_record_id: AccountStatusRecordId,
-    storage_boundary: ErasureStorageBoundary,
-    state: ExecutionState,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    package: Option<ErasureReceiptPackage>,
-}
-
 fn execution_principal_id(state: &AppState) -> arkret_wire::DidCoreId {
     state.service_core_id()
 }
 
 fn execution_key(record_id: &AccountStatusRecordId, state: ExecutionState) -> String {
-    let phase = match state {
-        ExecutionState::Pending => "intent",
-        ExecutionState::Completed => "completed",
-        ExecutionState::FanoutEnqueued => "fanout_enqueued",
-    };
-    format!("{}:account_private_store:{phase}", record_id.as_str())
+    AccountErasureExecution::key_for(record_id, state)
 }
 
 fn execution_hash(execution: &AccountErasureExecution) -> Result<String, AppError> {
-    #[derive(Serialize)]
-    struct Coordinates<'a> {
-        receiver_id: &'a arkret_wire::DidCoreId,
-        account_authority_id: &'a arkret_wire::DidCoreId,
-        account_id: &'a arkret_wire::AccountId,
-        principal_id: &'a arkret_wire::DidCoreId,
-        triggering_status_record_id: &'a AccountStatusRecordId,
-        storage_boundary: ErasureStorageBoundary,
-    }
-    arkret_canonical::canonical_sha256(&Coordinates {
-        receiver_id: &execution.receiver_id,
-        account_authority_id: &execution.account_authority_id,
-        account_id: &execution.account_id,
-        principal_id: &execution.principal_id,
-        triggering_status_record_id: &execution.triggering_status_record_id,
-        storage_boundary: execution.storage_boundary,
-    })
-    .map_err(|error| AppError::internal(format!("erasure execution digest: {error}")))
+    execution
+        .request_hash()
+        .map_err(|error| AppError::internal(error.to_string()))
 }
 
-/// Persist the execution intent before the account-status receiver acknowledges
-/// an erasure_pending record. Exact replay is a no-op; any coordinate change is
-/// a permanent duplicate conflict.
+/// Verify the original execution intent atomically retained by terminal
+/// replica admission before the receiver acknowledges. This path never creates
+/// a second intent or repairs a hand-seeded, incomplete admission.
 pub async fn ensure_intent(
     state: &AppState,
     account_authority_id: &str,
@@ -105,29 +61,21 @@ pub async fn ensure_intent(
         .await
         .map_err(|error| AppError::internal(format!("erasure intent lookup: {error}")))?
     {
-        if existing.request_hash != request_hash {
+        let original: AccountErasureExecution = serde_json::from_value(existing.response_body)
+            .map_err(|error| AppError::internal(format!("erasure intent decode: {error}")))?;
+        if existing.request_hash != request_hash
+            || original != execution
+            || existing.response_status != 202
+        {
             return Err(AppError::conflict(
                 "erasure execution key is bound to different coordinates",
             ));
         }
         return Ok(());
     }
-    let created_at = Utc::now();
-    state
-        .jobs()
-        .store_idempotency_record(coland_services::jobs::IdempotencyState {
-            authenticated_actor: arkret_wire::ActorId::service(principal_idempotency_id),
-            operation_id: coland_services::jobs::INTERNAL_IDEMPOTENCY_OPERATION.to_owned(),
-            idempotency_key: key,
-            request_hash,
-            response_status: 202,
-            response_body: serde_json::to_value(&execution)
-                .map_err(|error| AppError::internal(format!("erasure intent encode: {error}")))?,
-            created_at,
-            expires_at: created_at + Duration::days(36_500),
-        })
-        .await
-        .map_err(|error| AppError::internal(format!("erasure intent store: {error}")))
+    Err(AppError::internal(
+        "accepted terminal record has no atomic erasure intent",
+    ))
 }
 
 async fn store_execution(
@@ -162,9 +110,8 @@ async fn run_execution(
     account_id: &arkret_wire::AccountId,
     principal_id: &arkret_wire::DidCoreId,
     record_id: &AccountStatusRecordId,
+    account_authority_id: &arkret_wire::DidCoreId,
 ) -> Result<(), AppError> {
-    let account_authority_id =
-        crate::routing::events::peer::trusted_account_authority_id(state).await?;
     ensure_intent(
         state,
         account_authority_id.as_str(),
@@ -200,26 +147,25 @@ async fn run_execution(
         ));
     }
     if execution.state == ExecutionState::Pending {
-        let package = crate::routing::identity::account::lifecycle::execute_account_status_erasure(
+        crate::routing::identity::account::lifecycle::prepare_account_status_erasure(
             state,
             &execution.account_id,
-            &execution.triggering_status_record_id,
         )
         .await?;
-        execution.package = Some(package);
-        execution.state = ExecutionState::Completed;
-        store_execution(state, &execution, stored.created_at).await?;
-        let completed = state
-            .jobs()
-            .idempotency_record(
-                &principal_idempotency_id,
-                &execution_key(record_id, ExecutionState::Completed),
+        let sign = |completed_at| {
+            crate::routing::identity::account::lifecycle::account_status_erasure_package(
+                state,
+                &execution.account_id,
+                &execution.triggering_status_record_id,
+                completed_at,
             )
+            .map_err(|error| coland_storage::PersistenceError::Internal(error.to_string()))
+        };
+        execution = state
+            .persistence()
+            .complete_account_erasure(&execution, &sign)
             .await
-            .map_err(|error| AppError::internal(format!("erasure completion lookup: {error}")))?
-            .ok_or_else(|| AppError::internal("erasure completion was not persisted"))?;
-        execution = serde_json::from_value(completed.response_body)
-            .map_err(|error| AppError::internal(format!("erasure completion decode: {error}")))?;
+            .map_err(|error| AppError::internal(format!("atomic erasure completion: {error}")))?;
     }
     if execution.state == ExecutionState::Completed {
         let package = execution
@@ -244,9 +190,8 @@ async fn run_execution(
     Ok(())
 }
 
-/// Reconcile every accepted erasure_pending record. This makes a crash between
-/// replica commit and intent persistence recoverable without introducing a
-/// second command carrier.
+/// Reconcile every accepted terminal record using the intent retained in its
+/// same admission transaction. No second command carrier or repair ledger exists.
 pub async fn run_once(state: &AppState) -> Result<usize, AppError> {
     let mut processed = 0_usize;
     for record in state
@@ -260,6 +205,7 @@ pub async fn run_once(state: &AppState) -> Result<usize, AppError> {
             &record.account_id,
             &record.account_id.principal_id,
             &record.account_status_record_id,
+            &record.account_authority_id,
         )
         .await?;
         processed += 1;

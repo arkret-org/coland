@@ -561,9 +561,10 @@ impl RecoverySessionStore for PgRecoverySessionStore {
             let revision=sql_query("SELECT COALESCE((SELECT revision FROM key_backup_list_revisions WHERE actor_id=$1),0)::bigint AS revision")
                 .bind::<Text,_>(snapshot["actor_id"].as_str().ok_or_else(||PersistenceError::Conflict("manifest actor missing".to_owned()))?).get_result::<SnapshotRevision>(&mut *conn).await.map_err(PersistenceError::database)?.revision;
             if Some(revision)!=snapshot["revision"].as_i64(){return Err(PersistenceError::Conflict("backup manifest changed before verification".to_owned()).into());}
-            let updated=sql_query("UPDATE recovery_sessions SET state='verified',proof_payload=$2,updated_at=$3 WHERE id=$1 AND state='pending' AND expires_at>$3")
+            let updated=sql_query("UPDATE recovery_sessions SET state='verified',proof_payload=$2,updated_at=$3 WHERE id=$1 AND principal_id=$4 AND station_id=$5 AND state='pending' AND expires_at>$3")
                 .bind::<sql_types::Uuid,_>(ids::typed_uuid_part_expect_internal(&record.recovery_session_id))
                 .bind::<Nullable<Jsonb>,_>(record.proof_payload.as_ref()).bind::<Timestamptz,_>(record.updated_at)
+                .bind::<Text,_>(record.principal_id.as_str()).bind::<Text,_>(record.station_id.as_str())
                 .execute(&mut *conn).await.map_err(PersistenceError::database)?;
             if updated!=1 {return Err(PersistenceError::Conflict("recovery session verification raced or expired".to_owned()).into());}
             let account=arkret_wire::AccountId::new(record.principal_id.clone(),record.station_id.clone());
@@ -593,10 +594,14 @@ impl RecoverySessionStore for PgRecoverySessionStore {
         let mut conn = pg_conn(&self.pool)
             .await
             .map_err(PersistenceError::database)?;
+        conn.transaction::<_,crate::PgTransactionError,_>(async |conn| {
+        let account=arkret_wire::AccountId::new(record.principal_id.clone(),record.station_id.clone());
+        crate::pcr_private_authority::require_active_account_owner(conn,&account).await?;
+        let result:PersistenceResult<()> = async {
         let affected = sql_query(
             "UPDATE recovery_sessions SET \
                 state = $2, proof_payload = $3, transaction_id = $4, updated_at = $5, expires_at = $6 \
-             WHERE id = $1",
+             WHERE id = $1 AND principal_id=$7 AND station_id=$8",
         )
         .bind::<sql_types::Uuid, _>(ids::typed_uuid_part_expect_internal(
             &record.recovery_session_id,
@@ -611,6 +616,8 @@ impl RecoverySessionStore for PgRecoverySessionStore {
         )
         .bind::<Timestamptz, _>(record.updated_at)
         .bind::<Timestamptz, _>(record.expires_at)
+        .bind::<Text,_>(account.principal_id.as_str())
+        .bind::<Text,_>(account.station_id.as_str())
         .execute(&mut *conn)
         .await
         .map_err(PersistenceError::database)?;
@@ -621,6 +628,9 @@ impl RecoverySessionStore for PgRecoverySessionStore {
             )));
         }
         Ok(())
+        }.await;
+        Ok(result?)
+        }).await.map_err(crate::PgTransactionError::into_persistence)
     }
 }
 
@@ -671,7 +681,9 @@ pub(crate) async fn lock_recovery_session_authority(
         .bind::<sql_types::Uuid,_>(id).get_result::<crate::JsonPayloadRow>(&mut *conn)
         .await.optional().map_err(PersistenceError::database)?
         .ok_or_else(|| PersistenceError::Conflict("recovery session no longer verified or current".to_owned()))?.payload;
-    if locked["policy_payload"] != before["policy_payload"]
+    if locked["principal_id"] != before["principal_id"]
+        || locked["station_id"] != before["station_id"]
+        || locked["policy_payload"] != before["policy_payload"]
         || locked["proof_payload"] != before["proof_payload"]
     {
         return Err(

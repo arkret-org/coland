@@ -204,7 +204,8 @@ pub(crate) async fn read_retained_envelope(
         .map_err(PersistenceError::database)?;
     admission.verify_retained_envelope(&backup)?;
     if backup.backup_id != *id
-        || serde_json::to_value(&backup.contents).map_err(PersistenceError::database)?
+        || serde_json::to_value(crate::key_backup::content_root_index(&backup))
+            .map_err(PersistenceError::database)?
             != row["index"]
     {
         return Err(invalid());

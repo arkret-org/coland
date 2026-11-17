@@ -9,6 +9,13 @@ pub struct PgInviteLocatorStore {
     pub pool: PgPool,
 }
 
+fn locator_account(subject: &str, station: &str) -> PersistenceResult<arkret_wire::AccountId> {
+    Ok(arkret_wire::AccountId::new(
+        arkret_wire::DidCoreId::new(subject.to_owned()).map_err(PersistenceError::database)?,
+        arkret_wire::DidCoreId::new(station.to_owned()).map_err(PersistenceError::database)?,
+    ))
+}
+
 #[derive(QueryableByName)]
 struct CountResult {
     #[diesel(sql_type = BigInt)]
@@ -17,6 +24,10 @@ struct CountResult {
 
 #[derive(QueryableByName)]
 struct LocatorRow {
+    #[diesel(sql_type = Text)]
+    subject_id: String,
+    #[diesel(sql_type = Text)]
+    recipient_id: String,
     #[diesel(sql_type = Jsonb)]
     record_payload: Value,
     #[diesel(sql_type = Bool)]
@@ -30,6 +41,11 @@ struct LocatorRow {
 fn decode(mut row: LocatorRow) -> PersistenceResult<InviteLocatorRecord> {
     let mut record: InviteLocatorRecord = serde_json::from_value(row.record_payload.take())
         .map_err(|error| PersistenceError::Internal(format!("invite locator decode: {error}")))?;
+    if record.subject_id != row.subject_id || record.recipient_id != row.recipient_id {
+        return Err(PersistenceError::SchemaViolation(
+            "invite locator payload differs from its full Account columns".into(),
+        ));
+    }
     record.one_time_use = row.one_time_use;
     record.revoked_at = row.revoked_at;
     record.consumed_at = row.consumed_at;
@@ -54,14 +70,17 @@ impl InviteLocatorStore for PgInviteLocatorStore {
             .map_err(PersistenceError::database)?;
         let record = record.clone();
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+            let owner=locator_account(&record.subject_id,&record.recipient_id)?;
+            crate::pcr_private_authority::require_active_account_owner(conn,&owner).await?;
             sql_query("SELECT pg_advisory_xact_lock(hashtext($1))")
                 .bind::<Text, _>(&record.subject_id)
                 .execute(conn)
                 .await?;
             let count = sql_query(
-                "SELECT COUNT(*)::bigint AS count FROM invite_locators WHERE subject_id = $1 AND expires_at > $2 AND revoked_at IS NULL AND consumed_at IS NULL",
+                "SELECT COUNT(*)::bigint AS count FROM invite_locators WHERE subject_id=$1 AND recipient_id=$2 AND expires_at>$3 AND revoked_at IS NULL AND consumed_at IS NULL",
             )
             .bind::<Text, _>(&record.subject_id)
+            .bind::<Text, _>(&record.recipient_id)
             .bind::<Timestamptz, _>(now)
             .get_result::<CountResult>(conn)
             .await?;
@@ -93,10 +112,21 @@ impl InviteLocatorStore for PgInviteLocatorStore {
             .map_err(PersistenceError::database)?;
         let token_digest = token_digest.to_owned();
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
-            let row = sql_query("SELECT record_payload, one_time_use, revoked_at, consumed_at FROM invite_locators WHERE token_digest = $1 AND expires_at > $2 AND revoked_at IS NULL AND consumed_at IS NULL FOR UPDATE")
+            let owner_row=sql_query("SELECT subject_id,recipient_id,record_payload,one_time_use,revoked_at,consumed_at FROM invite_locators WHERE token_digest=$1 AND expires_at>$2 AND revoked_at IS NULL AND consumed_at IS NULL")
+                .bind::<Text,_>(&token_digest).bind::<Timestamptz,_>(now)
+                .get_result::<LocatorRow>(&mut *conn).await.optional()?;
+            let Some(original)=owner_row.map(decode).transpose()? else { return Ok(None); };
+            let owner=locator_account(&original.subject_id,&original.recipient_id)?;
+            if !crate::pcr_private_authority::is_active_human_account(conn,&owner).await? {
+                return Ok(None);
+            }
+            let row = sql_query("SELECT subject_id,recipient_id,record_payload,one_time_use,revoked_at,consumed_at FROM invite_locators WHERE token_digest = $1 AND expires_at > $2 AND revoked_at IS NULL AND consumed_at IS NULL FOR UPDATE")
                 .bind::<Text, _>(&token_digest).bind::<Timestamptz, _>(now)
                 .get_result::<LocatorRow>(conn).await.optional()?;
             let Some(mut record) = row.map(decode).transpose()? else { return Ok(None); };
+            if locator_account(&record.subject_id,&record.recipient_id)?!=owner {
+                return Err(PersistenceError::SchemaViolation("invite locator changed its immutable Account".into()).into());
+            }
             if record.one_time_use {
                 sql_query("UPDATE invite_locators SET consumed_at = $2 WHERE token_digest = $1")
                     .bind::<Text, _>(&token_digest).bind::<Timestamptz, _>(now).execute(conn).await?;
@@ -108,7 +138,7 @@ impl InviteLocatorStore for PgInviteLocatorStore {
 
     async fn rotate(
         &self,
-        subject_id: &str,
+        account_id: &arkret_wire::AccountId,
         old_locator_id: &str,
         mutation: &InviteLocatorRotateMutation,
         now: chrono::DateTime<Utc>,
@@ -116,12 +146,13 @@ impl InviteLocatorStore for PgInviteLocatorStore {
         let mut conn = pg_conn(&self.pool)
             .await
             .map_err(PersistenceError::database)?;
-        let subject_id = subject_id.to_owned();
+        let account_id = account_id.clone();
         let old_locator_id = old_locator_id.to_owned();
         let mutation = mutation.clone();
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
-            let old = sql_query("SELECT record_payload, one_time_use, revoked_at, consumed_at FROM invite_locators WHERE locator_id = $1 AND subject_id = $2 AND expires_at > $3 AND revoked_at IS NULL AND consumed_at IS NULL FOR UPDATE")
-                .bind::<Text, _>(&old_locator_id).bind::<Text, _>(&subject_id).bind::<Timestamptz, _>(now)
+            crate::pcr_private_authority::require_active_account_owner(conn,&account_id).await?;
+            let old = sql_query("SELECT subject_id,recipient_id,record_payload,one_time_use,revoked_at,consumed_at FROM invite_locators WHERE locator_id=$1 AND subject_id=$2 AND recipient_id=$4 AND expires_at>$3 AND revoked_at IS NULL AND consumed_at IS NULL FOR UPDATE")
+                .bind::<Text, _>(&old_locator_id).bind::<Text, _>(account_id.principal_id.as_str()).bind::<Timestamptz, _>(now).bind::<Text,_>(account_id.station_id.as_str())
                 .get_result::<LocatorRow>(conn).await.optional()?;
             let Some(old) = old.map(decode).transpose()? else { return Ok(None); };
             let replacement = mutation.apply_to(&old);
@@ -140,14 +171,18 @@ impl InviteLocatorStore for PgInviteLocatorStore {
 
     async fn revoke(
         &self,
-        subject_id: &str,
+        account_id: &arkret_wire::AccountId,
         locator_id: &str,
         now: chrono::DateTime<Utc>,
     ) -> PersistenceResult<Option<InviteLocatorRecord>> {
-        let mut conn = crate::pg_db(&self.pool);
-        let row = sql_query("UPDATE invite_locators SET revoked_at = COALESCE(revoked_at, $3) WHERE locator_id = $1 AND subject_id = $2 AND consumed_at IS NULL RETURNING record_payload, one_time_use, revoked_at, consumed_at")
-            .bind::<Text, _>(locator_id).bind::<Text, _>(subject_id).bind::<Timestamptz, _>(now)
-            .get_result::<LocatorRow>(&mut conn).await.optional().map_err(PersistenceError::database)?;
-        row.map(decode).transpose()
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_,PgTransactionError,_>(async |conn| {
+            crate::pcr_private_authority::require_active_account_owner(conn,account_id).await?;
+            let row=sql_query("UPDATE invite_locators SET revoked_at=COALESCE(revoked_at,$3) WHERE locator_id=$1 AND subject_id=$2 AND recipient_id=$4 AND consumed_at IS NULL RETURNING subject_id,recipient_id,record_payload,one_time_use,revoked_at,consumed_at")
+                .bind::<Text,_>(locator_id).bind::<Text,_>(account_id.principal_id.as_str())
+                .bind::<Timestamptz,_>(now).bind::<Text,_>(account_id.station_id.as_str())
+                .get_result::<LocatorRow>(&mut *conn).await.optional()?;
+            row.map(decode).transpose().map_err(Into::into)
+        }).await.map_err(PgTransactionError::into_persistence)
     }
 }

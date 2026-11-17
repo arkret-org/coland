@@ -28,7 +28,7 @@ pub mod query_rows;
 pub mod schema;
 
 pub use db::{Db, PgPool, PoolTuning};
-pub(crate) use query_rows::{ExistsRow, JsonPayloadRow, MaxSeqRow};
+pub(crate) use query_rows::{ExistsRow, JsonPayloadRow};
 
 mod account_content_delivery;
 mod account_device_committed_evidence;
@@ -73,6 +73,9 @@ mod consent_private_effects;
 mod consent_private_effects_projection;
 mod consent_private_invites;
 mod consent_request_quarantine;
+mod organization_hosting;
+mod organization_pcr_genesis;
+mod organization_pcr_governance_change;
 mod realm_actor_control_transport;
 mod realm_actor_material;
 pub use consent_current::PgConsentCurrentStore;

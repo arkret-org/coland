@@ -352,40 +352,26 @@ pub(super) async fn provision_agent(
                 requested_scope,
                 pairing_ttl_ms,
             };
-            state
-                .jobs()
-                .store_idempotency_record(coland_services::jobs::IdempotencyState {
-                    authenticated_actor: arkret_wire::ActorId::account(
-                        arkret_wire::AccountId::new(
-                            controller_principal_id.clone(),
-                            state.service_core_id(),
-                        ),
-                    ),
-                    operation_id: "ak.self.agent.command.provision".to_owned(),
-                    idempotency_key: key.clone(),
-                    request_hash: request_hash.clone(),
-                    response_status: i32::from(StatusCode::OK.as_u16()),
-                    response_body: serde_json::to_value(&prepared).map_err(|error| {
-                        AppError::internal(format!(
-                            "Agent provision prepare outcome failed: {error}"
-                        ))
-                    })?,
-                    created_at: now_utc,
-                    expires_at: now_utc
-                        + chrono::Duration::hours(AGENT_PROVISION_ALLOCATION_TTL_HOURS),
-                })
+            let preparation = coland_services::jobs::IdempotencyState {
+                authenticated_actor: arkret_wire::ActorId::account(arkret_wire::AccountId::new(
+                    controller_principal_id.clone(),
+                    state.service_core_id(),
+                )),
+                operation_id: "ak.self.agent.command.provision".to_owned(),
+                idempotency_key: key.clone(),
+                request_hash: request_hash.clone(),
+                response_status: i32::from(StatusCode::OK.as_u16()),
+                response_body: serde_json::to_value(&prepared).map_err(|error| {
+                    AppError::internal(format!("Agent provision prepare outcome failed: {error}"))
+                })?,
+                created_at: now_utc,
+                expires_at: now_utc + chrono::Duration::hours(AGENT_PROVISION_ALLOCATION_TTL_HOURS),
+            };
+            let landed = state
+                .persistence()
+                .record_private_preparation(&preparation, None)
                 .await
-                .map_err(|error| {
-                    AppError::internal(format!(
-                        "Agent provision allocation persist failed: {error}"
-                    ))
-                })?;
-
-            let landed = lookup_provision_allocation(state, controller_principal_id.as_str(), &key)
-                .await?
-                .ok_or_else(|| {
-                    AppError::internal("Agent provision allocation disappeared after persist")
-                })?;
+                .map_err(|error| crate::state::actor_private_refusal(error.into()))?;
             if landed.request_hash != request_hash {
                 return Err(AppError::conflict(
                     "Agent provision prepare lost a concurrent idempotency race",
@@ -630,7 +616,7 @@ pub(super) async fn provision_agent(
                 }));
                 state
                     .agent_pairings()
-                    .save_agent(principal.clone())
+                    .save_accepted_agent_projection(principal.clone())
                     .await
                     .map_err(|error| {
                         AppError::internal(format!(
@@ -685,7 +671,7 @@ pub(super) async fn provision_agent(
                 }));
                 state
                     .agent_pairings()
-                    .save_agent(principal)
+                    .save_accepted_agent_projection(principal)
                     .await
                     .map_err(|error| {
                         AppError::internal(format!(
@@ -739,15 +725,17 @@ pub(super) async fn provision_agent(
                 "pcr_genesis_accepted": true,
                 "did_binding_accepted": true,
             }));
+            // Preserve the accepted public Agent before admitting a new
+            // private pairing handle. Closing the controller can refuse the
+            // latter without orphaning the already committed provision.
+            state
+                .agent_pairings()
+                .save_accepted_agent_projection(principal.clone())
+                .await
+                .map_err(crate::state::actor_private_refusal)?;
             principal.pairing_request_id = Some(pairing_request_id.clone());
             principal.pairing_code = Some(pairing_code.clone());
             principal.pairing_expires_at = Some(expires_at);
-            state
-                .agent_pairings()
-                .save_agent(principal)
-                .await
-                .map_err(|error| AppError::internal(format!("agent persist failed: {error}")))?;
-
             let outcome = AgentProvisionResponseBody::Complete(AgentProvisionComplete {
                 status: AgentProvisionCompleteStatus::Complete,
                 agent_id: agent_id.clone(),
@@ -759,35 +747,31 @@ pub(super) async fn provision_agent(
                 pairing_code: Some(pairing_code.clone()),
                 expires_at,
             });
-            state
-                .jobs()
-                .store_idempotency_record(coland_services::jobs::IdempotencyState {
-                    authenticated_actor: arkret_wire::ActorId::account(
-                        arkret_wire::AccountId::new(
-                            DidCoreId::new(controller_principal_id.clone()).map_err(|error| {
-                                AppError::internal(format!(
-                                    "controller principal id invalid: {error}"
-                                ))
-                            })?,
-                            state.service_core_id(),
-                        ),
-                    ),
-                    operation_id: "ak.self.agent.command.provision".to_owned(),
-                    idempotency_key: commit_key,
-                    request_hash,
-                    response_status: i32::from(StatusCode::CREATED.as_u16()),
-                    response_body: serde_json::to_value(&outcome).map_err(|error| {
-                        AppError::internal(format!(
-                            "Agent provision commit outcome failed: {error}"
-                        ))
+            let first_outcome = coland_services::jobs::IdempotencyState {
+                authenticated_actor: arkret_wire::ActorId::account(arkret_wire::AccountId::new(
+                    DidCoreId::new(controller_principal_id.clone()).map_err(|error| {
+                        AppError::internal(format!("controller principal id invalid: {error}"))
                     })?,
-                    created_at: now_utc,
-                    expires_at: allocation.expires_at,
-                })
+                    state.service_core_id(),
+                )),
+                operation_id: "ak.self.agent.command.provision".to_owned(),
+                idempotency_key: commit_key,
+                request_hash,
+                response_status: i32::from(StatusCode::CREATED.as_u16()),
+                response_body: serde_json::to_value(&outcome).map_err(|error| {
+                    AppError::internal(format!("Agent provision commit outcome failed: {error}"))
+                })?,
+                created_at: now_utc,
+                expires_at: allocation.expires_at,
+            };
+            let original = state
+                .agent_pairings()
+                .commit_agent_pairing_preparation(principal, &first_outcome)
                 .await
-                .map_err(|error| {
-                    AppError::internal(format!("Agent provision commit persist failed: {error}"))
-                })?;
+                .map_err(crate::state::actor_private_refusal)?;
+            let outcome: AgentProvisionResponseBody =
+                serde_json::from_value(original.response_body)
+                    .map_err(|error| AppError::internal(error.to_string()))?;
             append_audit_log(
                 state,
                 Some(&session.actor),
@@ -899,7 +883,7 @@ pub(super) async fn renew_agent_pairing(
         .agent_pairings()
         .save_agent(record.clone())
         .await
-        .map_err(|err| AppError::internal(format!("agent persist failed: {err}")))?;
+        .map_err(crate::state::actor_private_refusal)?;
     if let Some(context) = terminal_notification {
         persist_terminal_account_notification(
             state,
@@ -1103,7 +1087,7 @@ pub(super) async fn lazily_expire_pairing(
     record.updated_at = now;
     state
         .agent_pairings()
-        .save_agent(record.clone())
+        .save_accepted_agent_projection(record.clone())
         .await
         .map_err(|error| {
             AppError::internal(format!("failed to persist expired Agent pairing: {error}"))
@@ -1253,7 +1237,7 @@ pub(super) async fn lifecycle_transition(
     }
     state
         .agent_pairings()
-        .save_agent(updated_record)
+        .save_accepted_agent_projection(updated_record)
         .await
         .map_err(|error| AppError::internal(format!("agent lifecycle persist failed: {error}")))?;
     if let Some(context) = terminal_notification {

@@ -288,17 +288,18 @@ async fn reconcile_confirmed_hard_logouts_once(
     let full_page = rows.len() == REVOKE_RETRY_BATCH_LIMIT;
     for row in rows {
         *cursor = Some(row.grant_token_digest.clone());
-        let actor = row.account_id.principal_id.as_str();
         let device_id = row.device_id.as_str();
         let result = async {
             crate::routing::identity::auth::revoke_sessions_for_hard_logout_device(
-                state, actor, device_id,
+                state,
+                &row.account_id,
+                device_id,
             )
             .await?;
             unregister_for_hard_logout(state, &row.account_id, &row.device_id).await?;
             state
                 .deliveries()
-                .purge_device_delivery(actor, device_id)
+                .purge_device_delivery(&row.account_id, device_id)
                 .await
                 .map_err(|error| AppError::internal(error.to_string()))?;
             state

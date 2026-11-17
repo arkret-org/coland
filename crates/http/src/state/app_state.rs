@@ -1040,11 +1040,12 @@ impl AppState {
             )
         })
     }
-    pub async fn verify_and_retain_agent_scope_custody(
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn prepare_agent_scope_custody(
         &self,
         body: &arkret_models_collaboration::agent_scope::AgentKeyPairRequestBody,
-    ) -> Result<coland_storage::AgentScopeCustodyRef, crate::error::AppError> {
-        crate::routing::identity::agents::verify_and_retain_agent_scope_custody(self, body).await
+    ) -> Result<coland_storage::PreparedAgentScopeCustody, crate::error::AppError> {
+        crate::routing::identity::agents::prepare_agent_scope_custody(self, body).await
     }
     pub async fn qualified_agent_scope_evidence(
         &self,
@@ -1291,7 +1292,7 @@ impl AppState {
         &self.invite_locators
     }
 
-    pub(crate) fn deliveries(&self) -> &DeliveryService {
+    pub fn deliveries(&self) -> &DeliveryService {
         &self.deliveries
     }
 

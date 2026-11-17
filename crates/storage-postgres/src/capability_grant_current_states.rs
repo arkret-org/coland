@@ -1228,11 +1228,9 @@ async fn materialize_capability_grant_inner(
     // A profile-registered non-event action is grantable only through its
     // `non_event_grant_authority_rules[]` row: the issuer must hold the rule's
     // issuer action and the grant must bind the accepted registration.
-    let mut non_event_rules = BTreeMap::new();
     for action in &body.actions {
         if let Some(rule) = non_event_grant_authority_rule(action)? {
             require_non_event_registration_binding(conn, event, &body, rule).await?;
-            non_event_rules.insert(action.as_str(), rule);
         }
     }
 
@@ -1503,12 +1501,20 @@ async fn commit_capability_grant_current_state_inner(
     if current.is_none() {
         match installation {
             AppletGrantInstallation::Current => {
-                crate::applet_current_states::retain_service_grant_source(
+                let source = crate::applet_current_states::retain_service_grant_source(
                     conn,
                     &event.realm_id,
                     &value,
                 )
-                .await?
+                .await?;
+                for action in &value.actions {
+                    if non_event_grant_authority_rule(action)?.is_some_and(|rule| {
+                        rule.scope_binding == "grant.resource_exact_installation_effective_scope"
+                    }) && source.is_none()
+                    {
+                        return Err(conflict("grant_exceeds_issuer_authority"));
+                    }
+                }
             }
             AppletGrantInstallation::Installing(id) => {
                 crate::applet_current_states::retain_installation_grant_source(

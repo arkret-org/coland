@@ -206,3 +206,12 @@ async fn bridge_bot_transfers_management_between_independent_runtimes() {
     ))
     .await;
 }
+
+#[tokio::test]
+async fn registered_non_event_grants_require_exact_current_installation_sources() {
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
+    Box::pin(applet_authoring::realm_native_non_event_grant_sources(
+        database.pool(),
+    ))
+    .await;
+}

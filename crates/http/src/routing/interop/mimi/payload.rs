@@ -242,6 +242,14 @@ pub(super) fn mimi_provider_directory_value(
         proof_purpose: None,
         jws: "eyJhbGciOiJFZDI1NTE5In0..AA".to_owned(),
     };
+    let endpoints = mimi_provider_directory_endpoints(
+        &state.config().public_base_url,
+        &state.config().public_blob_refs,
+    )?;
+    let features = endpoints
+        .iter()
+        .map(|row| row.endpoint_id.clone())
+        .collect();
     let mut directory = ProviderDirectory {
         schema: arkret_wire::SchemaId::MIMI_INTEROP_V1.to_owned(),
         service_id: service_id.clone(),
@@ -256,18 +264,8 @@ pub(super) fn mimi_provider_directory_value(
             provider_id: MimiUri::new(mimi_provider_id(state)).map_err(|error| {
                 AppError::internal(format!("derived MIMI provider id is invalid: {error}"))
             })?,
-            endpoints: mimi_provider_directory_endpoints(&state.config().public_base_url)?,
-            features: [
-                "consent",
-                "identifier_query",
-                "key_material",
-                "notify",
-                "room_update",
-                "submit_message",
-            ]
-            .into_iter()
-            .map(ToOwned::to_owned)
-            .collect(),
+            endpoints,
+            features,
             mls_cipher_suites: vec!["MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519".to_owned()],
             content_profiles: [
                 "application/mimi-content",
@@ -311,6 +309,7 @@ pub(super) fn mimi_provider_directory_value(
 
 fn mimi_provider_directory_endpoints(
     public_base: &str,
+    public_blob_refs: &std::collections::BTreeSet<arkret_wire::BlobRef>,
 ) -> Result<Vec<arkret_models_collaboration::objects::interop::ProviderDirectoryEndpoint>, AppError>
 {
     use arkret_models_collaboration::objects::interop::ProviderDirectoryEndpoint;
@@ -318,26 +317,30 @@ fn mimi_provider_directory_endpoints(
     let base = url::Url::parse(public_base)
         .map_err(|error| AppError::internal(format!("directory service base: {error}")))?;
     let prefix = base.path().trim_end_matches('/');
-    Ok([
+    let mut operations = vec![
         ("consent", Op::OpenMimiCommandRequestConsentV1),
         ("identifier_query", Op::OpenMimiReadIdentifiersV1),
         ("key_material", Op::OpenMimiExchangeRequestKeyMaterialV1),
         ("notify", Op::OpenMimiCommandNotifyV1),
         ("room_update", Op::OpenMimiCommandUpdateRoomV1),
         ("submit_message", Op::OpenMimiCommandSubmitMessageV1),
-    ]
-    .into_iter()
-    .map(|(feature, operation)| {
-        let descriptor = arkret_wire::SERVICE_OPERATION_DESCRIPTORS
-            .iter()
-            .find(|row| row.id == operation)
-            .expect("registered MIMI operation");
-        ProviderDirectoryEndpoint {
-            endpoint_id: feature.to_owned(),
-            relative_path: format!("{prefix}{}", descriptor.http_path),
-        }
-    })
-    .collect())
+    ];
+    if !public_blob_refs.is_empty() {
+        operations.insert(4, ("proxy_download", Op::OpenMimiCommandProxyDownloadV1));
+    }
+    Ok(operations
+        .into_iter()
+        .map(|(feature, operation)| {
+            let descriptor = arkret_wire::SERVICE_OPERATION_DESCRIPTORS
+                .iter()
+                .find(|row| row.id == operation)
+                .expect("registered MIMI operation");
+            ProviderDirectoryEndpoint {
+                endpoint_id: feature.to_owned(),
+                relative_path: format!("{prefix}{}", descriptor.http_path),
+            }
+        })
+        .collect())
 }
 
 #[cfg(test)]
@@ -348,7 +351,7 @@ mod directory_endpoint_tests {
             ("https://station.example/", ""),
             ("https://station.example/tenant/", "/tenant"),
         ] {
-            let rows = super::mimi_provider_directory_endpoints(base).unwrap();
+            let rows = super::mimi_provider_directory_endpoints(base, &Default::default()).unwrap();
             assert_eq!(rows.len(), 6);
             assert_eq!(
                 rows[0].relative_path,
@@ -372,6 +375,41 @@ mod directory_endpoint_tests {
                         .starts_with(&format!("{prefix}/_arkret/open/mimi/"))
                 );
             }
+        }
+    }
+
+    #[test]
+    fn exact_public_asset_configuration_adds_only_the_registered_proxy_capability() {
+        let references = std::collections::BTreeSet::from([arkret_wire::BlobRef::from_bytes(
+            b"deployment-public native fixture",
+        )]);
+        for base in [
+            "https://station.example/",
+            "https://station.example/tenant/",
+        ] {
+            let empty =
+                super::mimi_provider_directory_endpoints(base, &Default::default()).unwrap();
+            let configured = super::mimi_provider_directory_endpoints(base, &references).unwrap();
+            assert_eq!(configured.len(), empty.len() + 1);
+            let added = configured
+                .iter()
+                .filter(|row| row.endpoint_id == "proxy_download")
+                .collect::<Vec<_>>();
+            assert_eq!(added.len(), 1);
+            assert_eq!(
+                added[0].relative_path,
+                format!(
+                    "{}/_arkret/open/mimi/proxy-download",
+                    url::Url::parse(base).unwrap().path().trim_end_matches('/')
+                )
+            );
+            assert_eq!(
+                configured
+                    .into_iter()
+                    .filter(|row| row.endpoint_id != "proxy_download")
+                    .collect::<Vec<_>>(),
+                empty
+            );
         }
     }
 }

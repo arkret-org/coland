@@ -605,43 +605,36 @@ async fn store_prepare(
     idempotency_key: &IdempotencyKey,
     request_hash: &str,
     reservation: &ContactReservation,
-) -> Result<(), AppError> {
+) -> Result<ContactOperationResponseBody, AppError> {
     let created_at = now();
-    let principal_id = DidCoreId::new(principal.to_owned())
-        .map_err(|error| AppError::internal(format!("Contact principal id invalid: {error}")))?;
-    let outcome = prepared_outcome(reservation);
-    for (key, body) in [
-        (
-            contact_phase_idempotency_key("prepare", idempotency_key),
-            serde_json::to_value(&outcome)
-                .map_err(|error| AppError::internal(format!("Contact outcome encode: {error}")))?,
-        ),
-        (
-            contact_reservation_key(&reservation.reservation_handle),
-            serde_json::to_value(reservation).map_err(|error| {
-                AppError::internal(format!("Contact reservation encode: {error}"))
-            })?,
-        ),
-    ] {
-        state
-            .jobs()
-            .store_idempotency_record(coland_services::jobs::IdempotencyState {
-                authenticated_actor: arkret_wire::ActorId::account(arkret_wire::AccountId::new(
-                    principal_id.clone(),
-                    state.service_core_id(),
-                )),
-                operation_id: "org.arkret.coland.contact.prepare.v1".to_owned(),
-                idempotency_key: key,
-                request_hash: request_hash.to_owned(),
-                response_status: StatusCode::OK.as_u16().into(),
-                response_body: body,
-                created_at,
-                expires_at: reservation.expires_at,
-            })
-            .await
-            .map_err(|error| AppError::internal(format!("Contact reservation store: {error}")))?;
-    }
-    Ok(())
+    let principal = DidCoreId::new(principal.to_owned())
+        .map_err(|error| AppError::internal(error.to_string()))?;
+    let actor = ActorId::account(arkret_wire::AccountId::new(
+        principal,
+        state.service_core_id(),
+    ));
+    let primary = coland_storage::IdempotencyRecord {
+        authenticated_actor: actor,
+        operation_id: "org.arkret.coland.contact.prepare.v1".into(),
+        idempotency_key: contact_phase_idempotency_key("prepare", idempotency_key),
+        request_hash: request_hash.into(),
+        response_status: StatusCode::OK.as_u16().into(),
+        response_body: serde_json::to_value(prepared_outcome(reservation))
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        created_at,
+        expires_at: reservation.expires_at,
+    };
+    let mut context = primary.clone();
+    context.idempotency_key = contact_reservation_key(&reservation.reservation_handle);
+    context.response_body =
+        serde_json::to_value(reservation).map_err(|error| AppError::internal(error.to_string()))?;
+    let original = state
+        .persistence()
+        .record_private_preparation(&primary, Some(&context))
+        .await
+        .map_err(|error| crate::state::actor_private_refusal(error.into()))?;
+    serde_json::from_value(original.response_body)
+        .map_err(|error| AppError::internal(error.to_string()))
 }
 
 async fn replay<T: DeserializeOwned>(
@@ -669,7 +662,8 @@ async fn replay<T: DeserializeOwned>(
         return Ok(None);
     };
     if record.request_hash != request_hash {
-        return Err(AppError::conflict(
+        return Err(crate::app_error!(
+            DuplicateConflict,
             "Contact idempotency key was used for different canonical bytes",
         ));
     }
@@ -848,7 +842,7 @@ async fn prepare<K: arkret_event_draft::EventSpec>(
         event_draft: contact_event_draft(&event, digest_suite)?,
         expires_at: created_at + chrono::Duration::minutes(CONTACT_RESERVATION_TTL_MINUTES),
     };
-    store_prepare(
+    let original = store_prepare(
         state,
         &session.actor,
         &idempotency_key,
@@ -856,7 +850,7 @@ async fn prepare<K: arkret_event_draft::EventSpec>(
         &reservation,
     )
     .await?;
-    json_ok(prepared_outcome(&reservation))
+    json_ok(original)
 }
 
 fn device_authorization_matches_contact_account(
@@ -3538,3 +3532,7 @@ mod device_authorization_account_tests {
         assert!(contacts.get(&holder, &peer).await.is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "contact_write/preparation_pg_tests.rs"]
+mod preparation_pg_tests;

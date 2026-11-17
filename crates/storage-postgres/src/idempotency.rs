@@ -48,7 +48,7 @@ async fn record_idempotency_with_source_in_connection(
     .execute(conn)
     .await
     .map(|_| ())
-    .map_err(PersistenceError::database)
+    .map_err(crate::persistence_query_error)
 }
 /// Compare under the unique row lock, in the accepting transaction. A
 /// conflicting retry identity must roll back the Event and every MLS effect.
@@ -123,6 +123,26 @@ pub(crate) async fn record_exact_idempotency_in_connection(
     conn: &mut diesel_async::AsyncPgConnection,
     record: &IdempotencyRecord,
 ) -> PersistenceResult<()> {
+    // Accepted Contact and backup units retain their real source/outcome
+    // separately. A terminal owner suppresses only this optional private copy.
+    // Reuse the derived NOWAIT gate before any idempotency row lock; a true
+    // result holds Account SHARE through this transaction and the exact read.
+    if let Some(owner) = record.authenticated_actor.as_account_id() {
+        #[derive(QueryableByName)]
+        struct Allowed {
+            #[diesel(sql_type = diesel::sql_types::Bool)]
+            allowed: bool,
+        }
+        let row = sql_query("SELECT lock_account_private_projection($1,$2) AS allowed")
+            .bind::<Text, _>(owner.principal_id.as_str())
+            .bind::<Text, _>(owner.station_id.as_str())
+            .get_result::<Allowed>(&mut *conn)
+            .await
+            .map_err(crate::persistence_query_error)?;
+        if !row.allowed {
+            return Ok(());
+        }
+    }
     record_idempotency_in_connection(conn, record).await?;
     let stored = sql_query("SELECT authenticated_actor,operation_id,idempotency_key,request_hash,response_status,response_body,created_at,expires_at FROM idempotency_keys WHERE actor_key=$1 AND operation_id=$2 AND idempotency_key=$3 FOR UPDATE")
         .bind::<Text,_>(actor_key(&record.authenticated_actor)?)
@@ -193,8 +213,111 @@ fn actor_value(actor: &arkret_wire::ActorId) -> PersistenceResult<Value> {
         PersistenceError::SchemaViolation(format!("authenticated ActorId encode failed: {error}"))
     })
 }
+pub(crate) async fn preparation_record(
+    conn: &mut diesel_async::AsyncPgConnection,
+    record: &IdempotencyRecord,
+) -> PersistenceResult<Option<IdempotencyRecord>> {
+    sql_query("SELECT authenticated_actor,operation_id,idempotency_key,request_hash,response_status,response_body,created_at,expires_at FROM idempotency_keys WHERE actor_key=$1 AND operation_id=$2 AND idempotency_key=$3 FOR UPDATE")
+        .bind::<Text,_>(actor_key(&record.authenticated_actor)?)
+        .bind::<Text,_>(&record.operation_id).bind::<Text,_>(&record.idempotency_key)
+        .get_result::<IdempotencyRow>(&mut *conn).await.optional()
+        .map_err(crate::persistence_query_error)?
+        .map(IdempotencyRecord::try_from).transpose()
+}
+
 #[async_trait]
 impl IdempotencyStore for PgIdempotencyStore {
+    async fn record_preparation(
+        &self,
+        primary: &IdempotencyRecord,
+        context: Option<&IdempotencyRecord>,
+    ) -> PersistenceResult<IdempotencyRecord> {
+        use diesel_async::AsyncConnection as _;
+        let owner = primary.authenticated_actor.as_account_id().ok_or_else(|| {
+            PersistenceError::SchemaViolation(
+                "private preparation requires an Account owner".into(),
+            )
+        })?;
+        if context.is_some_and(|context| {
+            context.authenticated_actor != primary.authenticated_actor
+                || context.operation_id != primary.operation_id
+                || context.request_hash != primary.request_hash
+                || context.idempotency_key == primary.idempotency_key
+        }) {
+            return Err(PersistenceError::SchemaViolation(
+                "private preparation context differs from its primary scope".into(),
+            ));
+        }
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, super::PgTransactionError, _>(async |conn| {
+            crate::pcr_private_authority::require_active_account_owner(conn, owner).await?;
+            // At most the actual primary and one context identity. Sort their
+            // advisory locks before the first row, including absence, so two
+            // preparations cannot take each other's alias in reverse order.
+            let mut identities = std::collections::BTreeSet::new();
+            for record in std::iter::once(primary).chain(context) {
+                identities.insert(
+                    arkret_canonical::canonical_json_string(&(
+                        &record.authenticated_actor,
+                        &record.operation_id,
+                        &record.idempotency_key,
+                    ))
+                    .map_err(PersistenceError::database)?,
+                );
+            }
+            for identity in identities {
+                sql_query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+                    .bind::<Text, _>(identity)
+                    .execute(&mut *conn)
+                    .await?;
+            }
+            if let Some(original) = preparation_record(conn, primary).await? {
+                if original.request_hash != primary.request_hash {
+                    return Err(PersistenceError::Conflict(
+                        "duplicate_conflict: private preparation request changed".into(),
+                    )
+                    .into());
+                }
+                return Ok(original);
+            }
+            record_idempotency_in_connection(conn, primary).await?;
+            let original = preparation_record(conn, primary).await?.ok_or_else(|| {
+                PersistenceError::Internal("private preparation primary was not stored".into())
+            })?;
+            // Other generic writers still obey the table's first-writer rule.
+            // A winner with different generated bytes owns its own context.
+            if original.request_hash != primary.request_hash {
+                return Err(PersistenceError::Conflict(
+                    "duplicate_conflict: private preparation request changed".into(),
+                )
+                .into());
+            }
+            if original.response_status != primary.response_status
+                || original.response_body != primary.response_body
+            {
+                return Ok(original);
+            }
+            if let Some(context) = context {
+                record_idempotency_in_connection(conn, context).await?;
+                let stored = preparation_record(conn, context).await?.ok_or_else(|| {
+                    PersistenceError::Internal("private preparation context was not stored".into())
+                })?;
+                if stored.request_hash != context.request_hash
+                    || stored.response_status != context.response_status
+                    || stored.response_body != context.response_body
+                {
+                    return Err(PersistenceError::Conflict(
+                        "duplicate_conflict: private preparation context is occupied".into(),
+                    )
+                    .into());
+                }
+            }
+            Ok(original)
+        })
+        .await
+        .map_err(super::PgTransactionError::into_persistence)
+    }
+
     async fn record_with_lookup(
         &self,
         response: &IdempotencyRecord,
@@ -257,10 +380,21 @@ impl IdempotencyStore for PgIdempotencyStore {
     }
 
     async fn record(&self, record: &IdempotencyRecord) -> PersistenceResult<()> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
-        record_idempotency_in_connection(&mut conn, record).await
+        use diesel_async::AsyncConnection as _;
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, super::PgTransactionError, _>(async |conn| {
+            // A standalone new private reservation must not report success
+            // when the owner has already closed. No private row precedes this
+            // typed gate. Accepted UOW mirrors use the separate derived path.
+            if let Some(owner) = record.authenticated_actor.as_account_id() {
+                crate::pcr_private_authority::require_active_account_owner(conn, owner).await?;
+            }
+            record_idempotency_in_connection(conn, record)
+                .await
+                .map_err(Into::into)
+        })
+        .await
+        .map_err(super::PgTransactionError::into_persistence)
     }
 
     async fn complete_reservation(
@@ -299,7 +433,7 @@ impl IdempotencyStore for PgIdempotencyStore {
         .execute(&mut conn)
         .await
         .map(|affected| affected == 1)
-        .map_err(PersistenceError::database)
+        .map_err(crate::persistence_query_error)
     }
 
     async fn prune_expired(&self, now: chrono::DateTime<Utc>) -> PersistenceResult<usize> {
@@ -311,3 +445,7 @@ impl IdempotencyStore for PgIdempotencyStore {
             .map_err(PersistenceError::database)
     }
 }
+
+#[cfg(test)]
+#[path = "idempotency/preparation_tests.rs"]
+mod preparation_tests;

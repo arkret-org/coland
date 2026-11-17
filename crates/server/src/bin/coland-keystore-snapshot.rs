@@ -1,6 +1,6 @@
 //! `cargo run --bin coland-keystore-snapshot -- ...`
 //!
-//! Service-identity KeyStore backup/restore helper.
+//! Service KeyStore initialization and identity backup/restore helper.
 //!
 //! Exactly one mode is required:
 //!
@@ -11,7 +11,11 @@
 //! 2. `--import-only` — used by `scripts/restore-drill.sh`. Reads the JSON snapshot from `--input`
 //!    and stores the seed back into the configured durable KeyStore under the same id.
 //!
-//! Both modes resolve the service DID and active signing `KeyRef` from a
+//! 3. `--generate-custody-key` initializes the stable private-evidence AEAD key with create-only
+//!    semantics in the same configured Service namespace. It never exports key material and does
+//!    not load the identity bundle.
+//!
+//! The two signing-seed modes resolve the service DID and active `KeyRef` from a
 //! verified SDK identity bundle:
 //!   - `COLAND_SERVICE_IDENTITY_BUNDLE` (or `--identity-bundle`)
 //!
@@ -28,12 +32,13 @@ use ed25519_dalek::SigningKey;
 enum Mode {
     ExportOnly,
     ImportOnly,
+    GenerateCustodyKey,
 }
 
 #[derive(Clone, Debug)]
 struct Args {
     mode: Mode,
-    identity_bundle: String,
+    identity_bundle: Option<String>,
     output: Option<String>,
     input: Option<String>,
 }
@@ -56,6 +61,12 @@ fn parse_args(raw: &[String], values: &BTreeMap<String, String>) -> anyhow::Resu
             }
             "--import-only" => {
                 anyhow::ensure!(mode.replace(Mode::ImportOnly).is_none(), "choose one mode");
+            }
+            "--generate-custody-key" => {
+                anyhow::ensure!(
+                    mode.replace(Mode::GenerateCustodyKey).is_none(),
+                    "choose one mode"
+                );
             }
             "--identity-bundle" => {
                 i += 1;
@@ -89,14 +100,15 @@ fn parse_args(raw: &[String], values: &BTreeMap<String, String>) -> anyhow::Resu
             value if value.starts_with("--config=") => {}
             "-h" | "--help" => {
                 eprintln!(
-                    "usage: coland-keystore-snapshot (--export-only | --import-only)\n\
+                    "usage: coland-keystore-snapshot (--export-only | --import-only | --generate-custody-key)\n\
                      \n\
                      mode flags (exactly one):\n\
                        --export-only    write KeyStore-persisted seed to --output\n\
                        --import-only    read seed from --input and write to KeyStore\n\
+                       --generate-custody-key  create the Service AEAD key without exporting it\n\
                      \n\
                      options:\n\
-                       --identity-bundle <path>  validated SDK DidCoreIdentityBundle (required)\n\
+                       --identity-bundle <path>  validated SDK DidCoreIdentityBundle (seed modes)\n\
                        --output <path>         destination JSON for --export-only\n\
                        --input <path>          source JSON for --import-only\n\
                     "
@@ -107,12 +119,18 @@ fn parse_args(raw: &[String], values: &BTreeMap<String, String>) -> anyhow::Resu
         }
         i += 1;
     }
-    let mode = mode.ok_or_else(|| anyhow::anyhow!("choose --export-only or --import-only"))?;
-    let identity_bundle = identity_bundle.ok_or_else(|| {
-        anyhow::anyhow!(
+    let mode = mode.ok_or_else(|| anyhow::anyhow!("choose exactly one mode"))?;
+    if mode == Mode::GenerateCustodyKey {
+        anyhow::ensure!(
+            input.is_none() && output.is_none(),
+            "custody-key initialization does not accept --input or --output"
+        );
+    } else {
+        anyhow::ensure!(
+            identity_bundle.is_some(),
             "--identity-bundle (or COLAND_SERVICE_IDENTITY_BUNDLE) is required; the snapshot helper must not accept a configured service DID"
-        )
-    })?;
+        );
+    }
     Ok(Args {
         mode,
         identity_bundle,
@@ -137,18 +155,7 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let identity = match load_service_identity(&args.identity_bundle) {
-        Ok(identity) => identity,
-        Err(error) => {
-            eprintln!("[keystore-snapshot] identity bundle rejected: {error}");
-            return ExitCode::from(2);
-        }
-    };
-
-    let result = match args.mode {
-        Mode::ExportOnly => run_export_only(&args, &identity, &values),
-        Mode::ImportOnly => run_import_only(&args, &identity, &values),
-    };
+    let result = run(&args, &values);
 
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -169,7 +176,40 @@ enum DrillError {
     Assertion(String),
 }
 
-use coland_http::config::SERVICE_IDENTITY_KEYSTORE_APP;
+use coland_http::config::{SERVICE_IDENTITY_KEYSTORE_APP, provision_service_custody_key};
+
+fn run(args: &Args, values: &BTreeMap<String, String>) -> Result<(), DrillError> {
+    match args.mode {
+        Mode::GenerateCustodyKey => {
+            let store = open_service_identity_key_store(values)?;
+            provision_service_custody_key(&*store).map_err(|error| {
+                let message = format!("custody-key initialization failed: {error}");
+                if error
+                    .downcast_ref::<arkret_keystore::KeyStoreError>()
+                    .is_some()
+                {
+                    DrillError::Io(message)
+                } else {
+                    DrillError::Assertion(message)
+                }
+            })?;
+            eprintln!("[keystore-snapshot] custody key initialized");
+            Ok(())
+        }
+        Mode::ExportOnly | Mode::ImportOnly => {
+            let path = args.identity_bundle.as_deref().ok_or_else(|| {
+                DrillError::Io("seed modes require an identity bundle".to_owned())
+            })?;
+            let identity = load_service_identity(path)
+                .map_err(|error| DrillError::Io(format!("identity bundle rejected: {error}")))?;
+            if args.mode == Mode::ExportOnly {
+                run_export_only(args, &identity, values)
+            } else {
+                run_import_only(args, &identity, values)
+            }
+        }
+    }
+}
 
 fn open_service_identity_key_store(
     values: &BTreeMap<String, String>,

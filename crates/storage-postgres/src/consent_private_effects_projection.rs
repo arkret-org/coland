@@ -170,7 +170,7 @@ pub(crate) async fn project(
     let digest = request.digest().map_err(unavailable)?;
     let mut conn = pg_conn(pool).await?;
     conn.transaction::<_,PgTransactionError,_>(async |conn| {
-        crate::pcr_private_authority::require_transferable(conn,&request.realm_id).await?;
+        crate::organization_hosting::require_private_projection_source(conn,&request.realm_id).await?;
         let lock=format!("consent-private-host-cut:{}:{}",request.holder_account_id.principal_id,request.holder_account_id.station_id);
         sql_query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))").bind::<Text,_>(lock).execute(&mut *conn).await?;
         let held=sql_query("SELECT generation,service_id,authority_ref,last_handoff_ref FROM realm_authorities WHERE realm_id=$1 FOR SHARE")
@@ -181,7 +181,6 @@ pub(crate) async fn project(
         if !crate::pcr_private_authority::is_active_human_account(conn,&request.holder_account_id).await? {
             return Err(PersistenceError::NotFound("private effect recipient is unavailable".into()).into());
         }
-        if !crate::pcr_private_authority::native_inception(conn,&request.realm_id).await? {return Err(unavailable("target is not an accepted PCR").into());}
         let existing=sql_query("SELECT realm_id,governance_generation,head_stream_position,head_commit_id,cell_revisions FROM consent_private_proxy_cuts WHERE holder_account_id=$1 FOR UPDATE")
             .bind::<Jsonb,_>(&holder).get_result::<Cut>(&mut *conn).await.optional()?;
         let mut cells=existing.as_ref().map_or_else(||json!({}),|row|row.cell_revisions.clone());

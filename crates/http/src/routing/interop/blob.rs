@@ -368,11 +368,8 @@ async fn blob_upload(depot: &mut Depot, req: &mut Request, res: &mut Response) {
     let stored = state.deliveries().store_blob(&blob_ref, record).await;
     if let Err(error) = stored {
         tracing::error!(%error, "failed to persist blob");
-        if matches!(state.deliveries().blob(&blob_ref).await, Ok(None))
-            && let Err(delete_error) = state.deliveries().delete_object(&storage_key).await
-        {
-            tracing::warn!(%delete_error, %storage_key, "failed to clean up blob after metadata write failure");
-        }
+        // A concurrent admission may own this shared content-addressed key.
+        // A failed metadata write cannot authorize deletion of its object.
         if !validate_existing_blob_classification(state, &blob_ref, upload.encryption, res).await {
             return;
         }

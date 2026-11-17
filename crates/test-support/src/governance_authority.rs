@@ -380,6 +380,7 @@ impl GovernanceChain {
             realm_id: realm_id.clone(),
             genesis_event,
             genesis_commit,
+            producer_signer_fact: None,
             authority_transitions: vec![RealmAuthorityTransition {
                 change_event,
                 change_commit,

@@ -69,7 +69,7 @@ use serde_json::{Value, json};
 
 use self::social::direct::direct_founder_for_pair;
 use super::auth::{
-    purge_device_delivery_state, revoke_devices_for_actor, revoke_sessions_for_actor,
+    purge_device_delivery_state, revoke_devices_for_account, revoke_sessions_for_account,
 };
 use super::did::require_embedded_webvh_registration_bearer;
 use super::{AuthArgs, append_audit_log, bearer_token, now, sha256_hex, validate_did};

@@ -6,14 +6,14 @@ use arkret_models_collaboration::governance::holder_quarantine::{
 };
 use arkret_models_collaboration::governance::invite_addressing::InviteReceivePolicy;
 use arkret_wire::{AccountDataKey, ActorId, Hash};
-use chrono::{DateTime, Duration, Utc};
+use chrono::Duration;
 use coland_storage::{
     AccountDataCasResult, AccountDataRecord, ConsentRequestQuarantineInput,
     ConsentRequestQuarantineOutcome, ConsentRequestQuarantineStore, PersistenceError,
     PersistenceResult,
 };
 use diesel::sql_query;
-use diesel::sql_types::{BigInt, Bool, Jsonb, Nullable, Text, Timestamptz};
+use diesel::sql_types::{BigInt, Bool, Jsonb, Text, Timestamptz};
 use diesel_async::AsyncConnection;
 use horme::{OptionalExtension as _, RunQueryDsl};
 use serde_json::{Value, json};
@@ -32,14 +32,6 @@ pub struct PgConsentRequestQuarantineStore {
 struct HolderRow {
     #[diesel(sql_type = BigInt)]
     pk: i64,
-    #[diesel(sql_type = Nullable<Timestamptz>)]
-    disabled_at: Option<DateTime<Utc>>,
-}
-
-#[derive(diesel::QueryableByName)]
-struct LifecycleRow {
-    #[diesel(sql_type = Text)]
-    state: String,
 }
 
 #[derive(diesel::QueryableByName)]
@@ -125,9 +117,11 @@ pub(crate) async fn admit_in_connection(
         Some(&input.acceptor_service_id),
     )
     .await?;
-    // The Invite and Contact surfaces acquire this lock before touching their
-    // account-backed ledger. Keep the same order to avoid a lock cycle with
-    // their account foreign-key checks.
+    // Quota and first-source writes are serialized by this complete-holder
+    // ledger lock. Reading the Account needs SHARE, not an exclusive upgrade.
+    if !crate::pcr_private_authority::is_active_human_account(conn, &input.holder).await? {
+        return Ok(ConsentRequestQuarantineOutcome::Dropped);
+    }
     let ledger_lock = format!(
         "invite-new-source-ledger:{}:{}",
         input.holder.principal_id, input.holder.station_id
@@ -137,33 +131,16 @@ pub(crate) async fn admit_in_connection(
         .execute(&mut *conn)
         .await
         .map_err(PersistenceError::database)?;
-    let holder = sql_query(
-        "SELECT pk,disabled_at FROM accounts \
-         WHERE principal_id=$1 AND station_id=$2 FOR UPDATE",
-    )
-    .bind::<Text, _>(input.holder.principal_id.as_str())
-    .bind::<Text, _>(input.holder.station_id.as_str())
-    .get_result::<HolderRow>(&mut *conn)
-    .await
-    .optional()
-    .map_err(PersistenceError::database)?;
-    let Some(holder) = holder else {
-        return Ok(ConsentRequestQuarantineOutcome::Dropped);
-    };
-    let lifecycle = sql_query("SELECT state FROM account_lifecycle WHERE account_pk=$1 FOR SHARE")
-        .bind::<BigInt, _>(holder.pk)
-        .get_result::<LifecycleRow>(&mut *conn)
+    let holder = sql_query("SELECT pk FROM accounts WHERE principal_id=$1 AND station_id=$2")
+        .bind::<Text, _>(input.holder.principal_id.as_str())
+        .bind::<Text, _>(input.holder.station_id.as_str())
+        .get_result::<HolderRow>(&mut *conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?;
-    if holder.disabled_at.is_some()
-        || matches!(
-            lifecycle.as_ref().map(|row| row.state.as_str()),
-            Some("deactivated" | "erasure_pending")
-        )
-    {
+    let Some(holder) = holder else {
         return Ok(ConsentRequestQuarantineOutcome::Dropped);
-    }
+    };
     let policy = sql_query(
         "SELECT policy_payload FROM invite_receive_policies WHERE account_pk=$1 FOR SHARE",
     )

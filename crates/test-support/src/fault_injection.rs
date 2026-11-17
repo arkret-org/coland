@@ -320,6 +320,36 @@ impl AgentStore for FaultAgentStore {
             .check(FaultPoint::AgentPut, FaultTiming::After)?;
         Ok(outcome)
     }
+    async fn put_pairing_preparation(
+        &self,
+        record: AgentPrincipalRecord,
+        primary: &coland_storage::IdempotencyRecord,
+    ) -> PersistenceResult<coland_storage::IdempotencyRecord> {
+        self.injector
+            .check(FaultPoint::AgentPut, FaultTiming::Before)?;
+        let result = self
+            .inner
+            .agents()
+            .put_pairing_preparation(record, primary)
+            .await?;
+        self.injector
+            .check(FaultPoint::AgentPut, FaultTiming::After)?;
+        Ok(result)
+    }
+    async fn put_accepted_projection(&self, record: AgentPrincipalRecord) -> PersistenceResult<()> {
+        self.injector
+            .check(FaultPoint::AgentPut, FaultTiming::Before)?;
+        self.inner.agents().put_accepted_projection(record).await?;
+        self.injector
+            .check(FaultPoint::AgentPut, FaultTiming::After)?;
+        Ok(())
+    }
+    async fn controller_account(
+        &self,
+        agent_id: &str,
+    ) -> PersistenceResult<Option<arkret_wire::AccountId>> {
+        self.inner.agents().controller_account(agent_id).await
+    }
     async fn get(&self, agent_id: &str) -> PersistenceResult<Option<AgentPrincipalRecord>> {
         self.inner.agents().get(agent_id).await
     }

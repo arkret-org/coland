@@ -2171,6 +2171,7 @@ mod realm_native_fixture {
     include!("../realm_actor_completion_fixture.rs");
     include!("../realm_manager_runtime_fixture.rs");
     include!("../realm_actor_install_admission_fixture.rs");
+    include!("../non_event_grant_source_fixture.rs");
     include!("../realm_actor_authority_admission_fixture.rs");
     include!("../realm_actor_source_tuple_fixture.rs");
     include!("../realm_actor_epoch_revoke_fixture.rs");
@@ -9811,6 +9812,11 @@ pub async fn realm_native_mls(pool: PgPool) {
 
 pub async fn realm_native_install_admission(pool: PgPool) {
     realm_native_fixture::run_install_admission(pool).await;
+}
+
+pub async fn realm_native_non_event_grant_sources(pool: PgPool) {
+    realm_native_fixture::boxed_step(|| realm_native_fixture::run_non_event_grant_sources(pool))
+        .await;
 }
 
 pub async fn realm_native_authority_admission(pool: PgPool) {

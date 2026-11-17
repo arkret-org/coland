@@ -74,14 +74,14 @@ pub trait InviteLocatorStore: Send + Sync {
     ) -> PersistenceResult<Option<InviteLocatorRecord>>;
     async fn rotate(
         &self,
-        subject_id: &str,
+        account_id: &arkret_wire::AccountId,
         old_locator_id: &str,
         mutation: &InviteLocatorRotateMutation,
         now: DateTime<Utc>,
     ) -> PersistenceResult<Option<InviteLocatorRecord>>;
     async fn revoke(
         &self,
-        subject_id: &str,
+        account_id: &arkret_wire::AccountId,
         locator_id: &str,
         now: DateTime<Utc>,
     ) -> PersistenceResult<Option<InviteLocatorRecord>>;

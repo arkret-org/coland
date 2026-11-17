@@ -162,7 +162,8 @@ pub(super) async fn logout(
 
     let actor = journal.account_id.principal_id.as_str();
     let device_id = journal.device_id.as_str();
-    let revoked_count = revoke_sessions_for_actor_device(state, actor, device_id).await?;
+    let revoked_count =
+        revoke_sessions_for_account_device(state, &journal.account_id, device_id).await?;
     crate::routing::interop::unregister_public_push_for_hard_logout(
         state,
         &journal.account_id,
@@ -171,7 +172,7 @@ pub(super) async fn logout(
     .await?;
     let delivery_purge = state
         .deliveries()
-        .purge_device_delivery(actor, device_id)
+        .purge_device_delivery(&journal.account_id, device_id)
         .await
         .map_err(|error| AppError::internal(error.to_string()))?;
     state
@@ -248,9 +249,27 @@ async fn dev_mode_local_logout(
         .map_err(|error| AppError::internal(error.to_string()))?;
     let revoked = revoked_session.is_some();
     if let Some(session) = revoked_session {
-        let delivery_purge =
-            purge_device_delivery_state(state, &session.actor, session.require_human_device_id())
-                .await;
+        let account = state
+            .identities()
+            .account_by_id(
+                session
+                    .account_pk
+                    .ok_or_else(|| AppError::internal("local session lacks its Account key"))?,
+            )
+            .await
+            .map_err(|error| AppError::internal(error.to_string()))?
+            .ok_or_else(|| AppError::internal("local session Account is missing"))?;
+        if account.account_id.principal_id.as_str() != session.actor {
+            return Err(AppError::conflict(
+                "local session differs from its Account binding",
+            ));
+        }
+        let delivery_purge = purge_device_delivery_state(
+            state,
+            &account.account_id,
+            session.require_human_device_id(),
+        )
+        .await?;
         append_audit_log(
             state,
             Some(&session.actor),
@@ -357,15 +376,15 @@ fn confirm_auth_side_logout(
 /// Revoke every active coland bearer session for a specific (actor, device).
 /// Used by the single hard logout so only the logging-out device's local
 /// sessions are terminated (other devices stay logged in).
-pub(crate) async fn revoke_sessions_for_actor_device(
+pub(crate) async fn revoke_sessions_for_account_device(
     state: &AppState,
-    actor: &str,
+    account: &arkret_wire::AccountId,
     device_id: &str,
 ) -> Result<usize, AppError> {
     let revoked_at = now();
     state
         .sessions()
-        .revoke_actor_device_sessions(actor, device_id, revoked_at)
+        .revoke_account_device_sessions(account, device_id, revoked_at)
         .await
         .map_err(|error| AppError::internal(error.to_string()))
 }

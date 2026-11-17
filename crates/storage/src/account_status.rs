@@ -99,6 +99,81 @@ pub enum AccountStatusReplicaAppend {
     },
 }
 
+/// Process-local execution phases for the one accepted Account erasure intent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountErasureExecutionState {
+    Pending,
+    Completed,
+    FanoutEnqueued,
+}
+
+/// Durable worker custody, not a client credential or an erasure command.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountErasureExecution {
+    pub receiver_id: arkret_wire::DidCoreId,
+    pub account_authority_id: arkret_wire::DidCoreId,
+    pub account_id: arkret_wire::AccountId,
+    pub principal_id: arkret_wire::DidCoreId,
+    pub triggering_status_record_id: arkret_wire::AccountStatusRecordId,
+    pub storage_boundary: arkret_models_collaboration::governance::erasure::ErasureStorageBoundary,
+    pub state: AccountErasureExecutionState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package: Option<arkret_models_collaboration::governance::erasure::ErasureReceiptPackage>,
+}
+
+impl AccountErasureExecution {
+    pub fn key(&self, state: AccountErasureExecutionState) -> String {
+        Self::key_for(&self.triggering_status_record_id, state)
+    }
+
+    pub fn key_for(
+        record_id: &arkret_wire::AccountStatusRecordId,
+        state: AccountErasureExecutionState,
+    ) -> String {
+        let phase = match state {
+            AccountErasureExecutionState::Pending => "intent",
+            AccountErasureExecutionState::Completed => "completed",
+            AccountErasureExecutionState::FanoutEnqueued => "fanout_enqueued",
+        };
+        format!("{record_id}:account_private_store:{phase}")
+    }
+
+    pub fn request_hash(&self) -> PersistenceResult<String> {
+        #[derive(serde::Serialize)]
+        struct Coordinates<'a> {
+            receiver_id: &'a arkret_wire::DidCoreId,
+            account_authority_id: &'a arkret_wire::DidCoreId,
+            account_id: &'a arkret_wire::AccountId,
+            principal_id: &'a arkret_wire::DidCoreId,
+            triggering_status_record_id: &'a arkret_wire::AccountStatusRecordId,
+            storage_boundary:
+                arkret_models_collaboration::governance::erasure::ErasureStorageBoundary,
+        }
+        arkret_canonical::canonical_sha256(&Coordinates {
+            receiver_id: &self.receiver_id,
+            account_authority_id: &self.account_authority_id,
+            account_id: &self.account_id,
+            principal_id: &self.principal_id,
+            triggering_status_record_id: &self.triggering_status_record_id,
+            storage_boundary: self.storage_boundary,
+        })
+        .map_err(crate::PersistenceError::database)
+    }
+}
+
+/// Called only after the scoped physical deletes, before the same transaction
+/// persists its immutable completion. A signing/storage error rolls back both.
+pub type AccountErasureCompletionSigner<'a> = &'a (
+        dyn Fn(
+    chrono::DateTime<chrono::Utc>,
+) -> PersistenceResult<
+    arkret_models_collaboration::governance::erasure::ErasureReceiptPackage,
+> + Send
+            + Sync
+    );
+
 #[async_trait]
 pub trait AccountStatusReplicaStore: Send + Sync {
     async fn append(
@@ -122,6 +197,14 @@ pub trait AccountStatusReplicaStore: Send + Sync {
     ) -> PersistenceResult<Vec<AccountStatusRecord>>;
 
     async fn erasure_pending(&self, limit: u16) -> PersistenceResult<Vec<AccountStatusRecord>>;
+
+    /// Complete only this already accepted terminal intent. Physical private
+    /// state and the first signed completion commit or roll back together.
+    async fn complete_erasure(
+        &self,
+        pending: &AccountErasureExecution,
+        sign: AccountErasureCompletionSigner<'_>,
+    ) -> PersistenceResult<AccountErasureExecution>;
 
     async fn receipt(
         &self,

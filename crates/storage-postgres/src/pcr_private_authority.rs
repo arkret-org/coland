@@ -71,6 +71,10 @@ pub(crate) async fn accepted_governance(
             ));
         }
     }
+    if matches!(governance, arkret_wire::GenesisGovernance::Organization) {
+        crate::organization_pcr_genesis::verify_accepted_in_connection(conn, &event, &commit)
+            .await?;
+    }
     Ok(governance)
 }
 
@@ -254,20 +258,20 @@ fn unavailable(detail: impl std::fmt::Display) -> PersistenceError {
 /// Acquire this before any holder account, policy, quota or private-cell lock.
 /// Human and user-managed Agent PCRs stay at their original Account Station.
 /// Only independently accepted Organization governance can split from hosting.
-pub(crate) async fn lock_holder(
-    conn: &mut AsyncPgConnection,
-    holder: &AccountId,
-    expected_acceptor: Option<&DidCoreId>,
-) -> PersistenceResult<PrivateAuthorityCut> {
-    lock_holder_mode(conn, holder, expected_acceptor, false).await
+pub(crate) fn lock_holder<'a>(
+    conn: &'a mut AsyncPgConnection,
+    holder: &'a AccountId,
+    expected_acceptor: Option<&'a DidCoreId>,
+) -> impl std::future::Future<Output = PersistenceResult<PrivateAuthorityCut>> + Send + 'a {
+    lock_holder_mode(conn, holder, expected_acceptor, false)
 }
 
 /// Operational export requires the real terminal change at the locked head.
-pub(crate) async fn lock_frozen_holder(
-    conn: &mut AsyncPgConnection,
-    holder: &AccountId,
-) -> PersistenceResult<PrivateAuthorityCut> {
-    lock_holder_mode(conn, holder, None, true).await
+pub(crate) fn lock_frozen_holder<'a>(
+    conn: &'a mut AsyncPgConnection,
+    holder: &'a AccountId,
+) -> impl std::future::Future<Output = PersistenceResult<PrivateAuthorityCut>> + Send + 'a {
+    lock_holder_mode(conn, holder, None, true)
 }
 
 async fn lock_holder_mode(
@@ -276,7 +280,7 @@ async fn lock_holder_mode(
     expected_acceptor: Option<&DidCoreId>,
     require_frozen: bool,
 ) -> PersistenceResult<PrivateAuthorityCut> {
-    let authority=sql_query("SELECT a.realm_id,a.generation,a.service_id FROM principal_resolutions p JOIN realm_authorities a ON a.realm_id=p.pcr_realm_id JOIN realm_authority_root_current_states root ON root.realm_id=a.realm_id WHERE p.principal_id=$1 AND p.station_id=$2 AND root.controller_actor_id=$3 AND (EXISTS(SELECT 1 FROM pcr_genesis_units g WHERE g.realm_id=p.pcr_realm_id AND g.principal_id=p.principal_id AND g.station_id=p.station_id) OR EXISTS(SELECT 1 FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk JOIN agent_producer_signer_keys s ON s.commit_id=c.commit_id WHERE e.envelope->>'event_id'=p.genesis_event_id AND e.state='committed' AND e.kind='ak.realm.create' AND e.envelope->'actor_id'=$3 AND e.envelope->'payload'->'object'->>'purpose'='agent_control' AND c.realm_id=p.pcr_realm_id AND c.stream_position=0 AND c.governance_generation=0 AND s.self_admission_kind='agent_pcr_genesis')) FOR UPDATE OF a")
+    let authority=sql_query("SELECT a.realm_id,a.generation,a.service_id FROM principal_resolutions p JOIN realm_authorities a ON a.realm_id=p.pcr_realm_id JOIN realm_authority_root_current_states root ON root.realm_id=a.realm_id WHERE p.principal_id=$1 AND p.station_id=$2 AND root.controller_actor_id=$3 AND (EXISTS(SELECT 1 FROM pcr_genesis_units g WHERE g.realm_id=p.pcr_realm_id AND g.principal_id=p.principal_id AND g.station_id=p.station_id) OR EXISTS(SELECT 1 FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk JOIN agent_producer_signer_keys s ON s.commit_id=c.commit_id WHERE e.envelope->>'event_id'=p.genesis_event_id AND e.state='committed' AND e.kind='ak.realm.create' AND e.envelope->'actor_id'=$3 AND e.envelope->'payload'->'object'->>'purpose'='agent_control' AND c.realm_id=p.pcr_realm_id AND c.stream_position=0 AND c.governance_generation=0 AND s.self_admission_kind='agent_pcr_genesis') OR EXISTS(SELECT 1 FROM organization_pcr_genesis_sources o JOIN canonical_events e ON e.pk=o.event_pk JOIN realm_commits c ON c.commit_id=o.accepted_commit_id AND c.event_pk=e.pk WHERE o.realm_id=p.pcr_realm_id AND o.principal_id=p.principal_id AND o.station_id=p.station_id AND e.envelope->>'event_id'=p.genesis_event_id AND e.envelope->'actor_id'=$3 AND e.state='committed' AND c.stream_position=0 AND c.governance_generation=0)) FOR UPDATE OF a")
         .bind::<Text,_>(holder.principal_id.as_str()).bind::<Text,_>(holder.station_id.as_str())
         .bind::<Jsonb,_>(serde_json::to_value(ActorId::account(holder.clone())).map_err(PersistenceError::database)?)
         .get_result::<AuthorityRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
@@ -503,4 +507,33 @@ async fn accepted_replica_governance(
             "a replica anchor cannot establish native PCR provenance",
         )),
     }
+}
+
+/// Fence an optional private annotation before testing whether its full
+/// Account has a local projection. Existing required-owner writers need only
+/// their existing Account SHARE gate.
+pub(crate) async fn lock_optional_account_private_tuple(
+    conn: &mut AsyncPgConnection,
+    account: &AccountId,
+) -> PersistenceResult<()> {
+    sql_query("SELECT pg_advisory_xact_lock_shared(account_private_tuple_key($1,$2))")
+        .bind::<Text, _>(account.principal_id.as_str())
+        .bind::<Text, _>(account.station_id.as_str())
+        .execute(&mut *conn)
+        .await
+        .map_err(PersistenceError::database)?;
+    Ok(())
+}
+
+pub(crate) async fn lock_account_private_tuple_for_erasure(
+    conn: &mut AsyncPgConnection,
+    account: &AccountId,
+) -> PersistenceResult<()> {
+    sql_query("SELECT pg_advisory_xact_lock(account_private_tuple_key($1,$2))")
+        .bind::<Text, _>(account.principal_id.as_str())
+        .bind::<Text, _>(account.station_id.as_str())
+        .execute(&mut *conn)
+        .await
+        .map_err(PersistenceError::database)?;
+    Ok(())
 }

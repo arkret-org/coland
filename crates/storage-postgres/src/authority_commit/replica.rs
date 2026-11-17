@@ -272,7 +272,7 @@ async fn require_current_replica_authority(
 }
 
 /// Upsert one verified remote authority under the Realm authority row lock.
-pub(super) async fn record_remote_authority_in_connection(
+pub(crate) async fn record_remote_authority_in_connection(
     conn: &mut AsyncPgConnection,
     authority: &CurrentRealmAuthority,
     local_service_id: &arkret_wire::DidCoreId,
@@ -1020,7 +1020,7 @@ async fn require_visible(
 
 /// Write the exact Event and its Commit as committed in the caller's
 /// transaction.
-async fn store_replica_rows(
+pub(crate) async fn store_replica_rows(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,

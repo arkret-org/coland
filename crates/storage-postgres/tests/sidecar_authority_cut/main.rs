@@ -19,6 +19,7 @@ mod ordinary_realm;
 #[path = "../../../test-support/src/pcr_genesis.rs"]
 #[allow(dead_code)]
 mod pcr_genesis;
+mod scope_custody_receipt;
 #[path = "../support/sidecar_agent.rs"]
 mod sidecar_agent;
 mod sidecar_exchange_controls;
@@ -8423,6 +8424,36 @@ fn boxed_owned_consumer_fixture(
 }
 
 async fn owned_consumer_fixture(count: usize) -> OwnedConsumerFixture {
+    owned_consumer_fixture_with_receipt_probe(count, false).await
+}
+
+async fn owned_consumer_fixture_with_receipt_probe(
+    count: usize,
+    receipt_probe: bool,
+) -> OwnedConsumerFixture {
+    Box::pin(owned_consumer_fixture_with_prepared_scope(
+        count,
+        receipt_probe,
+        false,
+    ))
+    .await
+    .0
+}
+
+async fn owned_consumer_fixture_with_prepared_scope(
+    count: usize,
+    receipt_probe: bool,
+    prepare_only: bool,
+) -> (
+    OwnedConsumerFixture,
+    Option<
+        Box<(
+            DeliveryScopeVault,
+            coland_storage::AgentPairingCommitIntent,
+            coland_storage::AgentRuntimeActivation,
+        )>,
+    >,
+) {
     use coland_storage::{AgentControlAdmissionWrite, AgentParticipationStore};
     let database = TestDatabase::lease().await;
     let pool = database.pool();
@@ -8582,17 +8613,60 @@ async fn owned_consumer_fixture(count: usize) -> OwnedConsumerFixture {
             )
             .unwrap(),
         };
-        let (vault, _) = Box::pin(retain_delivery_scope_for_runtime(
-            &pool,
-            &station,
-            &controller.history,
-            &account,
-            &key,
-            &scope,
-            &endpoint,
-            true,
-        ))
-        .await;
+        if prepare_only {
+            assert_eq!(count, 1);
+            assert_eq!(index, 0);
+            let prepared = Box::pin(agent_scope_custody::prepare_delivery_scope_for_disconnect(
+                &pool,
+                &station,
+                &controller.history,
+                &account,
+                &key,
+                &scope,
+                &endpoint,
+            ))
+            .await;
+            return (
+                OwnedConsumerFixture {
+                    _database: database,
+                    pool,
+                    station,
+                    controller,
+                    founder,
+                    root_event_ref,
+                    controller_join: join.authority_commit,
+                    head,
+                    agents,
+                },
+                Some(prepared),
+            );
+        }
+        let (vault, _) = if receipt_probe {
+            Box::pin(
+                agent_scope_custody::retain_delivery_scope_for_receipt_probe(
+                    &pool,
+                    &station,
+                    &controller.history,
+                    &account,
+                    &key,
+                    &scope,
+                    &endpoint,
+                ),
+            )
+            .await
+        } else {
+            Box::pin(retain_delivery_scope_for_runtime(
+                &pool,
+                &station,
+                &controller.history,
+                &account,
+                &key,
+                &scope,
+                &endpoint,
+                true,
+            ))
+            .await
+        };
         let public = agent_mode_request(
             &agent_join.authority_commit,
             "public",
@@ -8626,17 +8700,20 @@ async fn owned_consumer_fixture(count: usize) -> OwnedConsumerFixture {
             _vault: vault,
         });
     }
-    OwnedConsumerFixture {
-        _database: database,
-        pool,
-        station,
-        controller,
-        founder,
-        root_event_ref,
-        controller_join: join.authority_commit,
-        head,
-        agents,
-    }
+    (
+        OwnedConsumerFixture {
+            _database: database,
+            pool,
+            station,
+            controller,
+            founder,
+            root_event_ref,
+            controller_join: join.authority_commit,
+            head,
+            agents,
+        },
+        None,
+    )
 }
 
 fn owned_consumer_signed_request(

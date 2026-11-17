@@ -163,8 +163,75 @@ CREATE TABLE public.actor_private_events (
 
 -- An accepted actor-private Event and its first outcome never change: exact
 -- retry reads them back and account sync publishes the Event as its source.
+-- Physical deletion is distinct from normal immutable replay. Only an
+-- accepted terminal record and its exact durable execution intent can open
+-- this exception for one complete AccountId; no session setting grants it.
+-- The signer and storage owner are different for controller-private Agent
+-- proposals. This closed projection follows actor-private-effects section 3;
+-- both erasure selection and the immutable-source exception use it.
+CREATE FUNCTION public.actor_private_event_owner(envelope_value JSONB)
+RETURNS JSONB LANGUAGE sql IMMUTABLE STRICT AS $$
+    SELECT CASE envelope_value->>'kind'
+        WHEN 'ak.agent.action_request' THEN envelope_value#>'{payload,controller_account_id}'
+        WHEN 'ak.agent.draft.propose' THEN envelope_value#>'{payload,controller_account_id}'
+        WHEN 'ak.device.push_route' THEN envelope_value#>'{payload,account_id}'
+        WHEN 'ak.read_cursor.advance' THEN CASE
+            WHEN envelope_value#>>'{payload,actor_id,kind}'='account'
+            THEN envelope_value#>'{payload,actor_id,account_id}' END
+        WHEN 'ak.agent.action_reject' THEN CASE
+            WHEN envelope_value#>>'{actor_id,kind}'='account'
+            THEN envelope_value#>'{actor_id,account_id}' END
+        WHEN 'ak.account_data.set' THEN CASE
+            WHEN envelope_value#>>'{actor_id,kind}'='account'
+            THEN envelope_value#>'{actor_id,account_id}' END
+    END;
+$$;
+
+CREATE FUNCTION public.account_private_erasure_allowed(target_account jsonb)
+RETURNS boolean LANGUAGE plpgsql STABLE AS $$
+BEGIN
+    IF target_account IS NULL OR jsonb_typeof(target_account) <> 'object'
+        OR target_account - 'principal_id' - 'station_id' <> '{}'::jsonb
+        OR NOT target_account ?& ARRAY['principal_id','station_id'] THEN
+        RETURN FALSE;
+    END IF;
+    RETURN EXISTS (
+        SELECT 1 FROM public.account_status_replica_records r
+        JOIN public.idempotency_keys i
+          ON i.operation_id = 'coland://internal/idempotency'
+         AND i.idempotency_key = r.record_id || ':account_private_store:intent'
+         AND i.response_body->'account_id' = target_account
+         AND i.response_body->>'account_authority_id' = r.account_authority_id
+         AND i.response_body->>'triggering_status_record_id' = r.record_id
+         AND i.response_body->>'principal_id' = target_account->>'principal_id'
+         AND i.response_body->>'receiver_id' = r.receipt->>'receiver_id'
+         AND r.receipt->'account_id' = target_account
+         AND r.receipt->>'account_status_record_id' = r.record_id
+         AND i.response_body->>'storage_boundary' = 'account_private_store'
+         AND i.response_body->>'state' = 'pending'
+         AND i.authenticated_actor = jsonb_build_object(
+             'kind','service','service_id',i.response_body->>'receiver_id')
+        WHERE r.account_id = target_account
+          AND r.record->'account_id' = target_account
+          AND r.record->>'account_status_record_id' = r.record_id
+          AND r.record->>'status' = 'erasure_pending'
+          AND NOT EXISTS (
+              SELECT 1 FROM public.account_status_replica_records newer
+              WHERE newer.account_authority_id = r.account_authority_id
+                AND newer.account_id = target_account
+                AND newer.status_sequence > r.status_sequence
+          )
+    );
+END;
+$$;
+
 CREATE FUNCTION public.reject_actor_private_event_mutation() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
+    IF TG_OP = 'DELETE' AND public.account_private_erasure_allowed(
+        public.actor_private_event_owner(OLD.envelope)
+    ) THEN
+        RETURN OLD;
+    END IF;
     RAISE EXCEPTION 'accepted actor-private Events are immutable';
 END;
 $$;
@@ -315,6 +382,13 @@ CREATE TABLE public.account_lifecycle (
 );
 
 CREATE INDEX account_lifecycle_state_idx ON public.account_lifecycle USING btree (state, changed_at);
+
+-- The same full tuple serializes the absence of an Account projection.
+-- This is a private-copy fence, never Account existence or permission.
+CREATE FUNCTION public.account_private_tuple_key(principal TEXT, station TEXT)
+RETURNS BIGINT LANGUAGE sql IMMUTABLE STRICT AS $$
+    SELECT hashtextextended(jsonb_build_array('account-private-tuple',principal,station)::text,0);
+$$;
 
 -- One state predicate for private Account writers and derived projections.
 -- Derived AFTER UPDATE projections must never wait for Account locks after
@@ -506,7 +580,7 @@ CREATE TABLE public.agent_principals (
     -- The pending runtime key request travels with its public-key and
     -- attestation digests: all three are written by one command and cleared
     -- together, and none of them is ever a query predicate, so they share one
-    -- column ({"request": …, "public_key_digest": …, "attestation_digest": …}).
+    -- column ({"request": â€¦, "public_key_digest": â€¦, "attestation_digest": â€¦}).
     -- Keeping them apart put this table at 33 columns, one past Diesel's
     -- default 32-column ceiling, which forced the whole build onto the
     -- `64-column-tables` feature. `runtime_key_binding_digest` stays a real
@@ -797,7 +871,10 @@ CREATE TABLE public.audit_logs (
     operation_id uuid,
     device_id text,
     payload jsonb NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT audit_logs_diagnostic_body_check CHECK (
+        NOT (payload ? 'audit_id' AND payload ? 'action' AND payload ? 'outcome' AND payload ? 'payload')
+    )
 );
 
 CREATE INDEX audit_logs_action_idx ON public.audit_logs USING btree (action);
@@ -1303,7 +1380,7 @@ CREATE TABLE public.mls_welcome_deliveries (
     recipient_authorization_event_ref text NOT NULL,
     recipient_device_authorization jsonb,
     -- The exact KeyPackage claim the Welcome consumes; one claim serves one
-    -- accepted Commit only (encryption-and-audit.md §2.6).
+    -- accepted Commit only (encryption-and-audit.md Â§2.6).
     keypackage_claim_ref text NOT NULL UNIQUE,
     position bigint NOT NULL DEFAULT nextval('public.recipient_delivery_position_seq'),
     delivery_json jsonb NOT NULL,
@@ -1481,6 +1558,43 @@ CREATE TABLE public.contacts (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
+
+-- Retained Contact proofs serve both participants. Only independent
+-- presentation/routing copies are suppressed after a local Account closes.
+CREATE FUNCTION public.guard_contact_private_copies()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+DECLARE actor TEXT; subject JSONB;
+BEGIN
+    IF NEW.message IS NULL AND NEW.peer_service_resolution IS NULL THEN
+        RETURN NEW;
+    END IF;
+    FOR actor IN SELECT DISTINCT participant FROM unnest(ARRAY[NEW.requester_id,NEW.target_id]) participant ORDER BY participant LOOP
+        subject := actor::jsonb;
+        IF subject->>'kind'='account' THEN
+            -- This trigger can already own a shared Contact row. Do not
+            -- wait behind an eraser that owns the tuple and needs that row.
+            IF NOT pg_try_advisory_xact_lock_shared(account_private_tuple_key(
+                subject#>>'{account_id,principal_id}',subject#>>'{account_id,station_id}')) THEN
+                RAISE EXCEPTION 'Contact private copy lost an Account erasure cut'
+                    USING ERRCODE='40001';
+            END IF;
+            IF EXISTS (
+                SELECT 1 FROM accounts a
+                WHERE a.principal_id=subject#>>'{account_id,principal_id}'
+                  AND a.station_id=subject#>>'{account_id,station_id}'
+            ) AND NOT account_private_actor_allowed(actor) THEN
+                NEW.message := NULL;
+                NEW.peer_service_resolution := NULL;
+                RETURN NEW;
+            END IF;
+        END IF;
+    END LOOP;
+    RETURN NEW;
+END;
+$$;
+CREATE TRIGGER contacts_private_copies_guard
+BEFORE INSERT OR UPDATE ON public.contacts
+FOR EACH ROW EXECUTE FUNCTION public.guard_contact_private_copies();
 
 CREATE UNIQUE INDEX contacts_exact_pair_idx ON public.contacts
     (LEAST(requester_id,target_id),GREATEST(requester_id,target_id));
@@ -1819,13 +1933,7 @@ CREATE TABLE public.agent_recipient_delivery_ack_tokens (
 CREATE INDEX agent_recipient_delivery_ack_tokens_endpoint_idx
     ON public.agent_recipient_delivery_ack_tokens (agent_id, verification_method, authorization_event_ref, expires_at);
 
-CREATE TABLE public.device_message_lost_watermarks (
-    recipient text NOT NULL,
-    device_id text NOT NULL,
-    lost_through bigint NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    PRIMARY KEY (recipient, device_id)
-);
+
 
 CREATE TABLE public.federation_operations (
     id uuid PRIMARY KEY,
@@ -1900,7 +2008,7 @@ CREATE UNIQUE INDEX federation_outbox_unfinished_coalescing_lane
 -- lease can be taken over without touching the heap.
 CREATE INDEX federation_outbox_claim ON public.federation_outbox USING btree (state, next_attempt_at, lease_expires_at);
 
--- Policy-suppressed revalidation sweep (`federation.md` §4.4).
+-- Policy-suppressed revalidation sweep (`federation.md` Â§4.4).
 CREATE INDEX federation_outbox_policy_suppressed ON public.federation_outbox USING btree (policy_version) WHERE (state = 'policy_suppressed'::text);
 
 CREATE INDEX federation_outbox_state_peer ON public.federation_outbox USING btree (state, peer_id, created_at);
@@ -2039,7 +2147,7 @@ CREATE INDEX event_notification_relay_created_idx
 
 -- Deployment-wide dynamic operational settings (rate limits, admin
 -- allowlist, federation peers, feature toggles). One row PER setting key:
--- `value` is the JSON for that key only. This is an OVERLAY — env/boot config
+-- `value` is the JSON for that key only. This is an OVERLAY â€” env/boot config
 -- provides the defaults and only explicitly-overridden keys have a row here,
 -- so changing an env default still takes effect for keys never overridden.
 -- Per-key rows also mean independent updates, per-key audit, and no
@@ -2119,15 +2227,15 @@ CREATE TABLE public.key_backups (
     -- SOL-02-004: identity of the backup series this envelope belongs to,
     -- projected out of the JSONB payload as stored generated columns. They
     -- back the UNIQUE(series_actor_id, series_id, series_sequence) constraint below
-    -- which makes the §7.6 series-monotonicity check race-free: two concurrent
+    -- which makes the Â§7.6 series-monotonicity check race-free: two concurrent
     -- successor PUTs that both compute the same series_sequence can no longer both
-    -- land — the second insert is rejected by the unique violation rather than
+    -- land â€” the second insert is rejected by the unique violation rather than
     -- relying on a read-then-write (TOCTOU) snapshot check.
     series_actor_id text GENERATED ALWAYS AS ((payload ->> 'actor_id')) STORED,
     series_id text GENERATED ALWAYS AS ((payload ->> 'series_id')) STORED,
     series_sequence bigint GENERATED ALWAYS AS (((payload ->> 'series_sequence'))::bigint) STORED,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    -- v1 registers exactly one backup class (key-management §7.5.0 / §7.6.1).
+    -- v1 registers exactly one backup class (key-management Â§7.5.0 / Â§7.6.1).
     -- `mls_history`, private classes and envelopes without a class never
     -- reach the metadata page that `KeysBackupsPage` serves.
     CONSTRAINT key_backups_backup_kind_check CHECK (
@@ -2415,7 +2523,7 @@ CREATE TABLE public.peer_keypackage_claims (
 
 CREATE UNIQUE INDEX peer_keypackage_claims_single_use_keypackage_id_key ON public.peer_keypackage_claims USING btree (keypackage_id) WHERE key_package_use = 'single_use' AND keypackage_id IS NOT NULL;
 
--- device-lifecycle.md §9.2.3 (decision 0121): the one Welcome binding of one
+-- device-lifecycle.md Â§9.2.3 (decision 0121): the one Welcome binding of one
 -- claim of a ledger row, written by the claim destination in the transaction
 -- that queues the Welcome; consume is checked against it alone.
 CREATE TABLE public.keypackage_claim_welcome_bindings (
@@ -2516,7 +2624,7 @@ CREATE TABLE public.organization_registration_states (
 CREATE INDEX organization_registration_states_generation_idx
     ON public.organization_registration_states (organization_id, current_generation);
 
--- SOL-ORG-04 — verified `ak.realm.organization` relationship statements.
+-- SOL-ORG-04 â€” verified `ak.realm.organization` relationship statements.
 -- Primary key `(realm_id, organization_id, relationship)` so owner /
 -- governance / sponsor / directory_certifier relationships for the same Realm
 -- coexist as independent rows. Column order mirrors the spec
@@ -2546,7 +2654,7 @@ CREATE INDEX realm_organizations_organization_idx ON public.realm_organizations 
 
 CREATE INDEX realm_organizations_relationship_idx ON public.realm_organizations USING btree (realm_id, relationship, status);
 
--- SOL-ORG-05 — `owning_organization_ids` declared hints. These NO LONGER drive
+-- SOL-ORG-05 â€” `owning_organization_ids` declared hints. These NO LONGER drive
 -- governance / durability / delivery / directory policy inheritance (only a
 -- verified `ak.realm.organization` statement does); the table is retained as a
 -- discovery / display hint surface.
@@ -3070,11 +3178,11 @@ CREATE TABLE public.security_transactions (
     revoke_command_outcome jsonb,
     terminal_outcome jsonb,
     recovery_completion jsonb,
-    canonical_request bytea NOT NULL,
+    canonical_request bytea,
     CONSTRAINT security_transactions_pkey PRIMARY KEY (id),
     CONSTRAINT security_transactions_kind_check CHECK ((kind = ANY (ARRAY['recovery'::text, 'security_rotation'::text]))),
     CONSTRAINT security_transactions_branch_check CHECK ((
-        (kind = 'recovery' AND authorizing_device_id IS NULL
+        (kind = 'recovery' AND canonical_request IS NOT NULL AND authorizing_device_id IS NULL
             AND expires_at IS NULL AND request_digest IS NULL
             AND prepared_plan IS NULL AND prepared_plan_digest IS NULL AND accepted_steps IS NULL
             AND revoke_proposal IS NULL AND revoke_command_outcome IS NULL AND terminal_outcome IS NULL
@@ -3087,8 +3195,10 @@ CREATE TABLE public.security_transactions (
             AND recovery_completion #>> '{completion_attestation,device_authorization_event_ref,event_id}' IS NOT NULL)
         OR (kind = 'security_rotation' AND authorizing_device_id IS NOT NULL
             AND expires_at IS NOT NULL AND request_digest IS NOT NULL
-            AND prepared_plan IS NOT NULL AND prepared_plan_digest IS NOT NULL AND accepted_steps IS NOT NULL
-            AND recovery_completion IS NULL)
+            AND prepared_plan_digest IS NOT NULL AND accepted_steps IS NOT NULL
+            AND recovery_completion IS NULL
+            AND ((canonical_request IS NOT NULL AND prepared_plan IS NOT NULL)
+                OR (canonical_request IS NULL AND prepared_plan IS NULL)))
     ) IS TRUE),
     CONSTRAINT security_transactions_revoke_fields_check CHECK (
         (kind = 'recovery' AND revoke_proposal IS NULL AND revoke_command_outcome IS NULL)
@@ -3155,9 +3265,12 @@ CREATE TABLE public.security_transaction_backup_erase_progress (
 CREATE TABLE public.security_transaction_step_outcomes (
     transaction_id uuid NOT NULL,
     step text NOT NULL,
-    canonical_request bytea NOT NULL,
-    response jsonb NOT NULL,
+    canonical_request bytea,
+    response jsonb,
     participant_outcome jsonb,
+    CONSTRAINT security_transaction_step_outcomes_private_fields_check CHECK (
+        (canonical_request IS NULL) = (response IS NULL)
+    ),
     CONSTRAINT security_transaction_step_outcomes_pkey PRIMARY KEY (transaction_id, step),
     CONSTRAINT security_transaction_step_outcomes_transaction_id_fkey FOREIGN KEY (transaction_id) REFERENCES public.security_transactions(id) ON DELETE CASCADE
 );
@@ -3341,6 +3454,23 @@ CREATE TABLE public.idempotency_keys (
     CONSTRAINT idempotency_keys_pkey PRIMARY KEY (actor_key, operation_id, idempotency_key)
 );
 
+-- A source-owned canonical result is not a private Account cache. Generic
+-- late mirrors cannot recreate private responses after the Account closes.
+CREATE FUNCTION public.guard_account_private_idempotency_cache()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.source_event_pk IS NULL
+       AND NEW.authenticated_actor->>'kind'='account'
+       AND NOT account_private_actor_allowed(NEW.authenticated_actor::text) THEN
+        RETURN NULL;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+CREATE TRIGGER idempotency_keys_private_cache_guard
+BEFORE INSERT OR UPDATE ON public.idempotency_keys
+FOR EACH ROW EXECUTE FUNCTION public.guard_account_private_idempotency_cache();
+
 CREATE INDEX idempotency_keys_expiry_idx ON public.idempotency_keys USING btree (expires_at);
 -- Source-owned MLS results follow their actual Event/Account retention and Realm handoff.
 CREATE INDEX idempotency_keys_source_event_idx ON public.idempotency_keys (source_event_pk)
@@ -3375,7 +3505,7 @@ CREATE INDEX webvh_log_events_scid_seq_idx ON public.webvh_log_events ((split_pa
 CREATE INDEX webvh_log_events_subject_idx ON public.webvh_log_events ((operation #>> '{state,id}'));
 CREATE INDEX webvh_documents_scid_seq_idx ON public.webvh_documents ((split_part(id, ':', 3)), sequence DESC) WHERE id LIKE 'did:webvh:%';
 
--- The deployment's own authoritative service identity (identity-did.md §3.7).
+-- The deployment's own authoritative service identity (identity-did.md Â§3.7).
 -- Singleton: at most one row keyed by the fixed id 'self'. `identity` is the
 -- SDK StoredServiceIdentity document: public DID/receipt evidence plus opaque
 -- KeyRefs. Private signing and WebVH control seeds MUST remain in the selected
@@ -3874,6 +4004,9 @@ AFTER INSERT OR UPDATE ON agent_draft_pending_intents
 FOR EACH ROW EXECUTE FUNCTION project_agent_draft_pending_intent();
 CREATE FUNCTION reject_agent_draft_pending_intent_delete() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
+    IF public.account_private_erasure_allowed(OLD.controller_account_id) THEN
+        RETURN OLD;
+    END IF;
     RAISE EXCEPTION 'agent draft pending intent create-once identity cannot be deleted';
 END;
 $$;
@@ -4668,7 +4801,7 @@ CREATE TABLE message_revision_current_states (
 );
 CREATE INDEX message_revision_current_states_realm ON message_revision_current_states(realm_id,message_id);
 
--- `mls_group` typed current (encryption-and-audit.md §2.5): one row per MLS
+-- `mls_group` typed current (encryption-and-audit.md Â§2.5): one row per MLS
 -- effective scope, keyed by the canonical JSON of that scope. The scope's
 -- accepted `ak.mls.genesis` creates it, each winning `ak.mls.commit` merges
 -- its epoch, current Commit ref and covered key-access revision, and every
@@ -5040,6 +5173,33 @@ CREATE TABLE pcr_genesis_units (
  CHECK(jsonb_typeof(result_json)='object'),
  UNIQUE(principal_id,station_id)
 );
+-- The original one-create Organization admission closure is source-owned,
+-- not an editable Account profile or a reusable delegation/session grant.
+CREATE TABLE organization_pcr_genesis_sources (
+ realm_id TEXT PRIMARY KEY,
+ principal_id TEXT NOT NULL,
+ station_id TEXT NOT NULL,
+ source_service_id TEXT NOT NULL,
+ event_pk BIGINT NOT NULL UNIQUE REFERENCES canonical_events(pk) ON DELETE RESTRICT,
+ accepted_commit_id TEXT NOT NULL UNIQUE REFERENCES realm_commits(commit_id),
+ peer_request_json JSONB NOT NULL CHECK(jsonb_typeof(peer_request_json)='object'),
+ organization_log_entries JSONB NOT NULL CHECK(jsonb_typeof(organization_log_entries)='array'),
+ organization_witness_records JSONB NOT NULL CHECK(jsonb_typeof(organization_witness_records)='array'),
+ producer_service_resolution JSONB CHECK(producer_service_resolution IS NULL OR jsonb_typeof(producer_service_resolution)='object'),
+ result_json JSONB NOT NULL CHECK(jsonb_typeof(result_json)='object'),
+ UNIQUE(principal_id,station_id),
+ CHECK(source_service_id=station_id)
+);
+CREATE FUNCTION reject_organization_pcr_genesis_source_update()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ RAISE EXCEPTION 'Organization PCR inception source is immutable' USING ERRCODE='23514';
+END;
+$$;
+CREATE TRIGGER organization_pcr_genesis_source_immutable
+ BEFORE UPDATE ON organization_pcr_genesis_sources
+ FOR EACH ROW EXECUTE FUNCTION reject_organization_pcr_genesis_source_update();
+
 CREATE INDEX agent_status_current_state_agent
  ON agent_status_current_states(realm_id,agent_id);
 
@@ -5292,6 +5452,17 @@ CREATE TABLE agent_pairing_receipts (
     expires_at TIMESTAMPTZ NOT NULL,
     activation_state TEXT NOT NULL CHECK (activation_state IN ('awaiting_source_commit','active','cancelled')),
     scope_custody_ref JSONB NOT NULL CHECK (jsonb_typeof(scope_custody_ref)='object' AND scope_custody_ref ?& ARRAY['key_ref','content_digest'] AND scope_custody_ref - 'key_ref' - 'content_digest' = '{}'::jsonb AND jsonb_typeof(scope_custody_ref->'key_ref')='string' AND jsonb_typeof(scope_custody_ref->'content_digest')='string' AND scope_custody_ref->>'content_digest' ~ '^sha256:[0-9a-f]{64}$'),
+    encrypted_scope_custody JSONB CHECK (
+        jsonb_typeof(encrypted_scope_custody)='object'
+        AND encrypted_scope_custody ?& ARRAY['associated_data','nonce','ciphertext']
+        AND encrypted_scope_custody - 'associated_data' - 'nonce' - 'ciphertext' = '{}'::jsonb
+        AND jsonb_typeof(encrypted_scope_custody->'associated_data')='array'
+        AND jsonb_array_length(encrypted_scope_custody->'associated_data')=7
+        AND jsonb_typeof(encrypted_scope_custody->'nonce')='string'
+        AND jsonb_typeof(encrypted_scope_custody->'ciphertext')='string'
+        AND encrypted_scope_custody->>'nonce' ~ '^[A-Za-z0-9_-]{32}$'
+        AND encrypted_scope_custody->>'ciphertext' ~ '^[A-Za-z0-9_-]+$'
+    ),
     UNIQUE(agent_id, raw_key_digest)
 );
 CREATE FUNCTION preserve_agent_pairing_receipt() RETURNS trigger LANGUAGE plpgsql AS $$

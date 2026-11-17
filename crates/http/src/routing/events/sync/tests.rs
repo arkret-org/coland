@@ -718,7 +718,25 @@ async fn signals_from_two_devices_of_one_principal_stay_independent() {
 #[tokio::test]
 async fn signal_delivery_is_once_per_subscriber_device_watermark() {
     let state = test_state();
-    let subscriber = "ak:did_core:web:bob.example";
+    let account = arkret_wire::AccountId::new(
+        arkret_wire::DidCoreId::new("ak:did_core:web:bob.example").unwrap(),
+        state.service_core_id(),
+    );
+    state
+        .identities()
+        .save_account(coland_services::identity::AccountProfileState {
+            pk: coland_storage::AccountPk(0),
+            principal_id: account.principal_id.clone(),
+            account_id: account.clone(),
+            localpart: "signal-reader".into(),
+            display_name: None,
+            biography: None,
+            avatar_blob_ref: None,
+            created_at: now(),
+        })
+        .await
+        .unwrap();
+    let subscriber = arkret_wire::ActorId::account(account.clone()).to_string();
     let subscriber_device = "ak:device:01904100-0000-7000-8000-b0b0b0000001";
     let sent_at = now();
     state
@@ -739,7 +757,7 @@ async fn signal_delivery_is_once_per_subscriber_device_watermark() {
     assert_eq!(
         state
             .deliveries()
-            .signal_watermark(subscriber, subscriber_device, ROSTER_REALM)
+            .signal_watermark(&subscriber, subscriber_device, ROSTER_REALM)
             .await
             .expect("watermark readable"),
         0,
@@ -747,13 +765,13 @@ async fn signal_delivery_is_once_per_subscriber_device_watermark() {
     );
     state
         .deliveries()
-        .advance_signal_watermark(subscriber, subscriber_device, ROSTER_REALM, 1)
+        .advance_signal_watermark(&account, subscriber_device, ROSTER_REALM, 1)
         .await
         .expect("watermark advanced");
 
     let watermark = state
         .deliveries()
-        .signal_watermark(subscriber, subscriber_device, ROSTER_REALM)
+        .signal_watermark(&subscriber, subscriber_device, ROSTER_REALM)
         .await
         .expect("watermark readable");
     assert_eq!(watermark, 1);

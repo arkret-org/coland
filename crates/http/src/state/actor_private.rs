@@ -157,7 +157,8 @@ pub(crate) fn actor_private_refusal(error: ServiceError) -> AppError {
         ServiceError::SchemaViolation(detail) => AppError::schema_violation(detail.clone()),
         ServiceError::Conflict(detail) => match error.conflict_code() {
             Some(
-                code @ (ConflictCode::AccountDeactivated
+                code @ (ConflictCode::DuplicateConflict
+                | ConflictCode::AccountDeactivated
                 | ConflictCode::AccountErased
                 | ConflictCode::DeviceRevoked
                 | ConflictCode::DeviceRevocationPending
@@ -165,7 +166,6 @@ pub(crate) fn actor_private_refusal(error: ServiceError) -> AppError {
                 | ConflictCode::DeviceUnauthorized
                 | ConflictCode::SignatureInvalid
                 | ConflictCode::SchemaViolation
-                | ConflictCode::DuplicateConflict
                 | ConflictCode::FailedPrecondition
                 | ConflictCode::TemporarilyUnavailable),
             ) => coland_http::error::ErrorCode::from_wire(code.as_str()).map_or_else(

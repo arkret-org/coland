@@ -360,6 +360,28 @@ pub struct AuthorityCommitApplication {
 }
 
 impl AuthorityCommitApplication {
+    pub async fn require_accepted_organization_hosting_account(
+        &self,
+        account: &arkret_wire::AccountId,
+        hosting: &arkret_wire::DidCoreId,
+    ) -> ServiceResult<arkret_wire::RealmId> {
+        Ok(self
+            .store()
+            .require_accepted_organization_hosting_account(account, hosting)
+            .await?)
+    }
+
+    pub async fn prepare_organization_hosting_device(
+        &self,
+        original: &EventAdmissionSubmission,
+        hosting: &arkret_wire::DidCoreId,
+    ) -> ServiceResult<Option<coland_storage::PreparedAccountDeviceForwardSource>> {
+        Ok(self
+            .store()
+            .prepare_organization_hosting_device(original, hosting)
+            .await?)
+    }
+
     pub async fn check_call_media_release(
         &self,
         request: &arkret_models_collaboration::objects::media::CallMediaTokenExchangeRequestBody,
@@ -1498,6 +1520,25 @@ impl AuthorityCommitApplication {
         signing_key: &SigningKey,
         committed_at: DateTime<Utc>,
     ) -> ServiceResult<AuthorityCommitTransaction> {
+        self.prepare_genesis_transaction_with_signer_fact(
+            event,
+            local_service_id,
+            verification_method,
+            signing_key,
+            committed_at,
+            None,
+        )
+    }
+
+    pub fn prepare_genesis_transaction_with_signer_fact(
+        &self,
+        event: &Event,
+        local_service_id: &DidCoreId,
+        verification_method: DidUrl,
+        signing_key: &SigningKey,
+        committed_at: DateTime<Utc>,
+        candidate: Option<&HistoricalProducerSignerFact>,
+    ) -> ServiceResult<AuthorityCommitTransaction> {
         event.validate_for_submit_structural().map_err(|error| {
             ServiceError::SchemaViolation(format!("invalid producer Event: {error}"))
         })?;
@@ -1522,13 +1563,13 @@ impl AuthorityCommitApplication {
             verification_method,
             signing_key,
             committed_at,
-            None,
+            candidate,
         )?;
         let transaction = AuthorityCommitTransaction {
             expected_authority: authority,
             event: event.clone(),
             commit,
-            producer_signer_fact: None,
+            producer_signer_fact: candidate.cloned(),
             content_backup_source: None,
             mls_state: None,
             welcomes: Vec::new(),
@@ -3226,6 +3267,94 @@ impl AuthorityCommitApplication {
         Ok(originals)
     }
 
+    pub async fn organization_pcr_governance_change_original(
+        &self,
+        request: &arkret_models_collaboration::authority_commit::PeerAuthorityForwardEventRequestBody,
+        source: &arkret_wire::DidCoreId,
+    ) -> ServiceResult<Option<arkret_wire::AuthoritySubmitResponseBody>> {
+        Ok(self
+            .store()
+            .organization_pcr_governance_change_original(request, source)
+            .await?)
+    }
+
+    pub async fn admit_organization_pcr_governance_change(
+        &self,
+        write: &coland_storage::OrganizationPcrGovernanceChangeAdmissionWrite,
+    ) -> ServiceResult<arkret_wire::AuthoritySubmitResponseBody> {
+        Ok(self
+            .store()
+            .admit_organization_pcr_governance_change(write)
+            .await?)
+    }
+
+    /// Prepare only the signed native candidate. The dedicated PG unit must
+    /// recheck Org authority, real external producer, root/head and current
+    /// source before installing it. No ordinary local Device fact is inferred.
+    pub async fn prepare_organization_pcr_governance_change_transaction(
+        &self,
+        event: &Event,
+        local_service_id: &DidCoreId,
+        verification_method: DidUrl,
+        signing_key: &SigningKey,
+        committed_at: DateTime<Utc>,
+    ) -> ServiceResult<AuthorityCommitTransaction> {
+        event
+            .validate_for_submit_structural()
+            .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
+        if event.kind != arkret_wire::EventKind::RealmGovernanceStationChange
+            || event.scope_ref
+                != (arkret_wire::ScopeRef::Realm {
+                    realm_id: event.realm_id.clone(),
+                })
+        {
+            return Err(ServiceError::SchemaViolation(
+                "native change preparation requires its one Realm Event".into(),
+            ));
+        }
+        let authority = self
+            .store()
+            .current_authority(&event.realm_id)
+            .await?
+            .ok_or_else(|| ServiceError::Conflict("Realm authority is unavailable".into()))?;
+        if &authority.service_id != local_service_id {
+            return Err(ServiceError::Conflict(
+                "this Station is not the current Realm authority".into(),
+            ));
+        }
+        let stream = CommitStreamRef::Realm {
+            realm_id: event.realm_id.clone(),
+        };
+        let head = self
+            .store()
+            .stream_head(&stream)
+            .await?
+            .ok_or_else(|| ServiceError::Conflict("native PCR head is unavailable".into()))?;
+        let commit = build_signed_event_commit(
+            event,
+            &authority,
+            Some(&head),
+            verification_method,
+            signing_key,
+            committed_at,
+            None,
+        )?;
+        let transaction = AuthorityCommitTransaction {
+            expected_authority: authority,
+            event: event.clone(),
+            commit,
+            producer_signer_fact: None,
+            content_backup_source: None,
+            mls_state: None,
+            welcomes: Vec::new(),
+            recipient_queue_capacity: self.recipient_queue_capacity,
+        };
+        transaction
+            .validate()
+            .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
+        Ok(transaction)
+    }
+
     pub async fn admit_pcr_governance_change(
         &self,
         transaction: &AuthorityCommitTransaction,
@@ -3385,6 +3514,37 @@ impl AuthorityCommitApplication {
             .await?
             .ok_or_else(|| ServiceError::Internal("Realm genesis Event is missing".to_owned()))?
             .event;
+        // Candidate selection chooses the verifier, never Organization authority.
+        // Its unique reader rechecks the immutable accepted whole native source.
+        let producer_signer_fact = if matches!(
+            arkret_wire::GenesisGovernance::from_genesis(&genesis_event)
+                .map_err(|error| ServiceError::Internal(error.to_string()))?,
+            arkret_wire::GenesisGovernance::Organization
+        ) {
+            let source = self
+                .store()
+                .producer_signer_fact(&genesis_event, &genesis_commit)
+                .await?
+                .ok_or_else(|| {
+                    ServiceError::Conflict(
+                        "temporarily_unavailable: original Org Genesis source is missing".into(),
+                    )
+                })?;
+            if !matches!(
+                &source,
+                HistoricalProducerSignerFact::OrganizationGenesis(_)
+            ) {
+                return Err(ServiceError::Internal(
+                    "Org Genesis has another producer source class".into(),
+                ));
+            }
+            Some(
+                serde_json::to_value(source)
+                    .map_err(|error| ServiceError::Internal(error.to_string()))?,
+            )
+        } else {
+            None
+        };
         let handoffs = self.store().authority_handoffs(&request.realm_id).await?;
         let mut authority_transitions = Vec::with_capacity(handoffs.len());
         for handoff in handoffs {
@@ -3440,6 +3600,7 @@ impl AuthorityCommitApplication {
             realm_id: request.realm_id.clone(),
             genesis_event,
             genesis_commit,
+            producer_signer_fact,
             authority_transitions,
             current_generation: authority.generation,
             current_service_id: authority.service_id.clone(),

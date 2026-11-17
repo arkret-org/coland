@@ -120,23 +120,9 @@ async fn build_global_sync_snapshot(
     let to_device = if let Some(session) =
         session.filter(|session| session.agent_session().is_none())
     {
-        let lost_watermark = match state
-            .deliveries()
-            .device_message_lost_watermark(&session.actor, session.require_human_device_id())
-            .await
-        {
-            Ok(watermark) => watermark,
-            Err(error) => {
-                tracing::error!(%error, "failed to read to-device lost watermark during sync snapshot");
-                return Err(account_unavailable());
-            }
-        };
-        if lost_watermark.is_some_and(|position| position > after_cursor.to_device_position) {
-            to_device_lost = Some(true);
-            if let Some(lost_watermark) = lost_watermark {
-                to_device_position = to_device_position.max(lost_watermark);
-            }
-        }
+        // Current writers never discard unacknowledged deliveries. No durable
+        // historical-loss source exists in this implementation.
+        to_device_lost = Some(false);
         let selector = crate::routing::identity::device_messages::recipient_queue_selector(session)
             .expect("human account stream has a human recipient selector");
         let queued = match state

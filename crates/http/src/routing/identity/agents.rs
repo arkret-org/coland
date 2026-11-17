@@ -254,4 +254,6 @@ pub(crate) fn open_router() -> Router {
 #[cfg(test)]
 mod tests;
 
-pub(crate) use pairing::{qualified_agent_scope_evidence, verify_and_retain_agent_scope_custody};
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use pairing::prepare_agent_scope_custody;
+pub(crate) use pairing::qualified_agent_scope_evidence;

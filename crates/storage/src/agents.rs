@@ -1,12 +1,65 @@
 use arkret_wire::OpaqueLocalId;
 
 use super::{AccountPk, AgentPrincipalRecord, PersistenceResult, Value, async_trait};
-/// Private vault coordinates; no disclosure bytes are stored in PostgreSQL.
+/// Original private receipt identity and canonical plaintext integrity binding.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentScopeCustodyRef {
     pub key_ref: String,
     pub content_digest: arkret_wire::Hash,
+}
+
+/// One encrypted verifier-private body. This internal storage value is never
+/// a wire carrier or an authority source. The stable Service key is external;
+/// only this original receipt row durably owns the encrypted material.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentScopeEncryptedEvidence {
+    pub associated_data: serde_json::Value,
+    pub nonce: arkret_wire::Base64UrlString,
+    pub ciphertext: arkret_wire::Base64UrlString,
+}
+
+#[derive(Clone)]
+pub struct PreparedAgentScopeCustody {
+    pub reference: AgentScopeCustodyRef,
+    pub evidence: AgentScopeEncryptedEvidence,
+    validator: std::sync::Arc<
+        dyn Fn(&AgentScopeCustodyRef, &AgentScopeEncryptedEvidence) -> PersistenceResult<()>
+            + Send
+            + Sync,
+    >,
+}
+impl std::fmt::Debug for PreparedAgentScopeCustody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PreparedAgentScopeCustody([ENCRYPTED])")
+    }
+}
+impl PreparedAgentScopeCustody {
+    pub fn new(
+        reference: AgentScopeCustodyRef,
+        evidence: AgentScopeEncryptedEvidence,
+        validator: std::sync::Arc<
+            dyn Fn(&AgentScopeCustodyRef, &AgentScopeEncryptedEvidence) -> PersistenceResult<()>
+                + Send
+                + Sync,
+        >,
+    ) -> Self {
+        Self {
+            reference,
+            evidence,
+            validator,
+        }
+    }
+    /// Pure local cryptographic validation at the owning receipt transaction.
+    /// No network, storage mutation or second authority lookup is performed.
+    pub fn validate_first_winner(
+        &self,
+        reference: &AgentScopeCustodyRef,
+        evidence: &AgentScopeEncryptedEvidence,
+    ) -> PersistenceResult<()> {
+        (self.validator)(reference, evidence)
+    }
 }
 
 /// Original accepted sources verified when the confidential presentation arrived.
@@ -138,6 +191,8 @@ pub struct AgentPairingCommitIntent {
     pub authorize_event_id: String,
     pub key_authorization_event: arkret_wire::Event,
     pub scope_custody_ref: Option<AgentScopeCustodyRef>,
+    /// Process-only preparation input, stored solely in the original receipt.
+    pub prepared_scope_custody: Option<PreparedAgentScopeCustody>,
 }
 #[derive(Clone, Debug)]
 pub struct AgentRuntimeApprovalWrite {
@@ -209,6 +264,7 @@ pub struct AgentPairingReceipt {
     pub runtime_key_binding_digest: String,
     pub outcome: arkret_models_collaboration::agent_operations::AgentKeyPairResponseBody,
     pub scope_custody_ref: Option<AgentScopeCustodyRef>,
+    pub encrypted_scope_custody: Option<AgentScopeEncryptedEvidence>,
 }
 /// Station-private preparation only. Reading this material grants no current
 /// qualification; every operation rechecks the observed Accounts at its cut.
@@ -326,6 +382,22 @@ pub trait AgentStore: Send + Sync {
         limit: usize,
     ) -> PersistenceResult<Vec<AgentPrincipalRecord>>;
     async fn put(&self, record: AgentPrincipalRecord) -> PersistenceResult<()>;
+    /// Bind a newly created private pairing handle and its first provision
+    /// outcome in the same transaction, before either becomes observable.
+    async fn put_pairing_preparation(
+        &self,
+        record: AgentPrincipalRecord,
+        primary: &crate::IdempotencyRecord,
+    ) -> PersistenceResult<crate::IdempotencyRecord>;
+    /// Complete an already accepted public projection or clear expired private
+    /// adjuncts. Terminal controllers retain only minimum accepted public facts.
+    async fn put_accepted_projection(&self, record: AgentPrincipalRecord) -> PersistenceResult<()>;
+    /// Complete controller identity from the original accepted provision.
+    /// This public-source read does not grant current private-write permission.
+    async fn controller_account(
+        &self,
+        agent_id: &str,
+    ) -> PersistenceResult<Option<arkret_wire::AccountId>>;
     async fn get(&self, agent_id: &str) -> PersistenceResult<Option<AgentPrincipalRecord>>;
     async fn get_by_pairing_request_id(
         &self,

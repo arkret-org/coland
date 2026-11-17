@@ -68,7 +68,7 @@ pub struct DeviceDeliveryPurgeResult {
 pub trait DeviceDeliveryPort: Send + Sync {
     async fn purge_device_delivery(
         &self,
-        actor_id: &str,
+        account_id: &arkret_wire::AccountId,
         device_id: &str,
     ) -> ServiceResult<DeviceDeliveryPurgeResult>;
     async fn register_push_device(
@@ -126,7 +126,7 @@ pub trait SignalRelayPort: Send + Sync {
     ) -> ServiceResult<u64>;
     async fn advance_signal_watermark(
         &self,
-        actor_id: &str,
+        actor_id: &arkret_wire::AccountId,
         device_id: &str,
         realm_id: &str,
         position: u64,
@@ -191,7 +191,6 @@ pub trait DeviceMessagePort: Send + Sync {
         selector: &RecipientQueueSelector,
         acknowledgement_token: &str,
     ) -> ServiceResult<Option<usize>>;
-    async fn lost_watermark(&self, recipient: &str, device_id: &str) -> ServiceResult<Option<i64>>;
 }
 
 #[derive(Clone)]
@@ -307,11 +306,11 @@ impl DeliveryService {
 
     pub async fn purge_device_delivery(
         &self,
-        actor_id: &str,
+        account_id: &arkret_wire::AccountId,
         device_id: &str,
     ) -> ServiceResult<DeviceDeliveryPurgeResult> {
         self.device_delivery
-            .purge_device_delivery(actor_id, device_id)
+            .purge_device_delivery(account_id, device_id)
             .await
     }
 
@@ -420,16 +419,6 @@ impl DeliveryService {
             .await
     }
 
-    pub async fn device_message_lost_watermark(
-        &self,
-        recipient: &str,
-        device_id: &str,
-    ) -> ServiceResult<Option<i64>> {
-        self.device_messages
-            .lost_watermark(recipient, device_id)
-            .await
-    }
-
     pub async fn append_signal(&self, record: SignalRelayRecord) -> ServiceResult<bool> {
         self.signals.append_signal(record).await
     }
@@ -455,7 +444,7 @@ impl DeliveryService {
 
     pub async fn advance_signal_watermark(
         &self,
-        actor_id: &str,
+        actor_id: &arkret_wire::AccountId,
         device_id: &str,
         realm_id: &str,
         position: u64,
@@ -578,7 +567,7 @@ mod tests {
         }
         async fn advance_signal_watermark(
             &self,
-            _actor_id: &str,
+            _actor_id: &arkret_wire::AccountId,
             _device_id: &str,
             _realm_id: &str,
             _position: u64,
@@ -644,20 +633,13 @@ mod tests {
         ) -> ServiceResult<Option<usize>> {
             Ok(None)
         }
-        async fn lost_watermark(
-            &self,
-            _recipient: &str,
-            _device_id: &str,
-        ) -> ServiceResult<Option<i64>> {
-            Ok(None)
-        }
     }
 
     #[async_trait]
     impl DeviceDeliveryPort for NoDeviceDelivery {
         async fn purge_device_delivery(
             &self,
-            _actor_id: &str,
+            _account_id: &arkret_wire::AccountId,
             _device_id: &str,
         ) -> ServiceResult<DeviceDeliveryPurgeResult> {
             Ok(DeviceDeliveryPurgeResult::default())

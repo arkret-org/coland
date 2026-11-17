@@ -37,7 +37,7 @@ pub fn build_object_storage(
     match config {
         ObjectStorageConfig::Local { root, prefix } => {
             std::fs::create_dir_all(root)?;
-            let store = LocalFileSystem::new_with_prefix(root)?;
+            let store = LocalFileSystem::new_with_prefix(root)?.with_fsync(true);
             Ok(Arc::new(ObjectStoreStorage {
                 backend_name: "local",
                 prefix: prefix.clone(),

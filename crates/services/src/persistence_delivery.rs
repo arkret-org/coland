@@ -56,7 +56,7 @@ impl crate::delivery::NotificationWritePort for PersistenceNotificationWriter {
 impl crate::delivery::DeviceDeliveryPort for PersistenceDeviceDelivery {
     async fn purge_device_delivery(
         &self,
-        actor_id: &str,
+        account_id: &arkret_wire::AccountId,
         device_id: &str,
     ) -> crate::ServiceResult<crate::delivery::DeviceDeliveryPurgeResult> {
         // Queue entries remain durable until their endpoint acknowledges them.
@@ -66,7 +66,7 @@ impl crate::delivery::DeviceDeliveryPort for PersistenceDeviceDelivery {
         let push_registrations_removed = self
             .0
             .push_devices()
-            .purge_principal_device(actor_id, device_id)
+            .unregister(account_id, device_id, None, None)
             .await?;
         Ok(crate::delivery::DeviceDeliveryPurgeResult {
             to_device_messages_dropped,
@@ -133,7 +133,7 @@ impl crate::delivery::SignalRelayPort for PersistenceSignalRelay {
 
     async fn advance_signal_watermark(
         &self,
-        actor_id: &str,
+        actor_id: &arkret_wire::AccountId,
         device_id: &str,
         realm_id: &str,
         position: u64,
@@ -274,18 +274,6 @@ impl crate::delivery::DeviceMessagePort for PersistenceDeviceMessages {
             .0
             .device_messages()
             .ack_recipient_with_token(selector, acknowledgement_token)
-            .await?)
-    }
-
-    async fn lost_watermark(
-        &self,
-        recipient: &str,
-        device_id: &str,
-    ) -> crate::ServiceResult<Option<i64>> {
-        Ok(self
-            .0
-            .device_messages()
-            .lost_watermark(recipient, device_id)
             .await?)
     }
 }

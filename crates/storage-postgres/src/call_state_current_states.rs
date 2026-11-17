@@ -146,7 +146,29 @@ fn invalid(detail: &str) -> PersistenceError {
     PersistenceError::SchemaViolation(detail.to_owned())
 }
 
-pub(crate) async fn commit_in_connection(
+#[inline(never)]
+pub(crate) fn commit_in_connection<'a>(
+    conn: &'a mut AsyncPgConnection,
+    event: &'a Event,
+    commit: &'a RealmCommit,
+    prepared: Option<&'a coland_storage::EventApprovalCommit>,
+    verified_media: Option<&'a arkret_signatures::media::VerifiedCallParticipant>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = PersistenceResult<()>> + Send + 'a>> {
+    if !matches!(
+        event.kind,
+        EventKind::RealmMediaService
+            | EventKind::CallState
+            | EventKind::CallRecordingStart
+            | EventKind::CallCreate
+    ) {
+        return Box::pin(std::future::ready(Ok(())));
+    }
+    crate::boxed_future(|| {
+        commit_in_connection_inner(conn, event, commit, prepared, verified_media)
+    })
+}
+
+async fn commit_in_connection_inner(
     conn: &mut AsyncPgConnection,
     event: &Event,
     commit: &RealmCommit,
@@ -180,9 +202,6 @@ pub(crate) async fn commit_in_connection(
     }
     if event.kind == EventKind::CallRecordingStart {
         return capture::start(conn, event, commit, prepared).await;
-    }
-    if event.kind != EventKind::CallCreate {
-        return Ok(());
     }
     if !matches!(
         event.scope_ref,

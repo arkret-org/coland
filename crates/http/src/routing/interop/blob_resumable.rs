@@ -32,12 +32,10 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock, Weak};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use coland_services::delivery::BlobState as BlobRecord;
-use parking_lot::Mutex;
 use salvo::http::{HeaderValue, StatusCode};
 use salvo::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -51,6 +49,9 @@ use super::blob::{
 };
 use super::{auth_or_render, now, render_error};
 use crate::state::AppState;
+
+mod staged_owner;
+use staged_owner::{OwnerGuard, io as owner_io};
 
 pub const TUS_VERSION: &str = "1.0.0";
 /// Protocol versions / extensions advertised both on the `OPTIONS` probe
@@ -96,15 +97,16 @@ pub(super) fn router() -> Router {
 /// node (never wire-visible); written atomically (`.tmp` + rename) next
 /// to the byte file as `{id}.json` / `{id}.bin`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StagedUpload {
     upload_id: String,
     declared_size_bytes: u64,
     offset_bytes: u64,
     /// Decoded `Upload-Metadata` key/value pairs from creation time.
     upload_metadata: HashMap<String, Option<String>>,
-    /// Bearer-session actor that created the upload; every later request
-    /// on the resource must authenticate as the same actor.
-    created_by: String,
+    /// The authenticated complete creator; principal equality alone never
+    /// selects another hosting Account or an Agent controller.
+    created_by: arkret_wire::ActorId,
     created_at: String,
     expires_at: String,
 }
@@ -125,48 +127,197 @@ fn is_safe_upload_id(id: &str) -> bool {
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
 }
 
-static UPLOAD_LOCKS: OnceLock<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>> =
-    OnceLock::new();
-
-/// Per-upload write serialization. PATCH / DELETE on the same
-/// id take the id lock so offset check + append + meta rewrite is atomic
-/// within this process.
-fn upload_lock(id: &str) -> Arc<tokio::sync::Mutex<()>> {
-    let locks = UPLOAD_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut map = locks.lock();
-    map.retain(|_, lock| lock.strong_count() > 0);
-    if let Some(lock) = map.get(id).and_then(Weak::upgrade) {
-        return lock;
-    }
-    let lock = Arc::new(tokio::sync::Mutex::new(()));
-    map.insert(id.to_owned(), Arc::downgrade(&lock));
-    lock
+fn read_meta(dir: &Path, id: &str) -> std::io::Result<Option<StagedUpload>> {
+    let raw = match std::fs::read(meta_path(dir, id)) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    serde_json::from_slice(&raw)
+        .map(Some)
+        .map_err(std::io::Error::other)
 }
 
-/// Drop the lock entry once the staged upload is gone (terminated,
-/// completed, or expired) so the map does not grow with upload churn.
-fn release_upload_lock(id: &str) {
-    if let Some(locks) = UPLOAD_LOCKS.get() {
-        let mut map = locks.lock();
-        map.remove(id);
-    }
-}
-
-async fn read_meta(dir: &Path, id: &str) -> Option<StagedUpload> {
-    let raw = tokio::fs::read(meta_path(dir, id)).await.ok()?;
-    serde_json::from_slice(&raw).ok()
-}
-
-async fn write_meta_atomic(dir: &Path, meta: &StagedUpload) -> std::io::Result<()> {
+fn write_meta_atomic(dir: &Path, meta: &StagedUpload) -> std::io::Result<()> {
+    use std::io::Write as _;
     let tmp = dir.join(format!("{}.json.tmp", meta.upload_id));
-    let bytes = serde_json::to_vec(meta).map_err(std::io::Error::other)?;
-    tokio::fs::write(&tmp, bytes).await?;
-    tokio::fs::rename(&tmp, meta_path(dir, &meta.upload_id)).await
+    let bytes = arkret_canonical::canonical_json_bytes(meta)
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&tmp)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    std::fs::rename(tmp, meta_path(dir, &meta.upload_id))
 }
 
-async fn remove_staged(dir: &Path, id: &str) {
-    let _ = tokio::fs::remove_file(data_path(dir, id)).await;
-    let _ = tokio::fs::remove_file(meta_path(dir, id)).await;
+fn remove_staged(dir: &Path, id: &str) -> std::io::Result<()> {
+    for path in [
+        data_path(dir, id),
+        meta_path(dir, id),
+        dir.join(format!("{id}.json.tmp")),
+    ] {
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+fn create_staged(dir: &Path, meta: &StagedUpload, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(data_path(dir, &meta.upload_id))?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    write_meta_atomic(dir, meta)
+}
+
+fn append_staged(dir: &Path, meta: &mut StagedUpload, chunk: &[u8]) -> std::io::Result<()> {
+    use std::io::{Seek as _, Write as _};
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(data_path(dir, &meta.upload_id))?;
+    if file.metadata()?.len() < meta.offset_bytes {
+        return Err(std::io::Error::other(
+            "staged body is shorter than its committed offset",
+        ));
+    }
+    // An interrupted previous append may have no metadata acknowledgment.
+    // Recover only the unaccepted tail, under the same actual native owner.
+    file.set_len(meta.offset_bytes)?;
+    file.seek(std::io::SeekFrom::Start(meta.offset_bytes))?;
+    let old_offset = meta.offset_bytes;
+    file.write_all(chunk)?;
+    file.sync_all()?;
+    meta.offset_bytes = old_offset + chunk.len() as u64;
+    if let Err(error) = write_meta_atomic(dir, meta) {
+        file.set_len(old_offset)?;
+        file.sync_all()?;
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn render_owner_io(res: &mut Response, error: std::io::Error) {
+    let busy = error.kind() == std::io::ErrorKind::WouldBlock;
+    render_error(
+        res,
+        if busy {
+            StatusCode::SERVICE_UNAVAILABLE
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        },
+        if busy {
+            "temporarily_unavailable"
+        } else {
+            "internal_error"
+        },
+        &error.to_string(),
+    );
+}
+
+async fn request_owner(
+    state: &AppState,
+    session: &coland_services::identity::SessionIdentityState,
+    req: &Request,
+    res: &mut Response,
+) -> Option<(arkret_wire::ActorId, Option<OwnerGuard>)> {
+    let actor = match crate::routing::identity::session_actor::validated_session_actor(
+        state, session,
+    )
+    .await
+    {
+        Ok(actor) => actor,
+        Err(error) => {
+            render_error(res, error.http_status(), error.wire_code(), &error.message);
+            return None;
+        }
+    };
+    // This actual router accepts Station sessions. It has no native
+    // RealmDevice credential hoop and does not invent one from a principal.
+    let Some(account) = actor.as_account_id() else {
+        render_error(
+            res,
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "native upload owner is unavailable",
+        );
+        return None;
+    };
+    let guard = match OwnerGuard::acquire(
+        state.config().resumable_upload_dir.clone(),
+        actor.clone(),
+        true,
+        true,
+    )
+    .await
+    {
+        Ok(Some(guard)) => guard,
+        Ok(None) => {
+            render_error(
+                res,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "temporarily_unavailable",
+                "native upload owner is unavailable",
+            );
+            return None;
+        }
+        Err(error) => {
+            render_owner_io(res, error);
+            return None;
+        }
+    };
+    // Keep no PG lock through external IO. The actual OS owner below covers
+    // disconnect/cancellation; E first commits its native negative projection
+    // and then drains this owner without any PG lock held.
+    if let Err(error) = state
+        .persistence()
+        .require_private_account_owner(account)
+        .await
+    {
+        let code = error
+            .conflict_code()
+            .and_then(|code| arkret_wire::ErrorCode::from_wire(code.as_str()))
+            .unwrap_or(arkret_wire::ErrorCode::InternalError);
+        let mut refusal = crate::error::AppError::from_rejection(code, error.to_string());
+        if matches!(
+            code,
+            arkret_wire::ErrorCode::AccountErased | arkret_wire::ErrorCode::AccountDeactivated
+        ) {
+            refusal =
+                refusal.with_status_context(arkret_wire::ErrorStatusContext::ProtectedResource);
+        }
+        render_error(
+            res,
+            refusal.http_status(),
+            refusal.wire_code(),
+            &refusal.message,
+        );
+        return None;
+    }
+    // This reuses the existing original-credential/current-native verifier.
+    // It cannot replace an old holder, scope, Account or expiry, and it does
+    // not consume/replay the already verified DPoP presentation a second time.
+    let grant_secret = coland_http::util::dpop_token(req);
+    if let Err((status, code, message)) =
+        crate::routing::identity::auth::revalidate_current_read_session(
+            state,
+            session,
+            grant_secret,
+        )
+        .await
+    {
+        render_error(res, status, code, message);
+        return None;
+    }
+    Some((actor, Some(guard)))
 }
 
 fn is_expired(meta: &StagedUpload) -> bool {
@@ -407,16 +558,6 @@ async fn tus_create(depot: &mut Depot, req: &mut Request, res: &mut Response) {
         );
         return;
     }
-    let dir = state.config().resumable_upload_dir.clone();
-    if let Err(error) = tokio::fs::create_dir_all(&dir).await {
-        render_error(
-            res,
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "internal_error",
-            &error.to_string(),
-        );
-        return;
-    }
     let upload_id = uuid::Uuid::new_v4().simple().to_string();
     let created_at = arkret_canonical::format_timestamp_canonical(now());
     let expires_at = arkret_canonical::format_timestamp_canonical(
@@ -425,16 +566,6 @@ async fn tus_create(depot: &mut Depot, req: &mut Request, res: &mut Response) {
                 state.config().resumable_upload_incomplete_ttl_seconds as i64,
             ),
     );
-    let mut meta = StagedUpload {
-        upload_id: upload_id.clone(),
-        declared_size_bytes: declared_size,
-        offset_bytes: 0,
-        upload_metadata,
-        created_by: session.actor.clone(),
-        created_at,
-        expires_at: expires_at.clone(),
-    };
-
     // creation-with-upload: an offset+octet-stream body on POST carries
     // the first chunk in the same request.
     let mut initial_bytes: Vec<u8> = Vec::new();
@@ -467,24 +598,27 @@ async fn tus_create(depot: &mut Depot, req: &mut Request, res: &mut Response) {
             return;
         }
     }
-    if let Err(error) = tokio::fs::write(data_path(&dir, &upload_id), &initial_bytes).await {
-        render_error(
-            res,
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "internal_error",
-            &error.to_string(),
-        );
+    let Some((creator, mut owner)) = request_owner(state, &session, req, res).await else {
         return;
-    }
+    };
+    let mut meta = StagedUpload {
+        upload_id: upload_id.clone(),
+        declared_size_bytes: declared_size,
+        offset_bytes: 0,
+        upload_metadata,
+        created_by: creator.clone(),
+        created_at,
+        expires_at: expires_at.clone(),
+    };
+
     meta.offset_bytes = initial_bytes.len() as u64;
-    if let Err(error) = write_meta_atomic(&dir, &meta).await {
-        remove_staged(&dir, &upload_id).await;
-        render_error(
-            res,
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "internal_error",
-            &error.to_string(),
-        );
+    let stored = meta.clone();
+    if let Err(error) = owner_io(&mut owner, move |dir| {
+        create_staged(dir, &stored, &initial_bytes)
+    })
+    .await
+    {
+        render_owner_io(res, error);
         return;
     }
 
@@ -516,34 +650,45 @@ async fn tus_create(depot: &mut Depot, req: &mut Request, res: &mut Response) {
 /// and foreign-actor resources answer `404` exactly like missing ones so
 /// upload ids cannot be probed across accounts.
 async fn load_gated(
-    state: &AppState,
     res: &mut Response,
     id: &str,
-    actor: &str,
+    actor: &arkret_wire::ActorId,
+    owner: &mut Option<OwnerGuard>,
 ) -> Option<StagedUpload> {
-    let dir = &state.config().resumable_upload_dir;
     let not_found = |res: &mut Response| {
         render_error(
             res,
             StatusCode::NOT_FOUND,
             "not_found",
             "resumable upload not found or expired",
-        );
+        )
     };
     if !is_safe_upload_id(id) {
         not_found(res);
         return None;
     }
-    let Some(meta) = read_meta(dir, id).await else {
-        not_found(res);
-        return None;
+    let selected = id.to_owned();
+    let meta = match owner_io(owner, move |dir| read_meta(dir, &selected)).await {
+        Ok(Some(meta)) => meta,
+        Ok(None) => {
+            not_found(res);
+            return None;
+        }
+        Err(error) => {
+            render_owner_io(res, error);
+            return None;
+        }
     };
-    if meta.created_by != actor {
+    if &meta.created_by != actor || meta.upload_id != id {
         not_found(res);
         return None;
     }
     if is_expired(&meta) {
-        remove_staged(dir, id).await;
+        let selected = id.to_owned();
+        if let Err(error) = owner_io(owner, move |dir| remove_staged(dir, &selected)).await {
+            render_owner_io(res, error);
+            return None;
+        }
         not_found(res);
         return None;
     }
@@ -562,7 +707,10 @@ async fn tus_head(depot: &mut Depot, req: &mut Request, res: &mut Response) {
     }
     set_tus_header(res);
     let id = req.param::<String>("id").unwrap_or_default();
-    let Some(meta) = load_gated(state, res, &id, &session.actor).await else {
+    let Some((creator, mut owner)) = request_owner(state, &session, req, res).await else {
+        return;
+    };
+    let Some(meta) = load_gated(res, &id, &creator, &mut owner).await else {
         return;
     };
     let headers = res.headers_mut();
@@ -633,22 +781,6 @@ async fn tus_patch(depot: &mut Depot, req: &mut Request, res: &mut Response) {
         return;
     };
     let id = req.param::<String>("id").unwrap_or_default();
-    let lock = upload_lock(&id);
-    let _guard = lock.lock().await;
-    let Some(mut meta) = load_gated(state, res, &id, &session.actor).await else {
-        return;
-    };
-    if request_offset != meta.offset_bytes {
-        // tus: offset mismatch answers 409 Conflict; the client re-syncs
-        // via HEAD.
-        render_error(
-            res,
-            StatusCode::CONFLICT,
-            "failed_precondition",
-            "Upload-Offset does not match current offset",
-        );
-        return;
-    }
     req.set_secure_max_size(MAX_BLOB_UPLOAD_BYTES + 64 * 1024);
     let chunk = match req.payload().await {
         Ok(bytes) => bytes.to_vec(),
@@ -662,6 +794,23 @@ async fn tus_patch(depot: &mut Depot, req: &mut Request, res: &mut Response) {
             return;
         }
     };
+    let Some((creator, mut owner)) = request_owner(state, &session, req, res).await else {
+        return;
+    };
+    let Some(mut meta) = load_gated(res, &id, &creator, &mut owner).await else {
+        return;
+    };
+    if request_offset != meta.offset_bytes {
+        // tus: offset mismatch answers 409 Conflict; the client re-syncs
+        // via HEAD.
+        render_error(
+            res,
+            StatusCode::CONFLICT,
+            "failed_precondition",
+            "Upload-Offset does not match current offset",
+        );
+        return;
+    }
     let new_offset = meta.offset_bytes.saturating_add(chunk.len() as u64);
     if new_offset > meta.declared_size_bytes {
         render_error(
@@ -672,35 +821,19 @@ async fn tus_patch(depot: &mut Depot, req: &mut Request, res: &mut Response) {
         );
         return;
     }
-    let dir = &state.config().resumable_upload_dir;
-    let append = async {
-        use tokio::io::AsyncWriteExt as _;
-        let mut file = tokio::fs::OpenOptions::new()
-            .append(true)
-            .open(data_path(dir, &id))
-            .await?;
-        file.write_all(&chunk).await?;
-        file.flush().await
+    let mut updated = meta.clone();
+    let appended = owner_io(&mut owner, move |dir| {
+        append_staged(dir, &mut updated, &chunk)?;
+        Ok(updated)
+    })
+    .await;
+    meta = match appended {
+        Ok(meta) => meta,
+        Err(error) => {
+            render_owner_io(res, error);
+            return;
+        }
     };
-    if let Err(error) = append.await {
-        render_error(
-            res,
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "internal_error",
-            &error.to_string(),
-        );
-        return;
-    }
-    meta.offset_bytes = new_offset;
-    if let Err(error) = write_meta_atomic(dir, &meta).await {
-        render_error(
-            res,
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "internal_error",
-            &error.to_string(),
-        );
-        return;
-    }
     let headers = res.headers_mut();
     headers.insert(
         H_UPLOAD_OFFSET,
@@ -727,12 +860,13 @@ async fn tus_finalize(depot: &mut Depot, req: &mut Request, res: &mut Response) 
         return;
     };
     let id = req.param::<String>("id").unwrap_or_default();
-    let lock = upload_lock(&id);
-    let _guard = lock.lock().await;
-    let Some(meta) = load_gated(state, res, &id, &session.actor).await else {
+    let Some((creator, mut owner)) = request_owner(state, &session, req, res).await else {
         return;
     };
-    complete_resumable_upload(state, &session, &id, &meta, res).await;
+    let Some(meta) = load_gated(res, &id, &creator, &mut owner).await else {
+        return;
+    };
+    complete_resumable_upload(state, &session, &id, &meta, &mut owner, res).await;
 }
 
 #[handler]
@@ -747,13 +881,17 @@ async fn tus_delete(depot: &mut Depot, req: &mut Request, res: &mut Response) {
     }
     set_tus_header(res);
     let id = req.param::<String>("id").unwrap_or_default();
-    let lock = upload_lock(&id);
-    let _guard = lock.lock().await;
-    let Some(_meta) = load_gated(state, res, &id, &session.actor).await else {
+    let Some((creator, mut owner)) = request_owner(state, &session, req, res).await else {
         return;
     };
-    remove_staged(&state.config().resumable_upload_dir, &id).await;
-    release_upload_lock(&id);
+    let Some(_meta) = load_gated(res, &id, &creator, &mut owner).await else {
+        return;
+    };
+    let selected = id.clone();
+    if let Err(error) = owner_io(&mut owner, move |dir| remove_staged(dir, &selected)).await {
+        render_owner_io(res, error);
+        return;
+    }
     res.status_code(StatusCode::NO_CONTENT);
 }
 
@@ -762,6 +900,7 @@ async fn complete_resumable_upload(
     session: &coland_services::identity::SessionIdentityState,
     id: &str,
     meta: &StagedUpload,
+    owner: &mut Option<OwnerGuard>,
     res: &mut Response,
 ) {
     let actor = session.actor.as_str();
@@ -844,8 +983,16 @@ async fn complete_resumable_upload(
         None => None,
     };
 
-    let dir = &state.config().resumable_upload_dir;
-    let staged_data_path = data_path(dir, id);
+    let Some(native) = owner.as_ref() else {
+        render_error(
+            res,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "temporarily_unavailable",
+            "native upload owner is unavailable",
+        );
+        return;
+    };
+    let staged_data_path = data_path(native.directory(), id);
     let metadata = match tokio::fs::metadata(&staged_data_path).await {
         Ok(metadata) => metadata,
         Err(error) => {
@@ -980,11 +1127,8 @@ async fn complete_resumable_upload(
     };
     if let Err(error) = state.deliveries().store_blob(&blob_ref, record).await {
         tracing::error!(%error, "failed to persist blob");
-        if matches!(state.deliveries().blob(&blob_ref).await, Ok(None))
-            && let Err(delete_error) = state.deliveries().delete_object(&storage_key).await
-        {
-            tracing::warn!(%delete_error, %storage_key, "failed to clean up blob after metadata write failure");
-        }
+        // A concurrent admission may own this shared content-addressed key.
+        // A failed metadata write cannot authorize deletion of its object.
         if !validate_existing_blob_classification(state, &blob_ref, encryption, res).await {
             return;
         }
@@ -999,8 +1143,11 @@ async fn complete_resumable_upload(
     // Staging part is consumed; drop it so it can never be replayed or
     // completed twice. Removal failure is non-fatal (the TTL sweeper
     // collects leftovers).
-    remove_staged(dir, id).await;
-    release_upload_lock(id);
+    let selected = id.to_owned();
+    if let Err(error) = owner_io(owner, move |dir| remove_staged(dir, &selected)).await {
+        render_owner_io(res, error);
+        return;
+    }
     let outcome = match blob_upload_response_body(
         state,
         blob_ref,
@@ -1071,35 +1218,114 @@ pub fn spawn_resumable_upload_ttl_sweeper(
     std::sync::Arc::new(task)
 }
 
-async fn sweep_expired_parts(dir: &Path, ttl: std::time::Duration) -> std::io::Result<u32> {
-    let mut removed = 0u32;
-    let mut entries = match tokio::fs::read_dir(dir).await {
-        Ok(entries) => entries,
-        // Directory not created yet — nothing staged, nothing to sweep.
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-        Err(error) => return Err(error),
+fn staged_names(dir: &Path) -> std::io::Result<Vec<String>> {
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| std::io::Error::other("invalid staged filename"))?;
+        if staged_owner::is_lock_file(&name) {
+            continue;
+        }
+        let id = name
+            .strip_suffix(".json.tmp")
+            .or_else(|| name.strip_suffix(".json"))
+            .or_else(|| name.strip_suffix(".bin"));
+        if id.is_none_or(|id| !is_safe_upload_id(id)) || !entry.file_type()?.is_file() {
+            return Err(std::io::Error::other("unknown source in native tus owner"));
+        }
+        names.push(name);
+    }
+    names.sort();
+    Ok(names)
+}
+
+fn erase_owner_directory(dir: &Path, actor: &arkret_wire::ActorId) -> std::io::Result<()> {
+    let names = staged_names(dir)?;
+    for name in &names {
+        if let Some(id) = name.strip_suffix(".json") {
+            let meta = read_meta(dir, id)?
+                .ok_or_else(|| std::io::Error::other("staged source disappeared"))?;
+            if &meta.created_by != actor || meta.upload_id != id {
+                return Err(std::io::Error::other(
+                    "staged original names another full creator",
+                ));
+            }
+        }
+    }
+    for name in names {
+        std::fs::remove_file(dir.join(name))?;
+    }
+    Ok(())
+}
+
+/// Called only after the worker has verified its original accepted E intent.
+/// No Account/PCR/Realm PG lock is held while this actual native owner drains.
+/// A disconnected HTTP/PG future cannot release an in-flight file task's lock.
+pub(crate) async fn erase_account_parts(
+    state: &AppState,
+    account: &arkret_wire::AccountId,
+) -> Result<(), crate::error::AppError> {
+    let actor = arkret_wire::ActorId::account(account.clone());
+    let guard = OwnerGuard::acquire(
+        state.config().resumable_upload_dir.clone(),
+        actor.clone(),
+        false,
+        false,
+    )
+    .await;
+    let guard = match guard {
+        Ok(Some(guard)) => guard,
+        Ok(None) => {
+            // A genuine empty catalog is safe. Unknown old/foreign files are
+            // not evidence that this Account has no unfinished private work.
+            staged_owner::directories(state.config().resumable_upload_dir.clone())
+                .await
+                .map_err(|error| crate::error::AppError::internal(error.to_string()))?;
+            return Ok(());
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            return Err(crate::app_error!(
+                TemporarilyUnavailable,
+                "native tus writer has not terminated"
+            ));
+        }
+        Err(error) => return Err(crate::error::AppError::internal(error.to_string())),
     };
-    let now = std::time::SystemTime::now();
-    while let Some(entry) = entries.next_entry().await? {
-        let path = entry.path();
-        let is_staging = matches!(
-            path.extension().and_then(|ext| ext.to_str()),
-            Some("bin") | Some("json") | Some("tmp")
-        );
-        if !is_staging {
-            continue;
-        }
-        let Ok(metadata) = entry.metadata().await else {
-            continue;
+    guard
+        .run(move |dir| erase_owner_directory(dir, &actor))
+        .await
+        .map_err(|error| crate::error::AppError::internal(error.to_string()))?;
+    Ok(())
+}
+
+async fn sweep_expired_parts(dir: &Path, ttl: std::time::Duration) -> std::io::Result<u32> {
+    let mut removed = 0;
+    for key in staged_owner::directories(dir.to_owned()).await? {
+        let guard = match OwnerGuard::acquire_key(dir.to_owned(), key.clone(), false, false).await {
+            Ok(Some(guard)) => guard,
+            Ok(None) => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
+            Err(error) => return Err(error),
         };
-        let Ok(modified) = metadata.modified() else {
-            continue;
-        };
-        if now.duration_since(modified).unwrap_or_default() > ttl
-            && tokio::fs::remove_file(&path).await.is_ok()
-        {
-            removed += 1;
-        }
+        let (_, count) = guard
+            .run(move |directory| {
+                let mut count = 0;
+                let now = std::time::SystemTime::now();
+                for name in staged_names(directory)? {
+                    let path = directory.join(name);
+                    let modified = std::fs::metadata(&path)?.modified()?;
+                    if now.duration_since(modified).unwrap_or_default() > ttl {
+                        std::fs::remove_file(path)?;
+                        count += 1;
+                    }
+                }
+                Ok(count)
+            })
+            .await?;
+        removed += count;
     }
     Ok(removed)
 }

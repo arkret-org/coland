@@ -3,6 +3,7 @@ param(
     [Parameter(Mandatory=$true)][string]$ConfigPath,
     [Parameter(Mandatory=$true)][string]$EvidenceDirectory,
     [Parameter(Mandatory=$true)][string]$EmbeddedLocalId,
+    [string]$EmbeddedAuthority,
     [int]$TimeoutSeconds = 120,
     [switch]$FirstProvisioning
 )
@@ -65,6 +66,7 @@ $result = [ordered]@{
     checked_operations = @()
     checked_schemas = @()
     embedded_document_id = $null
+    embedded_authority = $EmbeddedAuthority
     embedded_log_version = $null
     alive_after_hold_seconds = 0
     cleanup_identity_verified = $false
@@ -135,8 +137,11 @@ try {
     if ($rejected.StatusCode -notin @(400, 401, 403)) { throw "Production authority submit rejection route missing: $($rejected.StatusCode)" }
     if ([string]::IsNullOrWhiteSpace($EmbeddedLocalId)) { throw 'EmbeddedLocalId must come from the restored real WebVH record' }
     $encodedLocalId = [Uri]::EscapeDataString($EmbeddedLocalId)
-    $didDocument = Invoke-RestMethod -Uri "$base/webvh/$encodedLocalId/did.json" -NoProxy -TimeoutSec 10
-    $logResponse = Invoke-WebRequest -Uri "$base/webvh/$encodedLocalId/did.jsonl" -NoProxy -TimeoutSec 10
+    # Preserve the published virtual host while connecting to the owned listener.
+    $webvhHeaders = @{}
+    if ($EmbeddedAuthority) { $webvhHeaders['Host'] = $EmbeddedAuthority }
+    $didDocument = Invoke-RestMethod -Uri "$base/webvh/$encodedLocalId/did.json" -Headers $webvhHeaders -NoProxy -TimeoutSec 10
+    $logResponse = Invoke-WebRequest -Uri "$base/webvh/$encodedLocalId/did.jsonl" -Headers $webvhHeaders -NoProxy -TimeoutSec 10
     $logText = if ($logResponse.Content -is [byte[]]) { [Text.Encoding]::UTF8.GetString($logResponse.Content) } else { [string]$logResponse.Content }
     $entries = @($logText -split '\r?\n' | Where-Object { $_.Trim() } | ForEach-Object { $_ | ConvertFrom-Json })
     if (-not $didDocument.id.StartsWith('did:webvh:') -or -not $entries.Count -or $entries[-1].state.id -cne $didDocument.id -or [string]::IsNullOrWhiteSpace($entries[-1].versionId)) { throw 'Real embedded WebVH document/log do not agree' }

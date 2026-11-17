@@ -787,21 +787,6 @@ diesel::table! {
 }
 
 diesel::table! {
-    member_identity_handle_claims (subject_id, digest) {
-        digest -> Text,
-        subject_id -> Text,
-        issuer_id -> Text,
-        audience -> Nullable<Text>,
-        status -> Text,
-        revocation_digest -> Nullable<Text>,
-        cache_expires_at -> Timestamptz,
-        visibility -> Nullable<Text>,
-        expires_at -> Nullable<Timestamptz>,
-        envelope -> Jsonb,
-    }
-}
-
-diesel::table! {
     messages (pk) {
         pk -> Int8,
         event_id -> Text,
@@ -1464,7 +1449,6 @@ diesel::allow_tables_to_appear_in_same_query!(
     invite_locators,
     invite_receive_policies,
     key_backups,
-    member_identity_handle_claims,
     messages,
     mls_key_packages,
     notifications,

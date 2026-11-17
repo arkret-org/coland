@@ -38,36 +38,10 @@ pub struct MemberIdentityEventRecord {
     pub raw_event: Value,
 }
 
-/// Local handle-claim evidence record, keyed by claim `subject`. Sources are
-/// deliberately local-only: directory-issued signed claims and handle-claim
-/// envelopes carried by accepted identity events.
-#[derive(Clone, Debug, PartialEq)]
-pub struct HandleClaimEvidenceRecord {
-    pub digest: String,
-    pub subject_id: arkret_wire::DidCoreId,
-    pub issuer_id: arkret_wire::DidCoreId,
-    pub audience: Option<String>,
-    pub status: String,
-    pub revocation_digest: Option<String>,
-    pub cache_expires_at: chrono::DateTime<chrono::Utc>,
-    pub visibility: Option<String>,
-    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub envelope: Value,
-}
-
-/// Accepted identity Event/Commit hydration plus local handle-claim evidence.
+/// Accepted identity Event/Commit hydration.
 /// Identity assertions are written only by the accepting Event unit of work.
 #[async_trait]
 pub trait MemberIdentityStore: Send + Sync {
     /// Full event snapshot for startup hydration.
     async fn snapshot_events(&self) -> PersistenceResult<Vec<MemberIdentityEventRecord>>;
-    /// Idempotent upsert keyed by `(subject_id, digest)`.
-    async fn put_handle_claim(&self, record: &HandleClaimEvidenceRecord) -> PersistenceResult<()>;
-    /// Drop every cached claim for one subject; returns the number removed.
-    async fn delete_handle_claims_for_subject(
-        &self,
-        subject_id: &arkret_wire::DidCoreId,
-    ) -> PersistenceResult<usize>;
-    /// Full handle-claim snapshot for startup hydration.
-    async fn snapshot_handle_claims(&self) -> PersistenceResult<Vec<HandleClaimEvidenceRecord>>;
 }

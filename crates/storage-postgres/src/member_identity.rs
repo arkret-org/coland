@@ -1,11 +1,11 @@
 use super::{
-    HandleClaimEvidenceRecord, Jsonb, MemberIdentityEventRecord, MemberIdentityStore,
-    MemberIdentitySubjectKey, Nullable, PersistenceError, PersistenceResult, PgPool,
-    QueryableByName, RunQueryDsl, Text, Timestamptz, Value, async_trait, sql_query,
+    Jsonb, MemberIdentityEventRecord, MemberIdentityStore, MemberIdentitySubjectKey,
+    PersistenceError, PersistenceResult, PgPool, QueryableByName, RunQueryDsl, Text, Value,
+    async_trait, sql_query,
 };
 
-/// Reads accepted Event/Commit facts for identity hydration and stores local
-/// handle-claim evidence. It cannot manufacture accepted identity assertions.
+/// Reads accepted Event/Commit facts for identity hydration.
+/// It cannot manufacture accepted identity assertions.
 pub struct PgMemberIdentityStore {
     pub pool: PgPool,
 }
@@ -17,50 +17,6 @@ struct AcceptedIdentityRow {
     #[diesel(sql_type = Jsonb)]
     raw_event: Value,
 }
-
-#[derive(QueryableByName)]
-struct HandleClaimRow {
-    #[diesel(sql_type = Text)]
-    digest: String,
-    #[diesel(sql_type = Text)]
-    subject_id: arkret_wire::DidCoreId,
-    #[diesel(sql_type = Text)]
-    issuer_id: arkret_wire::DidCoreId,
-    #[diesel(sql_type = Nullable<Text>)]
-    audience: Option<String>,
-    #[diesel(sql_type = Text)]
-    status: String,
-    #[diesel(sql_type = Nullable<Text>)]
-    revocation_digest: Option<String>,
-    #[diesel(sql_type = Timestamptz)]
-    cache_expires_at: chrono::DateTime<chrono::Utc>,
-    #[diesel(sql_type = Nullable<Text>)]
-    visibility: Option<String>,
-    #[diesel(sql_type = Nullable<Timestamptz>)]
-    expires_at: Option<chrono::DateTime<chrono::Utc>>,
-    #[diesel(sql_type = Jsonb)]
-    envelope: Value,
-}
-
-impl From<HandleClaimRow> for HandleClaimEvidenceRecord {
-    fn from(row: HandleClaimRow) -> Self {
-        Self {
-            digest: row.digest,
-            subject_id: row.subject_id,
-            issuer_id: row.issuer_id,
-            audience: row.audience,
-            status: row.status,
-            revocation_digest: row.revocation_digest,
-            cache_expires_at: row.cache_expires_at,
-            visibility: row.visibility,
-            expires_at: row.expires_at,
-            envelope: row.envelope,
-        }
-    }
-}
-
-const HANDLE_CLAIM_COLUMNS: &str = "digest, subject_id, issuer_id, audience, \
-     status, revocation_digest, cache_expires_at, visibility, expires_at, envelope";
 
 #[async_trait]
 impl MemberIdentityStore for PgMemberIdentityStore {
@@ -111,66 +67,5 @@ impl MemberIdentityStore for PgMemberIdentityStore {
                 })
             })
             .collect()
-    }
-
-    async fn put_handle_claim(&self, record: &HandleClaimEvidenceRecord) -> PersistenceResult<()> {
-        let mut conn = crate::pg_db(&self.pool);
-        sql_query(
-            "INSERT INTO member_identity_handle_claims \
-             (digest, subject_id, issuer_id, audience, status, revocation_digest, \
-              cache_expires_at, visibility, expires_at, envelope) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
-             ON CONFLICT (subject_id, digest) DO UPDATE SET \
-                issuer_id = EXCLUDED.issuer_id, \
-                audience = EXCLUDED.audience, \
-                status = EXCLUDED.status, \
-                revocation_digest = EXCLUDED.revocation_digest, \
-                cache_expires_at = EXCLUDED.cache_expires_at, \
-                visibility = EXCLUDED.visibility, \
-                expires_at = EXCLUDED.expires_at, \
-                envelope = EXCLUDED.envelope",
-        )
-        .bind::<Text, _>(&record.digest)
-        .bind::<Text, _>(&record.subject_id)
-        .bind::<Text, _>(&record.issuer_id)
-        .bind::<Nullable<Text>, _>(&record.audience)
-        .bind::<Text, _>(&record.status)
-        .bind::<Nullable<Text>, _>(&record.revocation_digest)
-        .bind::<Timestamptz, _>(record.cache_expires_at)
-        .bind::<Nullable<Text>, _>(&record.visibility)
-        .bind::<Nullable<Timestamptz>, _>(record.expires_at)
-        .bind::<Jsonb, _>(&record.envelope)
-        .execute(&mut conn)
-        .await
-        .map(|_| ())
-        .map_err(PersistenceError::database)
-    }
-
-    async fn delete_handle_claims_for_subject(
-        &self,
-        subject_id: &arkret_wire::DidCoreId,
-    ) -> PersistenceResult<usize> {
-        let mut conn = crate::pg_db(&self.pool);
-        sql_query("DELETE FROM member_identity_handle_claims WHERE subject_id = $1")
-            .bind::<Text, _>(subject_id)
-            .execute(&mut conn)
-            .await
-            .map_err(PersistenceError::database)
-    }
-
-    async fn snapshot_handle_claims(&self) -> PersistenceResult<Vec<HandleClaimEvidenceRecord>> {
-        let mut conn = crate::pg_db(&self.pool);
-        sql_query(format!(
-            "SELECT {HANDLE_CLAIM_COLUMNS} FROM member_identity_handle_claims \
-             ORDER BY subject_id, digest"
-        ))
-        .load::<HandleClaimRow>(&mut conn)
-        .await
-        .map(|rows| {
-            rows.into_iter()
-                .map(HandleClaimEvidenceRecord::from)
-                .collect()
-        })
-        .map_err(PersistenceError::database)
     }
 }

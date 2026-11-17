@@ -13,9 +13,7 @@
 //! Authoritative data source: the durable `account_localparts` table. Each row
 //! carries a bare `localpart`; the canonical handle is `@<localpart>`. The
 //! handle id surfaced to operators is the localpart (stable and URL-safe).
-//! The local handle-claim evidence cache
-//! ([`crate::state::MemberIdentityRegistry`]) enriches rows with
-//! issuer / binding-state metadata when present. Wire shapes mirror codmin's
+//! Wire shapes mirror codmin's
 //! `HandleRecord` / `HandleAuditEvent` / `HandleReassignRequest` DTOs
 //! (`codmin/src/types/handles.rs`).
 //!
@@ -82,15 +80,9 @@ pub(super) fn router() -> Router {
     )
 }
 
-/// Build the full handle row set off the durable accounts table, enriched
-/// with local handle-claim evidence. Shared with the generic admin
-/// collection snapshot (`/_coland/admin/handles`).
+/// Build the handle row set from the durable account-localpart bindings.
+/// Shared with the generic admin collection snapshot.
 pub(super) async fn admin_handle_items(state: &AppState) -> Vec<AdminHandleView> {
-    // Index handle-claim evidence by subject DID so account rows can pick
-    // up issuer / status metadata when a directory-issued claim is
-    // cached locally.
-    let claims_by_subject = state.handle_claims_snapshot();
-
     let accounts = state.identities().accounts().await.unwrap_or_default();
 
     let mut rows = Vec::new();
@@ -101,34 +93,20 @@ pub(super) async fn admin_handle_items(state: &AppState) -> Vec<AdminHandleView>
             .await
             .unwrap_or_default();
         for localpart in localparts {
-            let evidence = claims_by_subject.get(&account.principal_id);
-            let primary_claim = evidence.and_then(|records| records.first());
-            let status = match primary_claim {
-                Some(record) => record.status.clone(),
-                None => "active".to_owned(),
-            };
             let handle = format!("@{}", localpart.localpart);
             rows.push(AdminHandleView {
                 id: localpart.localpart.clone(),
                 canonical_uri: format!("ak:handle:{handle}"),
                 aliases: vec![handle],
-                issuer_id: primary_claim
-                    .map(|record| record.issuer_id.clone())
-                    .unwrap_or_else(|| {
-                        arkret_wire::DidCoreId::new(state.service_id().clone())
-                            .expect("runtime service_id must be a DidCoreId")
-                    }),
+                issuer_id: arkret_wire::DidCoreId::new(state.service_id().clone())
+                    .expect("runtime service_id must be a DidCoreId"),
                 subject_id: account.principal_id.clone(),
                 assigned_at: Some(arkret_canonical::format_timestamp_canonical(
                     localpart.created_at,
                 )),
-                expires_at: primary_claim.and_then(|record| {
-                    record
-                        .expires_at
-                        .map(arkret_canonical::format_timestamp_canonical)
-                }),
+                expires_at: None,
                 last_reassignment_at: None,
-                status: Some(status),
+                status: Some("active".to_owned()),
             });
         }
     }

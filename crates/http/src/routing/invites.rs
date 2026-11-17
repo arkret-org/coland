@@ -20,8 +20,6 @@ use arkret_models_collaboration::governance::invite_addressing::{
     PrincipalLocator, PrincipalLocatorProof, PrincipalLocatorProofPurpose,
     SelfInviteDispatchRequestBody,
 };
-#[cfg(test)]
-use arkret_models_collaboration::governance::peer_contact::ContactIntroductionEvidence;
 use arkret_models_collaboration::governance::realm_join_intake::{
     AuthorityLocatorSource, RealmJoinCandidate, RealmJoinCandidateServiceKind,
 };
@@ -957,118 +955,6 @@ fn verified_locator_for_recipient(
     })
 }
 
-#[cfg(test)]
-pub(crate) fn evaluate_contact_receive(
-    state: &AppState,
-    policy: &InviteReceivePolicy,
-    evidence: &ContactIntroductionEvidence,
-    requester_id: &str,
-    subject: &str,
-    recipient_id: &str,
-    source_id: &str,
-) -> ReceiveDecision {
-    let now = now();
-    let constraints = constraints_for_surface(state, ReceivePolicySurface::ContactRequest);
-    let effective_kind: &'static str = match evidence {
-        ContactIntroductionEvidence::LocatorRef { principal_locator } => {
-            if verified_locator_for_recipient(state, principal_locator, subject, recipient_id, now)
-            {
-                "locator_ref"
-            } else {
-                "explicit_address"
-            }
-        }
-        ContactIntroductionEvidence::SharedRealm { realm_id, .. } => {
-            if policy.trusted_realm_ids.is_empty()
-                || policy
-                    .trusted_realm_ids
-                    .iter()
-                    .any(|trusted| trusted == realm_id)
-            {
-                "shared_realm"
-            } else {
-                "explicit_address"
-            }
-        }
-        ContactIntroductionEvidence::HandleClaim {
-            handle,
-            handle_claim,
-            resolved_by,
-            ..
-        } => {
-            if handle_claim_evidence_valid(
-                policy,
-                constraints,
-                handle,
-                handle_claim,
-                resolved_by.as_ref(),
-                subject,
-                recipient_id,
-                now,
-            ) {
-                "handle_claim"
-            } else {
-                "explicit_address"
-            }
-        }
-        ContactIntroductionEvidence::SameStation => "same_station",
-        ContactIntroductionEvidence::ExplicitAddress => "explicit_address",
-    };
-
-    let requester_actor = DidCoreId::new(requester_id.to_owned())
-        .ok()
-        .zip(DidCoreId::new(source_id.to_owned()).ok())
-        .map(|(principal_id, station_id)| {
-            arkret_wire::ActorId::account(arkret_wire::AccountId::new(principal_id, station_id))
-        });
-    if requester_actor.as_ref().is_some_and(|requester| {
-        policy
-            .denied_actor_ids
-            .iter()
-            .any(|actor| actor == requester)
-    }) || principal_service_blocked(policy, constraints, source_id)
-        || !principal_service_trusted(policy, constraints, source_id)
-        || !subject_did_method_accepted(constraints, subject)
-        || kind_forbidden_by_constraints(constraints, effective_kind)
-        || !kind_permitted_by_constraints(constraints, effective_kind)
-    {
-        return opaque_drop(effective_kind);
-    }
-
-    // consent-model.md §6.1 step 2 — the holder's `require_explicit_consent`
-    // profile applies to first-contact delivery exactly as to invites.
-    if policy.consent_profile.requires_explicit_consent() && effective_kind != "consent_grant" {
-        return opaque_drop(effective_kind);
-    }
-
-    let trust_tier = trust_tier_for_kind(effective_kind);
-    let action = receive_action_for_kind(policy, constraints, effective_kind);
-    let disclosure_level = match trust_tier {
-        TrustTier::High => policy
-            .disclosure
-            .as_ref()
-            .and_then(|d| d.high_trust.clone())
-            .unwrap_or(DisclosureLevel::Outcome),
-        TrustTier::Discovery => policy
-            .disclosure
-            .as_ref()
-            .and_then(|d| d.discovery_trust.clone())
-            .unwrap_or(DisclosureLevel::Opaque),
-        TrustTier::Low => policy
-            .disclosure
-            .as_ref()
-            .and_then(|d| d.low_trust.clone())
-            .unwrap_or(DisclosureLevel::Opaque),
-    };
-    let disclosed_outcome = disclosed_outcome_for_action(disclosure_level, &action);
-    ReceiveDecision {
-        action,
-        effective_kind,
-        trust_tier,
-        disclosed_outcome,
-    }
-}
-
 fn constraints_for_surface(
     state: &AppState,
     surface: ReceivePolicySurface,
@@ -1854,14 +1740,18 @@ mod invite_locator_security_tests {
             )
         };
         let evaluate_contact = |policy: &InviteReceivePolicy| {
-            evaluate_contact_receive(
-                &state,
+            coland_domain::invite_receive::evaluate_resolved(
+                constraints_for_surface(&state, ReceivePolicySurface::ContactRequest),
+                false,
+                now(),
                 policy,
-                &ContactIntroductionEvidence::ExplicitAddress,
-                PRODUCTION_INVITER,
+                &IntroductionEvidence::ExplicitAddress,
+                &inviter_actor,
                 PRODUCTION_HOLDER,
                 state.service_id(),
                 state.service_id(),
+                false,
+                false,
             )
         };
 
@@ -1922,14 +1812,18 @@ mod invite_locator_security_tests {
         assert_eq!(invite.effective_kind, "same_station");
         assert_eq!(invite.action, InviteReceiveAction::Quarantine);
 
-        let contact = evaluate_contact_receive(
-            &state,
+        let contact = coland_domain::invite_receive::evaluate_resolved(
+            constraints_for_surface(&state, ReceivePolicySurface::ContactRequest),
+            false,
+            now(),
             &policy,
-            &ContactIntroductionEvidence::ExplicitAddress,
-            PRODUCTION_INVITER,
+            &IntroductionEvidence::ExplicitAddress,
+            &inviter_actor,
             PRODUCTION_HOLDER,
             state.service_id(),
             state.service_id(),
+            false,
+            false,
         );
         assert_eq!(contact.effective_kind, "explicit_address");
         assert_eq!(contact.action, InviteReceiveAction::Quarantine);

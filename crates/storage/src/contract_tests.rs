@@ -28,17 +28,16 @@ use super::{
     EventCommitRequest, EventCommitUnitOfWork, EventStore, FederationOutboxClaim,
     FederationOutboxDeadLetterRecord, FederationOutboxOutcome, FederationOutboxPolicyResolution,
     FederationOutboxRecord, FederationOutboxRequeue, FederationOutboxState, FederationOutboxStore,
-    FederationOutboxTransition, HandleClaimEvidenceRecord, IdempotencyRecord, IdempotencyStore,
-    InviteReceivePolicyStore, MemberIdentityStore, MessageRecord, MessageStore,
-    MimiConsentCorrelationRecord, MimiConsentCorrelationStore, MimiConsentSourceClass,
-    MlsKeyPackageClaim, MlsKeyPackageClaimTarget, MlsKeyPackageRow, MlsKeyPackageStore,
-    OneTimeKeyStore, OrganizationRegistrationEnsureCommit, OrganizationRegistrationLifecycleCommit,
-    OrganizationRegistrationRefreshCommit, OrganizationRegistrationStore,
-    OrganizationRegistrationTerminalReason, PeerClaimTerminalTransition,
-    PeerKeyPackageClaimAttempt, PeerKeyPackageClaimAttemptResult, PeerKeyPackageClaimLedgerRecord,
-    PeerKeyPackageClaimLedgerWriteResult, PersistenceError, ProjectionEventStore,
-    RealmFanoutAuthorityWitness, RealmFanoutBinding, RealmFanoutOutboxInput, RealmMetaRecord,
-    RealmMetaStore, applet_effective_scope_key,
+    FederationOutboxTransition, IdempotencyRecord, IdempotencyStore, InviteReceivePolicyStore,
+    MessageRecord, MessageStore, MimiConsentCorrelationRecord, MimiConsentCorrelationStore,
+    MimiConsentSourceClass, MlsKeyPackageClaim, MlsKeyPackageClaimTarget, MlsKeyPackageRow,
+    MlsKeyPackageStore, OneTimeKeyStore, OrganizationRegistrationEnsureCommit,
+    OrganizationRegistrationLifecycleCommit, OrganizationRegistrationRefreshCommit,
+    OrganizationRegistrationStore, OrganizationRegistrationTerminalReason,
+    PeerClaimTerminalTransition, PeerKeyPackageClaimAttempt, PeerKeyPackageClaimAttemptResult,
+    PeerKeyPackageClaimLedgerRecord, PeerKeyPackageClaimLedgerWriteResult, PersistenceError,
+    ProjectionEventStore, RealmFanoutAuthorityWitness, RealmFanoutBinding, RealmFanoutOutboxInput,
+    RealmMetaRecord, RealmMetaStore, applet_effective_scope_key,
 };
 
 /// Shared account-localpart removal semantics for every persistence adapter.
@@ -4281,65 +4280,6 @@ pub async fn assert_one_time_key_store_contract(
             .await
             .expect("claim drained again"),
         None
-    );
-}
-
-pub async fn assert_member_identity_store_contract(
-    store: &dyn MemberIdentityStore,
-    namespace: &str,
-) {
-    let claim = HandleClaimEvidenceRecord {
-        digest: format!("sha256:{}", "c".repeat(64)),
-        subject_id: arkret_wire::DidCoreId::new(format!("ak:did_core:web:{namespace}.example"))
-            .unwrap(),
-        issuer_id: arkret_wire::DidCoreId::new(format!(
-            "ak:did_core:web:{namespace}-issuer.example"
-        ))
-        .unwrap(),
-        audience: Some("ak:service:directory".to_owned()),
-        status: "verified".to_owned(),
-        revocation_digest: None,
-        cache_expires_at: database_timestamp_now() + Duration::minutes(5),
-        visibility: Some("public".to_owned()),
-        expires_at: Some(database_timestamp_now() + Duration::hours(1)),
-        envelope: serde_json::json!({"subject_id": format!("ak:did_core:web:{namespace}.example")}),
-    };
-    store
-        .put_handle_claim(&claim)
-        .await
-        .expect("cache handle claim");
-    let mut revoked = claim.clone();
-    revoked.status = "revoked".to_owned();
-    revoked.revocation_digest = Some(format!("sha256:{}", "d".repeat(64)));
-    store
-        .put_handle_claim(&revoked)
-        .await
-        .expect("upsert revoked handle claim");
-    assert_eq!(
-        store
-            .snapshot_handle_claims()
-            .await
-            .expect("snapshot handle claims")
-            .into_iter()
-            .filter(|row| row.subject_id == claim.subject_id)
-            .collect::<Vec<_>>(),
-        vec![revoked],
-        "claim upsert replaces the row under the same digest"
-    );
-    assert_eq!(
-        store
-            .delete_handle_claims_for_subject(&claim.subject_id)
-            .await
-            .expect("invalidate handle claims"),
-        1
-    );
-    assert!(
-        store
-            .snapshot_handle_claims()
-            .await
-            .expect("snapshot handle claims after invalidate")
-            .iter()
-            .all(|row| row.subject_id != claim.subject_id)
     );
 }
 

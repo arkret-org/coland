@@ -3878,21 +3878,6 @@ CREATE TABLE public.member_identity_updates_current_states (
     PRIMARY KEY (realm_id, member_id, segment)
 );
 
--- Local handle-claim evidence cache behind the member identity registry.
-CREATE TABLE public.member_identity_handle_claims (
-    digest text NOT NULL,
-    subject_id text NOT NULL CHECK (subject_id LIKE 'ak:did_core:%'),
-    issuer_id text NOT NULL CHECK (issuer_id LIKE 'ak:did_core:%'),
-    audience text,
-    status text NOT NULL,
-    revocation_digest text,
-    cache_expires_at timestamp with time zone NOT NULL,
-    visibility text,
-    expires_at timestamp with time zone,
-    envelope jsonb NOT NULL,
-    PRIMARY KEY (subject_id, digest)
-);
-
 -- Account summaries are accepted governance projections, never discovery rows.
 -- Their only writer derives them from typed current results inside the
 -- authority transaction that changed an input (account_summary.rs).

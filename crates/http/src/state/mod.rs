@@ -63,7 +63,6 @@ pub(crate) use authority_self_event_unit::{
     refresh_direct_conversation_peer_claim, submit_applet_event, submit_mimi_binding_event,
 };
 pub use coland_services::events::{RealmDirectoryEntry, RealmDirectoryIndex, RealmDirectoryQuery};
-pub(crate) use member_identity::HandleClaimEvidenceRecord;
 pub use notification::{
     EventBroadcast, EventNotification, EventNotificationKind, EventNotificationRelay, Mutex,
 };

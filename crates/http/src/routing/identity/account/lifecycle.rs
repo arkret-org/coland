@@ -32,7 +32,6 @@ pub(crate) struct AccountLifecycleChange {
     pub keypackages_retired: usize,
     pub push_routes_revoked: usize,
     pub to_device_messages_dropped: usize,
-    pub identity_link_cache_invalidated: usize,
 }
 
 pub(crate) async fn set_account_lifecycle_state(
@@ -88,7 +87,6 @@ pub(crate) async fn set_account_lifecycle_state(
     let mut keypackages_retired = 0;
     let mut push_routes_revoked = 0;
     let mut to_device_messages_dropped = 0;
-    let mut identity_link_cache_invalidated = 0;
     if previous_state != next_state {
         let record = AccountLifecycleState {
             state: next_state.to_owned(),
@@ -107,7 +105,6 @@ pub(crate) async fn set_account_lifecycle_state(
             keypackages_retired = fanout.keypackages_retired;
             push_routes_revoked = fanout.push_routes_revoked;
             to_device_messages_dropped = fanout.to_device_messages_dropped;
-            identity_link_cache_invalidated = fanout.identity_link_cache_invalidated;
         } else if next_state == "locked" {
             sessions_revoked = revoke_sessions_for_account(state, &account.account_id)
                 .await
@@ -129,7 +126,6 @@ pub(crate) async fn set_account_lifecycle_state(
             keypackages_retired,
             push_routes_revoked,
             to_device_messages_dropped,
-            identity_link_cache_invalidated,
         )
         .await;
     }
@@ -146,7 +142,6 @@ pub(crate) async fn set_account_lifecycle_state(
         keypackages_retired,
         push_routes_revoked,
         to_device_messages_dropped,
-        identity_link_cache_invalidated,
     })
 }
 
@@ -172,14 +167,12 @@ struct AccountDeactivationFanout {
     keypackages_retired: usize,
     push_routes_revoked: usize,
     to_device_messages_dropped: usize,
-    identity_link_cache_invalidated: usize,
 }
 
 async fn run_account_deactivation_fanout(
     state: &AppState,
     account_id: &arkret_wire::AccountId,
 ) -> Result<AccountDeactivationFanout, AppError> {
-    let principal_id = account_id.principal_id.as_str();
     let sessions_revoked = revoke_sessions_for_account(state, account_id)
         .await
         .map_err(AppError::internal)?;
@@ -194,9 +187,6 @@ async fn run_account_deactivation_fanout(
     let (to_device_messages_dropped, push_routes_revoked) =
         purge_delivery_state_for_account(state, account_id).await?;
     let keypackages_retired = retire_owner_account_keypackages(state, account_id.clone()).await?;
-    let identity_link_cache_invalidated = state
-        .invalidate_cached_handle_claims_for_subject(principal_id)
-        .await;
     // §7.1 Push-route completion criterion: when a push gateway independently
     // holds registration/delivery state, the local purge above does NOT
     // complete the Push-route row — the gateway must be notified over the
@@ -212,7 +202,6 @@ async fn run_account_deactivation_fanout(
         keypackages_retired,
         push_routes_revoked,
         to_device_messages_dropped,
-        identity_link_cache_invalidated,
     })
 }
 
@@ -261,7 +250,6 @@ async fn append_account_state_change_audit(
     keypackages_retired: usize,
     push_routes_revoked: usize,
     to_device_messages_dropped: usize,
-    identity_link_cache_invalidated: usize,
 ) {
     // Product-private audit actions must not occupy the protocol `ak.` prefix.
     let payload = json!({
@@ -278,14 +266,12 @@ async fn append_account_state_change_audit(
         "keypackages_retired": keypackages_retired,
         "push_routes_revoked": push_routes_revoked,
         "to_device_messages_dropped": to_device_messages_dropped,
-        "identity_link_cache_invalidated": identity_link_cache_invalidated,
         "fanout_domains": [
             "bearer_sessions",
             "device_records",
             "keypackages",
             "push_routes",
-            "to_device_queue",
-            "identity_link_cache"
+            "to_device_queue"
         ],
     });
     append_audit_log(

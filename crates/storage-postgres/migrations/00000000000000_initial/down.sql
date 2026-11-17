@@ -329,7 +329,6 @@ DROP TABLE IF EXISTS public.one_time_keys CASCADE;
 DROP TABLE IF EXISTS public.applet_registration_current_states CASCADE;
 DROP TABLE IF EXISTS public.applet_registration_instances CASCADE;
 DROP TABLE IF EXISTS public.member_identity_updates_current_states CASCADE;
-DROP TABLE IF EXISTS public.member_identity_handle_claims CASCADE;
 
 DROP TABLE IF EXISTS device_inventory_station CASCADE;
 DROP VIEW IF EXISTS poll_state_current_votes;

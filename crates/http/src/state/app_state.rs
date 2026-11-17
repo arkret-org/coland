@@ -1650,36 +1650,23 @@ impl AppState {
         // digests (`expected_state_digest` guard) or the roster projection.
         {
             let store = self.persistence.member_identity_store();
-            match (
-                store.snapshot_events().await,
-                store.snapshot_handle_claims().await,
-            ) {
-                (Ok(events), Ok(claims)) => {
+            match store.snapshot_events().await {
+                Ok(events) => {
                     let mut registry = super::member_identity::MemberIdentityRegistry::new();
                     let event_count = events.len();
-                    let claim_count = claims.len();
                     for event in events {
                         registry.insert(event);
                     }
-                    for claim in claims {
-                        registry.restore_handle_claim(claim);
-                    }
                     *self.member_identity.lock() = registry;
-                    if event_count > 0 || claim_count > 0 {
+                    if event_count > 0 {
                         tracing::info!(
                             event_count,
-                            claim_count,
                             "hydrated member identity registry from persistence store"
                         );
                     }
                 }
-                (events, claims) => {
-                    if let Err(error) = events {
-                        tracing::warn!(%error, "failed to hydrate member identity events");
-                    }
-                    if let Err(error) = claims {
-                        tracing::warn!(%error, "failed to hydrate member identity handle claims");
-                    }
+                Err(error) => {
+                    tracing::warn!(%error, "failed to hydrate member identity events");
                 }
             }
         }
@@ -1688,32 +1675,6 @@ impl AppState {
 
         self.governance.hydrate_projections().await?;
         Ok(())
-    }
-
-    pub(crate) fn handle_claims_snapshot(
-        &self,
-    ) -> BTreeMap<arkret_wire::DidCoreId, Vec<super::HandleClaimEvidenceRecord>> {
-        self.member_identity.lock().snapshot_handle_claims()
-    }
-
-    pub(crate) async fn invalidate_cached_handle_claims_for_subject(
-        &self,
-        subject_id: &str,
-    ) -> usize {
-        let Ok(subject_id) = arkret_wire::DidCoreId::new(subject_id.to_owned()) else {
-            return 0;
-        };
-        if let Err(error) = self
-            .persistence
-            .member_identity_store()
-            .delete_handle_claims_for_subject(&subject_id)
-            .await
-        {
-            tracing::error!(%error, subject_id = %subject_id, "failed to persist handle claim invalidation");
-        }
-        self.member_identity
-            .lock()
-            .invalidate_handle_claims_for_subject(&subject_id)
     }
 
     pub fn next_to_device_position(&self) -> i64 {

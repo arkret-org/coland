@@ -1,6 +1,6 @@
-//! Restart-semantics integration tests for the five data planes that used to
-//! be memory-only in production (realm_meta, messages, device_keys,
-//! one_time_keys, member identity). Each case writes through one connection
+//! Restart-semantics integration tests for the four data planes that used to
+//! be memory-only in production (realm_meta, messages, device_keys and
+//! one_time_keys). Each case writes through one connection
 //! pool, drops it, reconnects with a fresh pool (equivalent to a process
 //! restart) and verifies the rows survive.
 //!
@@ -12,16 +12,14 @@
 mod support;
 
 use coland_storage::contract_tests::{
-    assert_device_key_store_contract, assert_member_identity_store_contract,
-    assert_message_store_contract, assert_one_time_key_store_contract,
-    assert_realm_meta_store_contract,
+    assert_device_key_store_contract, assert_message_store_contract,
+    assert_one_time_key_store_contract, assert_realm_meta_store_contract,
 };
 use coland_storage::{
     DeviceKeyStore, MessageRecord, MessageStore, OneTimeKeyStore, RealmMetaRecord, RealmMetaStore,
 };
 use coland_storage_postgres::{
-    Db, PgDeviceKeyStore, PgMemberIdentityStore, PgMessageStore, PgOneTimeKeyStore, PgPool,
-    PgRealmMetaStore,
+    Db, PgDeviceKeyStore, PgMessageStore, PgOneTimeKeyStore, PgPool, PgRealmMetaStore,
 };
 
 #[path = "../../test-support/src/device_authorization_history.rs"]
@@ -237,16 +235,4 @@ async fn postgres_one_time_keys_claim_survives_restart() {
             .expect("claim drained pool after restart"),
         None
     );
-}
-
-#[tokio::test]
-async fn postgres_member_identity_handle_claim_cache_contract() {
-    let _db_guard = DB_GUARD.lock().await;
-    let pool = fresh_pool().await;
-    let store = PgMemberIdentityStore { pool: pool.clone() };
-    let namespace = format!("postgres-member-identity-{}", uuid::Uuid::now_v7());
-    assert_member_identity_store_contract(&store, &namespace).await;
-
-    // Accepted identity restart coverage lives in the production UoW target;
-    // this contract exercises only the independent handle-claim cache.
 }

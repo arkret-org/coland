@@ -2,9 +2,7 @@ use std::collections::BTreeMap;
 #[cfg(test)]
 use std::collections::BTreeSet;
 
-pub use coland_storage::{
-    HandleClaimEvidenceRecord, MemberIdentityEventRecord, MemberIdentitySubjectKey,
-};
+pub use coland_storage::{MemberIdentityEventRecord, MemberIdentitySubjectKey};
 #[cfg(test)]
 use serde_json::Value;
 
@@ -19,10 +17,6 @@ pub struct MemberIdentityRegistry {
     /// Index from `(realm_id, actor_id, segment)` → event_ids that
     /// landed against that cell subject, in arrival order.
     by_subject: BTreeMap<MemberIdentitySubjectKey, Vec<String>>,
-    /// Local handle-claim evidence cache keyed by claim `subject`.
-    /// Sources are deliberately local-only: directory-issued signed claims
-    /// and handle-claim envelopes carried by accepted identity events.
-    handle_claims_by_subject: BTreeMap<arkret_wire::DidCoreId, Vec<HandleClaimEvidenceRecord>>,
 }
 
 #[cfg(test)]
@@ -49,46 +43,6 @@ impl MemberIdentityRegistry {
             bucket.push(event_id.clone());
         }
         self.events.insert(event_id, record);
-    }
-
-    /// Insert one already-digested claim record. The durable write-through
-    /// path and startup hydration both land here.
-    pub fn restore_handle_claim(&mut self, record: HandleClaimEvidenceRecord) {
-        let bucket = self
-            .handle_claims_by_subject
-            .entry(record.subject_id.clone())
-            .or_default();
-        if let Some(existing) = bucket
-            .iter_mut()
-            .find(|existing| existing.digest == record.digest)
-        {
-            *existing = record;
-        } else {
-            bucket.push(record);
-            bucket.sort_by(|a, b| a.digest.cmp(&b.digest));
-        }
-    }
-
-    pub fn invalidate_handle_claims_for_subject(
-        &mut self,
-        subject_id: &arkret_wire::DidCoreId,
-    ) -> usize {
-        self.handle_claims_by_subject
-            .remove(subject_id)
-            .map(|claims| claims.len())
-            .unwrap_or(0)
-    }
-
-    /// Snapshot every locally-cached handle-claim evidence record keyed by
-    /// claim `subject`. Drives the operator handles admin surface
-    /// (`GET /_coland/admin/handles`). The cache is durable through the
-    /// `MemberIdentityStore` write-through; the directory-side handle CRDT
-    /// projection is still not wired, so this evidence cache remains the
-    /// authoritative read source until it lands.
-    pub fn snapshot_handle_claims(
-        &self,
-    ) -> std::collections::BTreeMap<arkret_wire::DidCoreId, Vec<HandleClaimEvidenceRecord>> {
-        self.handle_claims_by_subject.clone()
     }
 
     #[cfg(test)]

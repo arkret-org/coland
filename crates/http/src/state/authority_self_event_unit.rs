@@ -338,6 +338,26 @@ pub(super) fn commit_event_unit_with_idempotency<'a>(
     })
 }
 
+struct PreparedSelfEventProjection {
+    transaction: coland_storage::AuthorityCommitTransaction,
+    operation: arkret_event_draft::ProjectedEventOperation,
+    private_governance: bool,
+    decided_at_cut: bool,
+    poll_at_cut: bool,
+}
+
+struct PreparedSelfEventUnit {
+    command: Box<coland_services::events::CommitAcceptedEventCommand>,
+    realm_organization_proof: Option<coland_storage::RealmOrganizationProofCommit>,
+    event_approvals: Option<coland_storage::EventApprovalCommit>,
+    projection: Box<PreparedSelfEventProjection>,
+}
+
+enum SelfEventPreparation {
+    Outcome(Box<AuthoritySubmitResponseBody>),
+    Prepared(Box<PreparedSelfEventUnit>),
+}
+
 fn commit_event_unit_with_idempotency_impl<'a>(
     state: &'a AppState,
     submission: &'a EventAdmissionSubmission,
@@ -345,151 +365,164 @@ fn commit_event_unit_with_idempotency_impl<'a>(
     effects: SelfEventUnitEffects,
     idempotency: Option<coland_services::events::IdempotentResponse>,
 ) -> impl std::future::Future<Output = ServiceResult<AuthoritySubmitResponseBody>> + Send + 'a {
-    // Construct the large accepting state machine outside its caller's poll frame.
     Box::pin(async move {
-        let event = &submission.event;
-        let private_governance =
-            matches!(event.scope_ref, arkret_wire::ScopeRef::RealmControl { .. });
-        if private_governance
-            && (!matches!(
-                event.kind,
-                arkret_wire::EventKind::RealmActorStatusSet
-                    | arkret_wire::EventKind::RealmActorRecoverySet
-            ) || event.actor_id.as_account_id().is_none()
-                || event.executed_by.is_some())
+        match crate::boxed_future(|| {
+            prepare_self_event_unit(state, submission, producer, effects, idempotency)
+        })
+        .await?
         {
-            return Err(ServiceError::SchemaViolation(
-                "private governance requires a direct Account Device".into(),
-            ));
+            SelfEventPreparation::Outcome(outcome) => Ok(*outcome),
+            SelfEventPreparation::Prepared(prepared) => {
+                commit_prepared_self_event_unit(state, submission, prepared).await
+            }
         }
+    })
+}
 
-        if let Some(outcome) = Box::pin(exact_replay(state, event)).await? {
-            return Ok(outcome);
-        }
-        let envelope = serde_json::to_value(event)
-            .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
-        let operation_id = crate::routing::events::event_log::event_operation_id(
-            &envelope,
-            event.event_id.as_str(),
-        )
-        .ok_or_else(|| {
+async fn prepare_self_event_unit(
+    state: &AppState,
+    submission: &EventAdmissionSubmission,
+    producer: AdmittedProducer,
+    effects: SelfEventUnitEffects,
+    idempotency: Option<coland_services::events::IdempotentResponse>,
+) -> ServiceResult<SelfEventPreparation> {
+    let event = &submission.event;
+    let private_governance = matches!(event.scope_ref, arkret_wire::ScopeRef::RealmControl { .. });
+    if private_governance
+        && (!matches!(
+            event.kind,
+            arkret_wire::EventKind::RealmActorStatusSet
+                | arkret_wire::EventKind::RealmActorRecoverySet
+        ) || event.actor_id.as_account_id().is_none()
+            || event.executed_by.is_some())
+    {
+        return Err(ServiceError::SchemaViolation(
+            "private governance requires a direct Account Device".into(),
+        ));
+    }
+
+    if let Some(outcome) = crate::boxed_future(|| exact_replay(state, event)).await? {
+        return Ok(SelfEventPreparation::Outcome(Box::new(outcome)));
+    }
+    let envelope = serde_json::to_value(event)
+        .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
+    let operation_id =
+        crate::routing::events::event_log::event_operation_id(&envelope, event.event_id.as_str())
+            .ok_or_else(|| {
             ServiceError::SchemaViolation("self Event projection id is invalid".to_owned())
         })?;
-        let mut operation = arkret_event_draft::ProjectedEventOperation::from_accepted_event(
-            operation_id,
-            arkret_wire::OperationKind::Create,
-            None,
-            event,
-            arkret_canonical::DigestSuite::Sha256,
-        )
-        .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
-        // A governance change never consumes MLS claims. In particular, a
-        // Direct Conversation must reach its immutable-Genesis refusal before
-        // any peer read or durable consume-receipt refresh.
-        if event.kind != arkret_wire::EventKind::RealmGovernanceStationChange {
-            Box::pin(refresh_direct_conversation_peer_claim(
-                state,
-                &event.realm_id,
-            ))
+    let operation = arkret_event_draft::ProjectedEventOperation::from_accepted_event(
+        operation_id,
+        arkret_wire::OperationKind::Create,
+        None,
+        event,
+        arkret_canonical::DigestSuite::Sha256,
+    )
+    .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
+    // A governance change never consumes MLS claims. In particular, a
+    // Direct Conversation must reach its immutable-Genesis refusal before
+    // any peer read or durable consume-receipt refresh.
+    if event.kind != arkret_wire::EventKind::RealmGovernanceStationChange {
+        crate::boxed_future(|| refresh_direct_conversation_peer_claim(state, &event.realm_id))
             .await?;
+    }
+    // contact-and-direct-conversation.md section 8.4: a Direct Conversation
+    // Realm's profile table precedes every other authority, so its Events
+    // skip the reducer preflight; the accepting transaction evaluates the
+    // table again at its own cut.
+    let direct_conversation = match state
+        .authority_commits()
+        .direct_conversation_admission(event)
+        .await?
+    {
+        coland_storage::DirectConversationAdmissionCut::Refused(code) => {
+            return super::authority_direct_conversation::direct_conversation_refusal(code)
+                .map(|outcome| SelfEventPreparation::Outcome(Box::new(outcome)));
         }
-        // contact-and-direct-conversation.md section 8.4: a Direct Conversation
-        // Realm's profile table precedes every other authority, so its Events
-        // skip the reducer preflight; the accepting transaction evaluates the
-        // table again at its own cut.
-        let direct_conversation = match state
-            .authority_commits()
-            .direct_conversation_admission(event)
-            .await?
-        {
-            coland_storage::DirectConversationAdmissionCut::Refused(code) => {
-                return super::authority_direct_conversation::direct_conversation_refusal(code);
-            }
-            coland_storage::DirectConversationAdmissionCut::Passed => true,
-            coland_storage::DirectConversationAdmissionCut::NotDirectConversation => false,
-        };
-        if !private_governance
-            && !direct_conversation
-            && event.kind != arkret_wire::EventKind::CallState
-        {
-            crate::routing::events::operations::validate_operation_semantics(
+        coland_storage::DirectConversationAdmissionCut::Passed => true,
+        coland_storage::DirectConversationAdmissionCut::NotDirectConversation => false,
+    };
+    if !private_governance
+        && !direct_conversation
+        && event.kind != arkret_wire::EventKind::CallState
+    {
+        crate::routing::events::operations::validate_operation_semantics(
+            state,
+            std::slice::from_ref(&operation),
+        )
+        .map_err(|reason| ServiceError::SchemaViolation(reason.to_owned()))?;
+    }
+    let poll_at_cut = event.kind == arkret_wire::EventKind::MessageCreate
+        && matches!(
+            operation
+                .payload
+                .get("content")
+                .and_then(|content| content.get("kind"))
+                .and_then(serde_json::Value::as_str),
+            Some("ak.content.poll" | "ak.content.poll.response")
+        );
+    let decided_at_cut = direct_conversation
+        || decided_at_commit_cut(&event.kind)
+        || poll_at_cut
+        || (event.kind == arkret_wire::EventKind::MessageCreate && producer.is_managed_device());
+    if !decided_at_cut {
+        crate::boxed_future(|| {
+            crate::routing::events::operations::validate_operation_policy(
                 state,
                 std::slice::from_ref(&operation),
             )
-            .map_err(|reason| ServiceError::SchemaViolation(reason.to_owned()))?;
+        })
+        .await
+        .map_err(|reason| ServiceError::Conflict(reason.to_owned()))?;
+        if event.kind == arkret_wire::EventKind::MessageCreate {
+            crate::boxed_future(|| {
+                crate::routing::message_authoring::message_create_send_gate(state, event)
+            })
+            .await?;
         }
-        let poll_at_cut = event.kind == arkret_wire::EventKind::MessageCreate
-            && matches!(
-                operation
-                    .payload
-                    .get("content")
-                    .and_then(|content| content.get("kind"))
-                    .and_then(serde_json::Value::as_str),
-                Some("ak.content.poll" | "ak.content.poll.response")
-            );
-        let decided_at_cut = direct_conversation
-            || decided_at_commit_cut(&event.kind)
-            || poll_at_cut
-            || (event.kind == arkret_wire::EventKind::MessageCreate
-                && producer.is_managed_device());
-        if !decided_at_cut {
-            Box::pin(
-                crate::routing::events::operations::validate_operation_policy(
-                    state,
-                    std::slice::from_ref(&operation),
-                ),
-            )
-            .await
-            .map_err(|reason| ServiceError::Conflict(reason.to_owned()))?;
-            if event.kind == arkret_wire::EventKind::MessageCreate {
-                Box::pin(crate::routing::message_authoring::message_create_send_gate(
-                    state, event,
-                ))
-                .await?;
-            }
-            if let Some(reason) = state
-                .projections()
-                .preflight_projected_batch_rejection(std::iter::once(&operation))
-            {
-                return Err(ServiceError::Conflict(reason));
-            }
+        if let Some(reason) = state
+            .projections()
+            .preflight_projected_batch_rejection(std::iter::once(&operation))
+        {
+            return Err(ServiceError::Conflict(reason));
         }
-        let origin_source = super::authority_forward::prepare_control_source(state, event).await?;
-        let SelfEventUnitEffects {
-            mls,
-            content_backup_source,
-            owner_transfer_successor,
-        } = effects;
-        let owner_transfer_successor = match (&event.kind, owner_transfer_successor) {
-            (arkret_wire::EventKind::RealmOwnerTransfer, Some(source)) => {
-                Some(super::authority_forward::owner_transfer::received(
-                    event,
-                    source.evidence().clone(),
-                    Utc::now(),
-                )?)
-            }
-            (arkret_wire::EventKind::RealmOwnerTransfer, None) => {
-                Some(super::authority_forward::owner_transfer::acquire(state, event).await?)
-            }
-            (_, Some(_)) => {
-                return Err(ServiceError::SchemaViolation(
-                    "successor evidence is confined to owner transfer".into(),
-                ));
-            }
-            (_, None) => None,
-        };
-        let committed_at = Utc::now();
-        let method = arkret_wire::DidUrl::new(
-            crate::routing::federation::federation_service_signature_key_id(
-                state.service_did().as_str(),
-            ),
-        )
-        .map_err(|error| ServiceError::Internal(error.to_string()))?;
-        let is_mls = matches!(
-            event.kind,
-            arkret_wire::EventKind::MlsGenesis | arkret_wire::EventKind::MlsCommit
-        );
-        let candidate = match &producer {
+    }
+    let origin_source = super::authority_forward::prepare_control_source(state, event).await?;
+    let SelfEventUnitEffects {
+        mls,
+        content_backup_source,
+        owner_transfer_successor,
+    } = effects;
+    let owner_transfer_successor = match (&event.kind, owner_transfer_successor) {
+        (arkret_wire::EventKind::RealmOwnerTransfer, Some(source)) => {
+            Some(super::authority_forward::owner_transfer::received(
+                event,
+                source.evidence().clone(),
+                Utc::now(),
+            )?)
+        }
+        (arkret_wire::EventKind::RealmOwnerTransfer, None) => {
+            Some(super::authority_forward::owner_transfer::acquire(state, event).await?)
+        }
+        (_, Some(_)) => {
+            return Err(ServiceError::SchemaViolation(
+                "successor evidence is confined to owner transfer".into(),
+            ));
+        }
+        (_, None) => None,
+    };
+    let committed_at = Utc::now();
+    let method = arkret_wire::DidUrl::new(
+        crate::routing::federation::federation_service_signature_key_id(
+            state.service_did().as_str(),
+        ),
+    )
+    .map_err(|error| ServiceError::Internal(error.to_string()))?;
+    let is_mls = matches!(
+        event.kind,
+        arkret_wire::EventKind::MlsGenesis | arkret_wire::EventKind::MlsCommit
+    );
+    let candidate = match &producer {
             AdmittedProducer::Forwarded(retained) => {
                 Some(retained.producer_signer_fact.clone().into())
             }
@@ -506,236 +539,287 @@ fn commit_event_unit_with_idempotency_impl<'a>(
             ),
             _ => None,
         };
-        let native_mls_request = mls
-            .as_ref()
-            .and_then(|installation| installation.native_request.clone());
-        let mut transaction = match mls {
-            Some(mls) if is_mls => {
-                state
-                    .authority_commits()
-                    .prepare_self_mls_transaction_with_signer_fact(
-                        event,
-                        mls.state,
-                        mls.welcomes,
-                        &state.service_core_id(),
-                        method,
-                        state.notary_signing_key().as_ref(),
-                        committed_at,
-                        candidate.as_ref(),
-                    )
-                    .await?
-            }
-            None if !is_mls => {
-                state
-                    .authority_commits()
-                    .prepare_self_event_transaction_with_signer_fact(
-                        event,
-                        &state.service_core_id(),
-                        method,
-                        state.notary_signing_key().as_ref(),
-                        committed_at,
-                        candidate.as_ref(),
-                    )
-                    .await?
-            }
-            _ => {
-                return Err(ServiceError::Internal(
-                    "an MLS Event commits only through the MLS unit".to_owned(),
-                ));
-            }
-        };
-        transaction.content_backup_source = content_backup_source;
-        Box::pin(super::authority_forward::stage_control_source(
-            state,
-            &transaction,
-            origin_source,
-        ))
-        .await?;
-        if event.kind == arkret_wire::EventKind::MlsCommit {
-            Box::pin(super::authority_mls_unit::attach_local_roster_witnesses(
-                state,
-                &mut transaction,
-            ))
-            .await?;
+    let native_mls_request = mls
+        .as_ref()
+        .and_then(|installation| installation.native_request.clone());
+    let mut transaction = match mls {
+        Some(mls) if is_mls => {
+            state
+                .authority_commits()
+                .prepare_self_mls_transaction_with_signer_fact(
+                    event,
+                    mls.state,
+                    mls.welcomes,
+                    &state.service_core_id(),
+                    method,
+                    state.notary_signing_key().as_ref(),
+                    committed_at,
+                    candidate.as_ref(),
+                )
+                .await?
         }
-        let canonical_bytes = arkret_canonical::canonical_json_bytes(
-            &event
-                .digest_payload()
-                .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?,
-        )
+        None if !is_mls => {
+            state
+                .authority_commits()
+                .prepare_self_event_transaction_with_signer_fact(
+                    event,
+                    &state.service_core_id(),
+                    method,
+                    state.notary_signing_key().as_ref(),
+                    committed_at,
+                    candidate.as_ref(),
+                )
+                .await?
+        }
+        _ => {
+            return Err(ServiceError::Internal(
+                "an MLS Event commits only through the MLS unit".to_owned(),
+            ));
+        }
+    };
+    transaction.content_backup_source = content_backup_source;
+    crate::boxed_future(|| {
+        super::authority_forward::stage_control_source(state, &transaction, origin_source)
+    })
+    .await?;
+    if event.kind == arkret_wire::EventKind::MlsCommit {
+        crate::boxed_future(|| {
+            super::authority_mls_unit::attach_local_roster_witnesses(state, &mut transaction)
+        })
+        .await?;
+    }
+    let canonical_bytes = arkret_canonical::canonical_json_bytes(
+        &event
+            .digest_payload()
+            .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?,
+    )
+    .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
+    let canonical_digest = event
+        .event_digest_with_digest_suite(arkret_canonical::DigestSuite::Sha256)
         .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
-        let canonical_digest = event
-            .event_digest_with_digest_suite(arkret_canonical::DigestSuite::Sha256)
-            .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
-        let record = coland_storage::CanonicalEventRecord {
-            event_id: event.event_id.to_string(),
-            actor_id: event.actor_id.to_string(),
-            realm_id: Some(event.realm_id.to_string()),
-            kind: event.kind.as_str().to_owned(),
-            schema_id: arkret_wire::SchemaId::EVENT_V1.to_owned(),
-            digest_suite: arkret_canonical::DigestSuite::Sha256,
-            canonical_digest,
-            canonical_bytes,
-            envelope,
-            received_at: committed_at,
-        };
-        let (
-            self_producer_guard,
-            forwarded_producer_evidence,
-            forwarded_agent_producer,
-            applet_producer_guard,
-        ) = match producer {
-            AdmittedProducer::Local(guard) => (Some(*guard), None, None, None),
-            AdmittedProducer::Forwarded(evidence) => (None, Some(*evidence), None, None),
-            AdmittedProducer::ForwardedAgent(evidence) => (None, None, Some(*evidence), None),
-            AdmittedProducer::Applet(guard) => (None, None, None, Some(guard)),
-        };
-        let agent_grant_scope_evidence =
-            Box::pin(super::authority_agent_grant::prepare_agent_grant_scope(
-                state,
-                event,
-                transaction.commit.committed_at,
-            ))
-            .await?;
-        let idempotency = match native_mls_request {
-            Some(context) => Some(context.accepted_response(&transaction.commit)?),
-            None => idempotency,
-        };
-        let command = coland_services::events::CommitAcceptedEventCommand {
-            owner_transfer_successor,
-            verified_media_participant:
-                crate::routing::interop::webrtc::prepare_verified_roster_participant(state, event)
-                    .await?,
-            authority_commit: transaction.clone(),
-            self_producer_guard,
-            applet_producer_guard,
-            widget_token_gate: None,
-            agent_grant_scope_evidence,
-            forwarded_producer_evidence,
-            forwarded_agent_producer,
-            agent_deployment_ceiling: state.config().agent_participation_ceiling,
-            event: record,
-            parent_membership_admission: None,
-            contact_projection: None,
+    let record = coland_storage::CanonicalEventRecord {
+        event_id: event.event_id.to_string(),
+        actor_id: event.actor_id.to_string(),
+        realm_id: Some(event.realm_id.to_string()),
+        kind: event.kind.as_str().to_owned(),
+        schema_id: arkret_wire::SchemaId::EVENT_V1.to_owned(),
+        digest_suite: arkret_canonical::DigestSuite::Sha256,
+        canonical_digest,
+        canonical_bytes,
+        envelope,
+        received_at: committed_at,
+    };
+    let (
+        self_producer_guard,
+        forwarded_producer_evidence,
+        forwarded_agent_producer,
+        applet_producer_guard,
+    ) = match producer {
+        AdmittedProducer::Local(guard) => (Some(*guard), None, None, None),
+        AdmittedProducer::Forwarded(evidence) => (None, Some(*evidence), None, None),
+        AdmittedProducer::ForwardedAgent(evidence) => (None, None, Some(*evidence), None),
+        AdmittedProducer::Applet(guard) => (None, None, None, Some(guard)),
+    };
+    let agent_grant_scope_evidence = crate::boxed_future(|| {
+        super::authority_agent_grant::prepare_agent_grant_scope(
+            state,
+            event,
+            transaction.commit.committed_at,
+        )
+    })
+    .await?;
+    let idempotency = match native_mls_request {
+        Some(context) => Some(context.accepted_response(&transaction.commit)?),
+        None => idempotency,
+    };
+    let command = coland_services::events::CommitAcceptedEventCommand {
+        owner_transfer_successor,
+        verified_media_participant:
+            crate::routing::interop::webrtc::prepare_verified_roster_participant(state, event)
+                .await?,
+        authority_commit: transaction.clone(),
+        self_producer_guard,
+        applet_producer_guard,
+        widget_token_gate: None,
+        agent_grant_scope_evidence,
+        forwarded_producer_evidence,
+        forwarded_agent_producer,
+        agent_deployment_ceiling: state.config().agent_participation_ceiling,
+        event: record,
+        parent_membership_admission: None,
+        contact_projection: None,
 
-            device_revocation_transition: None,
-            device_revocation_gate: None,
-            projections: if private_governance {
-                Vec::new()
-            } else {
-                vec![coland_services::events::ProjectedEvent {
-                    event_id: event.event_id.to_string(),
-                    realm_id: event.realm_id.to_string(),
-                    event_kind: event.kind.clone(),
-                    operation_kind: "create".to_owned(),
-                    operation_id: Some(operation.operation_id.to_string()),
-                    sender: Some(event.actor_id.to_string()),
-                    payload: serde_json::to_value(&event.payload)
-                        .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?,
-                    created_at: event.created_at,
-                    received_at: committed_at,
-                }]
-            },
-            idempotency,
-            deliveries: Vec::new(),
-            realm_fanout_source: (!private_governance)
-                .then(|| EventAdmissionSubmission::new(submission.event.clone())),
-        };
-        let realm_organization_proof =
-            Box::pin(crate::routing::organizations::prepare_realm_organization_proof(state, event))
-                .await
-                .map_err(|reason| ServiceError::Conflict(reason.to_owned()))?;
-        let event_approvals = Box::pin(crate::approval_admission::prepare_event_approvals(
+        device_revocation_transition: None,
+        device_revocation_gate: None,
+        projections: if private_governance {
+            Vec::new()
+        } else {
+            vec![coland_services::events::ProjectedEvent {
+                event_id: event.event_id.to_string(),
+                realm_id: event.realm_id.to_string(),
+                event_kind: event.kind.clone(),
+                operation_kind: "create".to_owned(),
+                operation_id: Some(operation.operation_id.to_string()),
+                sender: Some(event.actor_id.to_string()),
+                payload: serde_json::to_value(&event.payload)
+                    .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?,
+                created_at: event.created_at,
+                received_at: committed_at,
+            }]
+        },
+        idempotency,
+        deliveries: Vec::new(),
+        realm_fanout_source: (!private_governance)
+            .then(|| EventAdmissionSubmission::new(submission.event.clone())),
+    };
+    let realm_organization_proof = crate::boxed_future(|| {
+        crate::routing::organizations::prepare_realm_organization_proof(state, event)
+    })
+    .await
+    .map_err(|reason| ServiceError::Conflict(reason.to_owned()))?;
+    let event_approvals = crate::boxed_future(|| {
+        crate::approval_admission::prepare_event_approvals(
             state,
             submission,
             transaction.commit.committed_at,
+        )
+    })
+    .await?;
+    Ok(SelfEventPreparation::Prepared(Box::new(
+        PreparedSelfEventUnit {
+            command: Box::new(command),
+            realm_organization_proof,
+            event_approvals,
+            projection: Box::new(PreparedSelfEventProjection {
+                transaction,
+                operation,
+                private_governance,
+                decided_at_cut,
+                poll_at_cut,
+            }),
+        },
+    )))
+}
+
+fn commit_prepared_self_event_unit<'a>(
+    state: &'a AppState,
+    submission: &'a EventAdmissionSubmission,
+    prepared: Box<PreparedSelfEventUnit>,
+) -> impl std::future::Future<Output = ServiceResult<AuthoritySubmitResponseBody>> + Send + 'a {
+    let PreparedSelfEventUnit {
+        command,
+        realm_organization_proof,
+        event_approvals,
+        projection,
+    } = *prepared;
+    let committed: std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = ServiceResult<coland_services::events::CommitAcceptedEventResult>,
+                > + Send
+                + 'a,
+        >,
+    > = if realm_organization_proof.is_some() || event_approvals.is_some() {
+        Box::pin(state.events().commit_accepted_event_batch(
+            coland_services::events::CommitAcceptedEventBatchCommand {
+                audit_unit: None,
+                events: vec![*command],
+                realm_organization_proof,
+                event_approvals,
+                applet_authoring_preview: None,
+                agent_membership_cascade: None,
+            },
         ))
-        .await?;
-        let committed = if realm_organization_proof.is_some() || event_approvals.is_some() {
-            crate::boxed_future(|| {
-                state.events().commit_accepted_event_batch(
-                    coland_services::events::CommitAcceptedEventBatchCommand {
-                        audit_unit: None,
-                        events: vec![command],
-                        realm_organization_proof,
-                        event_approvals,
-                        applet_authoring_preview: None,
-                        agent_membership_cascade: None,
-                    },
-                )
-            })
-            .await
-        } else {
-            crate::boxed_future(|| state.events().commit_accepted_event(command)).await
-        };
+    } else {
+        Box::pin(state.events().commit_accepted_event(*command))
+    };
+    Box::pin(async move {
+        let event = &submission.event;
+        let committed = committed.await;
         if let Err(error) = committed {
             // A concurrent exact replay may have won the same Event identity; it
             // answers with the stored outcome instead of the losing rollback.
-            if let Some(outcome) = Box::pin(exact_replay(state, event)).await? {
+            if let Some(outcome) = crate::boxed_future(|| exact_replay(state, event)).await? {
                 return Ok(outcome);
             }
             return super::authority_direct_conversation::relay_direct_conversation_refusal(error);
         }
-        if private_governance {
-            return Ok(AuthoritySubmitResponseBody::Accepted {
-                status: AuthorityCommitStatus::Committed,
-                commit: transaction.commit,
-            });
-        }
-        // The Commit is durable. This Station's recipients' ordinary notification
-        // rows are a derived projection; their failure never changes the outcome.
-        #[cfg(feature = "conformance-harness")]
-        tracing::warn!(phase = "unit_committed", kind = %event.kind.as_str(), "self Event execution boundary");
-        Box::pin(
-            crate::routing::events::notify::dispatch_committed_event_notifications(state, event),
-        )
-        .await;
-        #[cfg(feature = "conformance-harness")]
-        tracing::warn!(phase = "notifications_dispatched", kind = %event.kind.as_str(), "self Event execution boundary");
-        if decided_at_cut && !poll_at_cut && event.kind != arkret_wire::EventKind::StrandCreate {
-            return Ok(AuthoritySubmitResponseBody::Accepted {
-                status: AuthorityCommitStatus::Committed,
-                commit: transaction.commit,
-            });
-        }
-        operation = operation
-            .with_committed_ref(arkret_wire::CommittedEventRef {
-                event_id: event.event_id.clone(),
-                commit_id: transaction.commit.commit_id.clone(),
-                stream_ref: transaction.commit.stream_ref.clone(),
-                stream_position: transaction.commit.stream_position,
-            })
-            .map_err(|error| ServiceError::Internal(error.to_string()))?;
-        #[cfg(feature = "conformance-harness")]
-        tracing::warn!(phase = "projection_installing", kind = %event.kind.as_str(), "self Event execution boundary");
-        let effect = state.projections().apply_projected(&operation, state.hlc());
-        #[cfg(feature = "conformance-harness")]
-        tracing::warn!(phase = "projection_installed", kind = %event.kind.as_str(), "self Event execution boundary");
-        let needs_repair = matches!(
-            effect,
-            coland_services::projection::ProjectionEffectView::Rejected { .. }
-        ) || (!poll_at_cut
-            && matches!(
-                effect,
-                coland_services::projection::ProjectionEffectView::Ignored
-            ));
-        if needs_repair {
-            let repair_state = state.clone();
-            tokio::spawn(async move {
-                let mut delay = std::time::Duration::from_secs(1);
-                loop {
-                    if repair_state.hydrate().await.is_ok() {
-                        break;
-                    }
-                    tokio::time::sleep(delay).await;
-                    delay = (delay * 2).min(std::time::Duration::from_secs(30));
-                }
-            });
-        }
-        Ok(AuthoritySubmitResponseBody::Accepted {
+        Box::pin(finish_self_event_unit(state, submission, projection)).await
+    })
+}
+
+async fn finish_self_event_unit(
+    state: &AppState,
+    submission: &EventAdmissionSubmission,
+    projection: Box<PreparedSelfEventProjection>,
+) -> ServiceResult<AuthoritySubmitResponseBody> {
+    let event = &submission.event;
+    let PreparedSelfEventProjection {
+        transaction,
+        mut operation,
+        private_governance,
+        decided_at_cut,
+        poll_at_cut,
+    } = *projection;
+    if private_governance {
+        return Ok(AuthoritySubmitResponseBody::Accepted {
             status: AuthorityCommitStatus::Committed,
             commit: transaction.commit,
+        });
+    }
+    // The Commit is durable. This Station's recipients' ordinary notification
+    // rows are a derived projection; their failure never changes the outcome.
+    #[cfg(feature = "conformance-harness")]
+    tracing::warn!(phase = "unit_committed", kind = %event.kind.as_str(), "self Event execution boundary");
+    crate::boxed_future(|| {
+        crate::routing::events::notify::dispatch_committed_event_notifications(state, event)
+    })
+    .await;
+    #[cfg(feature = "conformance-harness")]
+    tracing::warn!(phase = "notifications_dispatched", kind = %event.kind.as_str(), "self Event execution boundary");
+    if decided_at_cut && !poll_at_cut && event.kind != arkret_wire::EventKind::StrandCreate {
+        return Ok(AuthoritySubmitResponseBody::Accepted {
+            status: AuthorityCommitStatus::Committed,
+            commit: transaction.commit,
+        });
+    }
+    operation = operation
+        .with_committed_ref(arkret_wire::CommittedEventRef {
+            event_id: event.event_id.clone(),
+            commit_id: transaction.commit.commit_id.clone(),
+            stream_ref: transaction.commit.stream_ref.clone(),
+            stream_position: transaction.commit.stream_position,
         })
+        .map_err(|error| ServiceError::Internal(error.to_string()))?;
+    #[cfg(feature = "conformance-harness")]
+    tracing::warn!(phase = "projection_installing", kind = %event.kind.as_str(), "self Event execution boundary");
+    let effect = state.projections().apply_projected(&operation, state.hlc());
+    #[cfg(feature = "conformance-harness")]
+    tracing::warn!(phase = "projection_installed", kind = %event.kind.as_str(), "self Event execution boundary");
+    let needs_repair = matches!(
+        effect,
+        coland_services::projection::ProjectionEffectView::Rejected { .. }
+    ) || (!poll_at_cut
+        && matches!(
+            effect,
+            coland_services::projection::ProjectionEffectView::Ignored
+        ));
+    if needs_repair {
+        let repair_state = state.clone();
+        tokio::spawn(async move {
+            let mut delay = std::time::Duration::from_secs(1);
+            loop {
+                if repair_state.hydrate().await.is_ok() {
+                    break;
+                }
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(std::time::Duration::from_secs(30));
+            }
+        });
+    }
+    Ok(AuthoritySubmitResponseBody::Accepted {
+        status: AuthorityCommitStatus::Committed,
+        commit: transaction.commit,
     })
 }
 

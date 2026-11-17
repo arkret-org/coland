@@ -36,6 +36,7 @@ arkret-http-client.workspace = true
 arkret-identifiers.workspace = true
 arkret-identity.workspace = true
 arkret-keystore.workspace = true
+arkret-models-collaboration.workspace = true
 arkret-models-identity.workspace = true
 arkret-signatures = { workspace = true, features = ["keypackages", "signer", "webvh"] }
 arkret-state.workspace = true
@@ -98,7 +99,6 @@ arkret-bootstrap.workspace = true
 arkret-crypto = { workspace = true, features = ["account-data"] }
 arkret-event-draft = { workspace = true, features = ["test-support"] }
 arkret-mls = { workspace = true, features = ["test-utils"] }
-arkret-models-collaboration.workspace = true
 arkret-models-crypto.workspace = true
 arkret-models-discovery.workspace = true
 arkret-models-integration.workspace = true

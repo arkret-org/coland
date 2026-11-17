@@ -268,10 +268,6 @@ impl DeliveryService {
         self.object_storage.get_range_stream(key, range).await
     }
 
-    pub async fn delete_object(&self, key: &str) -> Result<(), String> {
-        self.object_storage.delete(key).await
-    }
-
     pub fn push_target_hmac_key(&self) -> &[u8; 32] {
         &self.push_target_hmac_key
     }

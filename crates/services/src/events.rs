@@ -237,17 +237,6 @@ impl RealmDirectoryService {
             .unwrap_or(false)
     }
 
-    pub fn remove_member_from_all(&self, member: &DidCoreId) -> usize {
-        let mut index = self.index.lock();
-        let mut removed = 0;
-        for entry in index.entries.values_mut() {
-            if entry.members.remove(member) {
-                removed += 1;
-            }
-        }
-        removed
-    }
-
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn test_index(&self) -> &Arc<parking_lot::Mutex<RealmDirectoryIndex>> {

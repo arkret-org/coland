@@ -89,11 +89,6 @@ impl<'a> CallerSignedEvent<'a> {
         .expect("SDK Event signer accepts the fixture envelope")
         .expect_verifiable()
     }
-
-    #[must_use]
-    pub fn build_value(self) -> Value {
-        serde_json::to_value(self.build()).expect("SDK Event serializes")
-    }
 }
 
 #[must_use]

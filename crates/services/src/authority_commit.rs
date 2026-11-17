@@ -350,7 +350,7 @@ pub fn sign_native_consent_commit(
 /// Durable queued-to-committed lifecycle used by the governance Station.
 ///
 /// Signature verification, policy evaluation, MLS installation, and commit
-/// signing happen before [`Self::install_commit`]. The store then performs one
+/// signing happen before durable admission. The store then performs one
 /// atomic authority-generation check, stream append, Event state transition,
 /// and Welcome enqueue.
 #[derive(Clone)]
@@ -879,20 +879,6 @@ impl AuthorityCommitApplication {
         event_id: &arkret_wire::EventId,
     ) -> ServiceResult<Option<QueuedEventRecord>> {
         Ok(self.store().queued_event(event_id).await?)
-    }
-
-    pub async fn install_commit(
-        &self,
-        transaction: &AuthorityCommitTransaction,
-    ) -> ServiceResult<AuthorityCommitWriteOutcome> {
-        // The service configuration, never the producer's submission, sets
-        // the queue bound for a Commit carrying recipient-private Welcome.
-        let mut transaction = transaction.clone();
-        transaction.recipient_queue_capacity = self.recipient_queue_capacity;
-        transaction.validate().map_err(|error| {
-            crate::ServiceError::SchemaViolation(format!("invalid authority transaction: {error}"))
-        })?;
-        Ok(self.store().commit_transaction(&transaction).await?)
     }
 
     pub async fn ordinary_realm_bootstrap_replay(

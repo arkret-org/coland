@@ -3742,10 +3742,6 @@ async fn commit_content_current_states_inner(
         )
         .await?;
     }
-    Box::pin(
-        crate::sidecar_authority_change_guard::after_current_writes_in_connection(conn, event),
-    )
-    .await?;
     Ok(())
 }
 

@@ -25,6 +25,73 @@ struct KeyRow {
     value: Value,
 }
 
+async fn accepted_group_in_connection(
+    conn: &mut AsyncPgConnection,
+    realm: &arkret_wire::RealmId,
+    sidecar: &arkret_wire::SidecarId,
+) -> PersistenceResult<Option<GroupRow>> {
+    let scope = ScopeRef::Sidecar {
+        realm_id: realm.clone(),
+        sidecar_id: sidecar.clone(),
+    };
+    let scope_key = crate::mls_group_current_states::scope_key(&scope)?;
+    let group = sql_query("SELECT g.value,g.public_state,COALESCE(e.envelope,'null'::jsonb) AS envelope FROM mls_group_current_states g \
+        LEFT JOIN realm_commits c ON c.realm_id=g.realm_id AND c.commit_id=g.current_commit_id AND c.stream_position=g.current_stream_position \
+          AND c.stream_ref=jsonb_build_object('kind','sidecar','realm_id',$2,'sidecar_id',$3) \
+        LEFT JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' AND e.kind IN ('ak.mls.genesis','ak.mls.commit') \
+        WHERE g.scope_key=$1")
+        .bind::<Text,_>(&scope_key).bind::<Text,_>(realm.as_str()).bind::<Text,_>(sidecar.as_str())
+        .get_result::<GroupRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+    if group.as_ref().is_some_and(|group| group.envelope.is_null()) {
+        return Err(PersistenceError::Conflict(format!(
+            "{}: Sidecar MLS current lacks its accepted source",
+            coland_storage::ConflictCode::TemporarilyUnavailable,
+        )));
+    }
+    Ok(group)
+}
+
+fn group_leaves(
+    scope: &ScopeRef,
+    current: &MlsGroupValue,
+    public_state: &[u8],
+) -> PersistenceResult<Vec<arkret_mls::MlsPublicEndpointLeaf>> {
+    let group_id = scope
+        .canonical_mls_group_id()
+        .map_err(PersistenceError::database)?;
+    arkret_mls::MlsPublicGroupTracker::restore(public_state, group_id.as_str(), current.epoch)
+        .and_then(|tracker| tracker.leaves())
+        .map_err(PersistenceError::database)
+}
+
+/// A pending desired Agent with no accepted leaf has no handshake interval.
+/// This observation grants no access; an occupied leaf still needs its original
+/// G membership/floor source and all existing H recipient gates.
+pub(crate) async fn accepted_tree_contains_actor_in_connection(
+    conn: &mut AsyncPgConnection,
+    realm: &arkret_wire::RealmId,
+    sidecar: &arkret_wire::SidecarId,
+    actor: &ActorId,
+) -> PersistenceResult<bool> {
+    let Some(group) = accepted_group_in_connection(conn, realm, sidecar).await? else {
+        return Ok(false);
+    };
+    let current: MlsGroupValue =
+        serde_json::from_value(group.value).map_err(PersistenceError::database)?;
+    let scope = ScopeRef::Sidecar {
+        realm_id: realm.clone(),
+        sidecar_id: sidecar.clone(),
+    };
+    if current.effective_scope != scope {
+        return Err(PersistenceError::SchemaViolation(
+            "Sidecar accepted group names another scope".into(),
+        ));
+    }
+    Ok(group_leaves(&scope, &current, &group.public_state)?
+        .iter()
+        .any(|leaf| &leaf.actor_id == actor))
+}
+
 /// A matching public leaf alone is insufficient. Its still authorized runtime
 /// endpoint must also have consumed the accepted Welcome for this exact group.
 pub(crate) async fn effective_agents_in_connection(
@@ -35,13 +102,7 @@ pub(crate) async fn effective_agents_in_connection(
         realm_id: cut.realm_id.clone(),
         sidecar_id: cut.sidecar_id.clone(),
     };
-    let scope_key = crate::mls_group_current_states::scope_key(&scope)?;
-    let group = sql_query("SELECT g.value,g.public_state,e.envelope FROM mls_group_current_states g \
-        JOIN realm_commits c ON c.realm_id=g.realm_id AND c.commit_id=g.current_commit_id AND c.stream_position=g.current_stream_position \
-        JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' \
-        WHERE g.scope_key=$1 AND c.stream_ref=jsonb_build_object('kind','sidecar','realm_id',$2,'sidecar_id',$3)")
-        .bind::<Text,_>(&scope_key).bind::<Text,_>(cut.realm_id.as_str()).bind::<Text,_>(cut.sidecar_id.as_str())
-        .get_result::<GroupRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+    let group = accepted_group_in_connection(conn, &cut.realm_id, &cut.sidecar_id).await?;
     let Some(group) = group else {
         return Ok(Vec::new());
     };
@@ -72,7 +133,6 @@ pub(crate) async fn effective_agents_in_connection(
     if binding.effective_scope() != &scope
         || binding.sidecar_binding().is_none_or(|binding| {
             binding.participant_authority_digest != cut.participant_authority_digest
-                || binding.authority_stream_head != cut.authority_stream_head
         })
     {
         return Ok(Vec::new());
@@ -90,16 +150,7 @@ pub(crate) async fn effective_agents_in_connection(
     {
         return Ok(Vec::new());
     }
-    let group_id = scope
-        .canonical_mls_group_id()
-        .map_err(PersistenceError::database)?;
-    let leaves = arkret_mls::MlsPublicGroupTracker::restore(
-        &group.public_state,
-        group_id.as_str(),
-        current.epoch,
-    )
-    .and_then(|tracker| tracker.leaves())
-    .map_err(PersistenceError::database)?;
+    let leaves = group_leaves(&scope, &current, &group.public_state)?;
     let mut effective = Vec::new();
     for agent in &cut.desired_agent_ids {
         let actor = ActorId::account(arkret_wire::AccountId::new(

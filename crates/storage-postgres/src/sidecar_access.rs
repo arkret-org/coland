@@ -13,11 +13,11 @@ struct ControllerRow {
     controller_account_id: serde_json::Value,
 }
 
-pub(crate) async fn cut_in_connection(
+pub(crate) async fn controller_account_in_connection(
     conn: &mut AsyncPgConnection,
     realm: &RealmId,
     sidecar: &SidecarId,
-) -> PersistenceResult<Option<crate::sidecar_authority_cut::SidecarParticipantAuthorityCut>> {
+) -> PersistenceResult<Option<AccountId>> {
     let Some(controller) = sql_query(
         "SELECT s.controller_account_id FROM sidecar_current_states s \
         JOIN realm_commits c ON c.realm_id=s.realm_id AND c.commit_id=s.current_commit_id \
@@ -36,6 +36,25 @@ pub(crate) async fn cut_in_connection(
     };
     let controller: AccountId = serde_json::from_value(controller.controller_account_id)
         .map_err(PersistenceError::database)?;
+    Ok(Some(controller))
+}
+
+/// H-only native authority collector. G callers use their resource/floor owner.
+pub(crate) async fn cut_in_connection(
+    conn: &mut AsyncPgConnection,
+    realm: &RealmId,
+    sidecar: &SidecarId,
+) -> PersistenceResult<Option<crate::sidecar_authority_cut::SidecarParticipantAuthorityCut>> {
+    let Some(controller) = controller_account_in_connection(conn, realm, sidecar).await? else {
+        return Ok(None);
+    };
+    if !crate::sidecar_replica_authority::is_owning_station_in_connection(conn, &controller).await?
+    {
+        return Err(PersistenceError::Conflict(format!(
+            "{}: Sidecar native participant inputs belong to the owning Station",
+            coland_storage::ConflictCode::TemporarilyUnavailable,
+        )));
+    }
     crate::sidecar_authority_cut::in_connection(conn, realm, sidecar, &controller).await
 }
 
@@ -84,6 +103,28 @@ pub(crate) async fn handshake_event_in_connection(
         }
         _ => return Ok(false),
     };
+    let Some(controller) = controller_account_in_connection(conn, realm_id, sidecar_id).await?
+    else {
+        return Ok(false);
+    };
+    if !crate::sidecar_replica_authority::is_owning_station_in_connection(conn, &controller).await?
+    {
+        let Some(floor) = crate::sidecar_authority_cut::public_material_floor_in_connection(
+            conn, realm_id, sidecar_id, actor,
+        )
+        .await?
+        else {
+            return Ok(false);
+        };
+        let source = sql_query("SELECT EXISTS(SELECT 1 FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk \
+            WHERE e.state='committed' AND e.envelope->>'event_id'=$1 AND c.realm_id=$2 \
+            AND c.stream_ref=$3 AND c.stream_position>=$4) AS present")
+            .bind::<Text,_>(event.event_id.as_str()).bind::<Text,_>(realm_id.as_str())
+            .bind::<Jsonb,_>(serde_json::to_value(&event.scope_ref).map_err(PersistenceError::database)?)
+            .bind::<diesel::sql_types::BigInt,_>(i64::try_from(floor.oldest_position).map_err(PersistenceError::database)?)
+            .get_result::<crate::ExistsRow>(&mut *conn).await.map_err(PersistenceError::database)?;
+        return Ok(source.present && binding.effective_scope() == &event.scope_ref);
+    }
     let Some(cut) = cut_in_connection(conn, realm_id, sidecar_id).await? else {
         return Ok(false);
     };
@@ -92,7 +133,6 @@ pub(crate) async fn handshake_event_in_connection(
         && binding.sidecar_binding().is_some_and(|binding| {
             binding.sidecar_id == cut.sidecar_id
                 && binding.participant_authority_digest == cut.participant_authority_digest
-                && binding.authority_stream_head == cut.authority_stream_head
         }))
 }
 
@@ -108,6 +148,17 @@ pub(crate) async fn participant_in_connection(
     let Some(account) = actor.as_account_id() else {
         return Ok(false);
     };
+    let Some(controller) = controller_account_in_connection(conn, realm, sidecar).await? else {
+        return Ok(false);
+    };
+    if !crate::sidecar_replica_authority::is_owning_station_in_connection(conn, &controller).await?
+    {
+        return Ok(crate::sidecar_authority_cut::caller_floor_in_connection(
+            conn, realm, sidecar, actor,
+        )
+        .await?
+        .is_some());
+    }
     let Some(cut) = cut_in_connection(conn, realm, sidecar).await? else {
         return Ok(false);
     };
@@ -134,6 +185,27 @@ pub(crate) async fn recipients_in_connection(
     realm: &RealmId,
     sidecar: &SidecarId,
 ) -> PersistenceResult<Vec<AccountId>> {
+    let Some(controller) = controller_account_in_connection(conn, realm, sidecar).await? else {
+        return Ok(Vec::new());
+    };
+    if !crate::sidecar_replica_authority::is_owning_station_in_connection(conn, &controller).await?
+    {
+        // All recipients route to H. G creates one authority-bound H intent;
+        // H selects native/effective endpoint deliveries at its own cut.
+        let actor = ActorId::account(controller.clone());
+        return Ok(
+            if crate::sidecar_authority_cut::controller_floor_in_connection(
+                conn, realm, sidecar, &actor,
+            )
+            .await?
+            .is_some()
+            {
+                vec![controller]
+            } else {
+                Vec::new()
+            },
+        );
+    }
     let Some(cut) = cut_in_connection(conn, realm, sidecar).await? else {
         return Ok(Vec::new());
     };

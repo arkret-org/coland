@@ -240,24 +240,39 @@ async fn qualify_mls_group<'a>(
         ));
     }
     let own_pcr_genesis = qualified_own_human_pcr_genesis(conn, transaction).await?;
-    if !own_pcr_genesis
-        && !crate::scope_access::scope_member_in_connection(
+    let scope_member = if own_pcr_genesis {
+        true
+    } else if let ScopeRef::Sidecar { sidecar_id, .. } = &event.scope_ref {
+        crate::sidecar_membership_provenance::actor_is_member_in_connection(
+            conn,
+            &event.realm_id,
+            sidecar_id,
+            &event.actor_id,
+        )
+        .await?
+    } else {
+        crate::scope_access::scope_member_in_connection(
             conn,
             &event.realm_id,
             &event.scope_ref,
             &event.actor_id,
         )
         .await?
-    {
+    };
+    if !own_pcr_genesis && !scope_member {
         return Err(refused(
             ConflictCode::CapabilityDenied,
             "MLS author is not joined to the exact scope",
         ));
     }
     let controller_reconciliation = if let ScopeRef::Sidecar { sidecar_id, .. } = &event.scope_ref {
-        crate::sidecar_access::cut_in_connection(conn, &event.realm_id, sidecar_id)
-            .await?
-            .is_some_and(|cut| event.actor_id.as_account_id() == Some(&cut.controller_account_id))
+        crate::sidecar_membership_provenance::controller_in_connection(
+            conn,
+            &event.realm_id,
+            sidecar_id,
+        )
+        .await?
+        .is_some_and(|controller| event.actor_id.as_account_id() == Some(&controller))
     } else {
         false
     };
@@ -280,31 +295,6 @@ async fn install_authorized_mls_group(
     let key = scope_key(&event.scope_ref)?;
     let current = locked_group(conn, &key).await?;
     let payload = serde_json::to_value(&event.payload).map_err(PersistenceError::database)?;
-    let mut sidecar_cut = None;
-    if let ScopeRef::Sidecar { sidecar_id, .. } = &event.scope_ref {
-        let cut = crate::sidecar_access::cut_in_connection(conn, &event.realm_id, sidecar_id)
-            .await?
-            .ok_or_else(|| failed_precondition("Sidecar participant authority is unavailable"))?;
-        let binding = match event.kind {
-            EventKind::MlsGenesis => {
-                serde_json::from_value::<MlsGenesisPayload>(payload.clone())
-                    .map_err(PersistenceError::database)?
-                    .governance_binding
-            }
-            _ => serde_json::from_value::<MlsCommitPayload>(payload.clone())
-                .map_err(PersistenceError::database)?
-                .governance_binding()
-                .clone(),
-        };
-        sidecar_cut = Some(
-            crate::sidecar_authority_cut::validate_mls_binding_in_connection(
-                conn,
-                &binding,
-                &cut.controller_account_id,
-            )
-            .await?,
-        );
-    }
     let next = match event.kind {
         EventKind::MlsGenesis => {
             if current.is_some() {
@@ -370,19 +360,51 @@ async fn install_authorized_mls_group(
             "the installed public state is not at the Commit's epoch",
         ));
     }
-    if let Some(cut) = &sidecar_cut
-        && !crate::sidecar_mls_readiness::tree_authorized_in_connection(
+    if let ScopeRef::Sidecar { sidecar_id, .. } = &event.scope_ref {
+        let controller = crate::sidecar_membership_provenance::controller_in_connection(
             conn,
-            cut,
-            &next,
-            &installation.public_state,
-            Some(transaction),
+            &event.realm_id,
+            sidecar_id,
         )
         .await?
-    {
-        return Err(binding_mismatch(
-            "the Sidecar post-transition tree retains an unauthorized endpoint",
-        ));
+        .ok_or_else(|| failed_precondition("Sidecar controller is unavailable"))?;
+        // A deployment that is both H and G still performs both duties. A
+        // remote G must never infer H ownership from a missing native PCR.
+        if crate::sidecar_replica_authority::is_owning_station_in_connection(conn, &controller)
+            .await?
+        {
+            let binding = if event.kind == EventKind::MlsGenesis {
+                event
+                    .as_mls_genesis()
+                    .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?
+                    .governance_binding
+            } else {
+                event
+                    .as_mls_commit()
+                    .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?
+                    .governance_binding()
+                    .clone()
+            };
+            let cut = crate::sidecar_authority_cut::validate_mls_binding_in_connection(
+                conn,
+                &binding,
+                &controller,
+            )
+            .await?;
+            if !crate::sidecar_mls_readiness::tree_authorized_in_connection(
+                conn,
+                &cut,
+                &next,
+                &installation.public_state,
+                Some(transaction),
+            )
+            .await?
+            {
+                return Err(binding_mismatch(
+                    "the Sidecar post-transition tree retains an unauthorized Actor or historical endpoint",
+                ));
+            }
+        }
     }
     // encryption-and-audit.md section 2.4.1: while a Circle tree holds a leaf
     // of an actor that is no longer an effective Circle member, only a Commit
@@ -401,6 +423,8 @@ async fn install_authorized_mls_group(
     let deadlines =
         crate::boxed_future(|| fresh_claim_deadlines_in_connection(conn, transaction)).await?;
     require_live_claim_deadlines(conn, &deadlines).await?;
+    crate::sidecar_membership_provenance::freeze_in_connection(conn, transaction, installation)
+        .await?;
     write_group(
         conn,
         &key,
@@ -1095,22 +1119,15 @@ async fn require_joined_recipient(
     recipient: &arkret_wire::ActorId,
 ) -> PersistenceResult<()> {
     if let ScopeRef::Sidecar { sidecar_id, .. } = scope {
-        let Some(cut) =
-            crate::sidecar_access::cut_in_connection(conn, realm_id, sidecar_id).await?
-        else {
-            return Err(failed_precondition(
-                "Sidecar Welcome recipient authority is unavailable",
-            ));
-        };
-        if recipient.as_account_id().is_some_and(|account| {
-            account == &cut.controller_account_id
-                || (account.station_id == cut.controller_account_id.station_id
-                    && cut.desired_agent_ids.contains(&account.principal_id))
-        }) {
+        if crate::sidecar_membership_provenance::actor_is_member_in_connection(
+            conn, realm_id, sidecar_id, recipient,
+        )
+        .await?
+        {
             return Ok(());
         }
         return Err(failed_precondition(
-            "Sidecar Welcome recipient is outside the desired roster",
+            "Sidecar Welcome recipient is outside its current controller-bound membership",
         ));
     }
     if crate::scope_access::scope_member_in_connection(conn, realm_id, scope, recipient).await? {
@@ -1553,54 +1570,14 @@ pub(crate) async fn require_mls_send_gate_in_connection(
         let Some(current) = &current else {
             return Err(coland_storage::MlsSendGateRefusal::EpochUpdateRequired.into_conflict());
         };
-        let cut = crate::sidecar_access::cut_in_connection(conn, &event.realm_id, sidecar_id)
-            .await?
-            .ok_or_else(|| failed_precondition("Sidecar current authority is unavailable"))?;
-        let current_cut = crate::sidecar_authority_cut::locked_in_connection(
+        if !crate::sidecar_membership_provenance::current_state_is_confirmed(
             conn,
             &event.realm_id,
             sidecar_id,
-            &cut.controller_account_id,
-        )
-        .await?
-        .ok_or_else(|| failed_precondition("Sidecar current authority is unavailable"))?;
-        let source = sql_query("SELECT e.envelope AS payload FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk \
-            WHERE e.envelope->>'event_id'=$1 AND e.state='committed' AND c.commit_id=$2")
-            .bind::<Text,_>(current.value.current_mls_commit_event_ref.as_str())
-            .bind::<Text,_>(current.current_commit_id.as_str())
-            .get_result::<super::JsonPayloadRow>(&mut *conn).await.map_err(PersistenceError::database)?;
-        let source: arkret_wire::Event =
-            serde_json::from_value(source.payload).map_err(PersistenceError::database)?;
-        let binding = match source.kind {
-            EventKind::MlsGenesis => {
-                serde_json::from_value::<MlsGenesisPayload>(
-                    serde_json::to_value(source.payload).map_err(PersistenceError::database)?,
-                )
-                .map_err(PersistenceError::database)?
-                .governance_binding
-            }
-            _ => serde_json::from_value::<MlsCommitPayload>(
-                serde_json::to_value(source.payload).map_err(PersistenceError::database)?,
-            )
-            .map_err(PersistenceError::database)?
-            .governance_binding()
-            .clone(),
-        };
-        if !crate::sidecar_mls_readiness::tree_authorized_in_connection(
-            conn,
-            &current_cut,
-            &current.value,
-            &current.public_state,
-            None,
+            current,
         )
         .await?
         {
-            return Err(coland_storage::MlsSendGateRefusal::EpochUpdateRequired.into_conflict());
-        }
-        if binding.sidecar_binding().is_none_or(|binding| {
-            binding.participant_authority_digest != current_cut.participant_authority_digest
-                || binding.authority_stream_head != current_cut.authority_stream_head
-        }) {
             return Err(coland_storage::MlsSendGateRefusal::EpochUpdateRequired.into_conflict());
         }
     }

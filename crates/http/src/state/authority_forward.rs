@@ -215,6 +215,20 @@ fn require_native_origin(
     peer: &AuthenticatedPeerContext,
     event: &arkret_wire::Event,
 ) -> ServiceResult<()> {
+    if matches!(event.scope_ref, arkret_wire::ScopeRef::Sidecar { .. })
+        && event.actor_id.as_account_id().is_none_or(|account| {
+            account.station_id != peer.source_service_id
+                || event
+                    .actual_signer()
+                    .as_account_id()
+                    .is_none_or(|producer| producer.station_id != account.station_id)
+        })
+    {
+        return Err(ServiceError::Conflict(
+            "capability_denied: personal Sidecar originals require their owning Account Station"
+                .into(),
+        ));
+    }
     if is_native_device(event)
         && event
             .actor_id
@@ -921,6 +935,7 @@ pub(crate) async fn fresh_producer_agent_evidence(
 async fn forwarded_mls_public_material(
     state: &AppState,
     event: &Event,
+    welcomes: &[arkret_wire::MlsWelcomeDelivery],
 ) -> ServiceResult<Option<MlsGroupStateMaterial>> {
     let value = serde_json::to_value(&event.payload)
         .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
@@ -980,6 +995,23 @@ async fn forwarded_mls_public_material(
     public
         .verify_publication(&blobs[0], &blobs[1])
         .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
+    if matches!(event.scope_ref, arkret_wire::ScopeRef::Sidecar { .. }) {
+        if event
+            .actor_id
+            .as_account_id()
+            .is_none_or(|account| account.station_id != state.service_core_id())
+        {
+            return Err(ServiceError::Conflict("capability_denied: only the owning H can first forward a personal Sidecar original".into()));
+        }
+        let actors = public
+            .leaves()
+            .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?
+            .into_iter()
+            .map(|leaf| leaf.actor_id)
+            .collect();
+        super::authority_mls_unit::require_own_sidecar_authoring(state, event, &actors, welcomes)
+            .await?;
+    }
     Ok(Some(MlsGroupStateMaterial::from_bytes(
         &blobs[0], &blobs[1],
     )))
@@ -1209,7 +1241,7 @@ async fn forward_self_event_inner(
     // Device admission and Genesis material are preflight gates.  In
     // particular, a revoked/pending/fenced producer must leave no queued
     // Event behind at the forwarding Station.
-    let material = forwarded_mls_public_material(state, &submission.event).await?;
+    let material = forwarded_mls_public_material(state, &submission.event, &[]).await?;
     let mut request = PeerAuthorityForwardEventRequestBody {
         branch:
             arkret_models_collaboration::authority_commit::AuthorityForwardBranch::AuthorityForward,
@@ -1274,11 +1306,15 @@ pub(super) async fn forward_self_mls(
         branch:
             arkret_models_collaboration::authority_commit::AuthorityForwardBranch::AuthorityForward,
         mls_submission: submission.clone().for_origin_forward(None),
-        mls_group_state_material: forwarded_mls_public_material(state, &submission.commit_event)
-            .await?
-            .ok_or_else(|| {
-                ServiceError::SchemaViolation("MLS Commit requires exact public material".into())
-            })?,
+        mls_group_state_material: forwarded_mls_public_material(
+            state,
+            &submission.commit_event,
+            &submission.welcomes,
+        )
+        .await?
+        .ok_or_else(|| {
+            ServiceError::SchemaViolation("MLS Commit requires exact public material".into())
+        })?,
         content_backup_sources: content_backup_sources(
             state,
             governance,

@@ -1,4 +1,4 @@
-//! Sidecar participant authority derived only from accepted currents at one cut.
+//! H-owned participant inputs from native state and its accepted Realm member view.
 
 pub use arkret_models_collaboration::agent_sidecar::SidecarParticipantAuthorityCut;
 use arkret_wire::{
@@ -21,17 +21,17 @@ struct OwnerRow {
 }
 
 #[derive(QueryableByName)]
-struct FactRow {
+pub(crate) struct FactRow {
     #[diesel(sql_type = Text)]
-    event_id: String,
+    pub(crate) event_id: String,
     #[diesel(sql_type = Text)]
-    commit_id: String,
+    pub(crate) commit_id: String,
     #[diesel(sql_type = BigInt)]
-    stream_position: i64,
+    pub(crate) stream_position: i64,
     #[diesel(sql_type = Jsonb)]
-    stream_ref: Value,
+    pub(crate) stream_ref: Value,
     #[diesel(sql_type = Jsonb)]
-    value: Value,
+    pub(crate) value: Value,
 }
 
 #[derive(QueryableByName)]
@@ -54,12 +54,8 @@ fn invalid(message: impl Into<String>) -> PersistenceError {
     PersistenceError::SchemaViolation(message.into())
 }
 
-fn remember(
-    fact: &FactRow,
-    refs: &mut Vec<EventId>,
-    streams: &mut Vec<CommitStreamRef>,
-) -> PersistenceResult<()> {
-    refs.push(EventId::new(&fact.event_id).map_err(PersistenceError::database)?);
+fn remember(fact: &FactRow, streams: &mut Vec<CommitStreamRef>) -> PersistenceResult<()> {
+    let _ = EventId::new(&fact.event_id).map_err(PersistenceError::database)?;
     let stream: CommitStreamRef =
         serde_json::from_value(fact.stream_ref.clone()).map_err(PersistenceError::database)?;
     let _ = arkret_wire::RealmCommitId::new(&fact.commit_id).map_err(PersistenceError::database)?;
@@ -69,7 +65,7 @@ fn remember(
     Ok(())
 }
 
-async fn member_fact(
+pub(crate) async fn member_fact(
     conn: &mut AsyncPgConnection,
     realm: &RealmId,
     actor: &ActorId,
@@ -80,7 +76,7 @@ async fn member_fact(
           ON c.realm_id=m.realm_id AND c.commit_id=m.current_commit_id AND c.stream_position=m.current_stream_position \
         JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' \
         WHERE m.realm_id=$1 AND m.member_id=$2 AND m.value->>'membership'=m.membership \
-          AND c.stream_ref=jsonb_build_object('kind','realm','realm_id',$1) AND e.kind='ak.member.state'")
+          AND c.stream_ref=jsonb_build_object('kind','realm','realm_id',$1) AND e.kind IN ('ak.member.state','ak.invite.accept','ak.realm_invite_link.accept')")
         .bind::<Text,_>(realm.as_str()).bind::<Text,_>(actor.to_string())
         .get_result(&mut *conn).await.optional().map_err(PersistenceError::database)
 }
@@ -116,12 +112,19 @@ pub(crate) async fn in_connection(
     if member.value.get("membership").and_then(Value::as_str) != Some("join") {
         return Ok(None);
     }
-    let mut refs = vec![EventId::new(owner.create_event_id).map_err(PersistenceError::database)?];
+    if SidecarId::from_event_id(
+        &EventId::new(owner.create_event_id).map_err(PersistenceError::database)?,
+    ) != *sidecar
+    {
+        return Err(invalid(
+            "Sidecar Create source differs from its immutable ID",
+        ));
+    }
     let mut streams = vec![CommitStreamRef::Realm {
         realm_id: realm.clone(),
     }];
     let member_controller_generation = member.event_id.clone();
-    remember(&member, &mut refs, &mut streams)?;
+    remember(&member, &mut streams)?;
     #[derive(QueryableByName)]
     struct ControllerPcr {
         #[diesel(sql_type = Text)]
@@ -147,17 +150,54 @@ pub(crate) async fn in_connection(
         FROM agent_provisioning_current_states p JOIN pcr_genesis_units g ON g.realm_id=p.realm_id \
         JOIN realm_commits c ON c.realm_id=p.realm_id AND c.commit_id=p.current_commit_id AND c.stream_position=p.current_stream_position \
         JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' \
+        JOIN member_state_current_states m ON m.realm_id=$4 AND m.membership='join' \
+          AND m.value->>'membership'='join' \
+          AND m.member_id::jsonb=jsonb_build_object('kind','account','account_id', \
+              jsonb_build_object('principal_id',p.agent_id,'station_id',$2::text)) \
         WHERE g.principal_id=$1 AND g.station_id=$2 AND p.value->>'controller_principal_id'=$1 AND p.realm_id=$3 \
         ORDER BY p.agent_id")
         .bind::<Text,_>(controller.principal_id.as_str()).bind::<Text,_>(controller.station_id.as_str())
-        .bind::<Text,_>(&controller_pcr.realm_id)
+        .bind::<Text,_>(&controller_pcr.realm_id).bind::<Text,_>(realm.as_str())
         .load::<AgentRow>(&mut *conn).await.map_err(PersistenceError::database)?;
     let mut desired = Vec::new();
     let at = chrono::Utc::now();
     for agent in agents {
         let agent_id = DidCoreId::new(&agent.agent_id).map_err(PersistenceError::database)?;
+        let actor = ActorId::account(AccountId::new(
+            agent_id.clone(),
+            controller.station_id.clone(),
+        ));
+        let Some(member) = member_fact(conn, realm, &actor).await? else {
+            return Err(invalid(
+                "Sidecar joined Agent lacks its accepted membership source",
+            ));
+        };
+        let binding = member
+            .value
+            .get("agent_controller_binding")
+            .filter(|binding| binding.is_object())
+            .ok_or_else(|| invalid("Sidecar Agent join lacks its controller binding"))?;
+        let bound_controller: AccountId = serde_json::from_value(
+            binding
+                .get("controller_account_id")
+                .cloned()
+                .ok_or_else(|| invalid("Agent join lacks its complete controller"))?,
+        )
+        .map_err(PersistenceError::database)?;
+        let controller_generation = binding
+            .get("controller_membership_generation_ref")
+            .and_then(Value::as_str)
+            .ok_or_else(|| invalid("Agent join lacks its controller membership generation"))?;
+        if bound_controller != *controller
+            || controller_generation != member_controller_generation.as_str()
+        {
+            continue;
+        }
+        // Only exact Realm members with a current controller binding require
+        // native provisioning/lifecycle/key inputs from H.
         let pcr =
             RealmId::new(&agent.principal_control_realm_id).map_err(PersistenceError::database)?;
+        remember(&member, &mut streams)?;
         let ownership = FactRow {
             event_id: agent.event_id,
             commit_id: agent.commit_id,
@@ -165,7 +205,7 @@ pub(crate) async fn in_connection(
             stream_ref: agent.stream_ref,
             value: Value::Null,
         };
-        remember(&ownership, &mut refs, &mut streams)?;
+        remember(&ownership, &mut streams)?;
         let status = sql_query("SELECT e.envelope->>'event_id' AS event_id,c.commit_id,c.stream_position,c.stream_ref, \
             jsonb_build_object('state',s.value,'actor_id',s.actor_id) AS value \
             FROM agent_status_current_states s JOIN realm_commits c \
@@ -175,30 +215,17 @@ pub(crate) async fn in_connection(
             .bind::<Text,_>(pcr.as_str()).bind::<Text,_>(agent_id.as_str())
             .get_result::<FactRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
         let Some(status) = status else {
-            // A local accepted ownership declaration may precede the Agent
-            // PCR genesis. Only the governing controller Station can prove
-            // that absence; an unheld foreign lifecycle remains unproved.
-            let pending = sql_query("SELECT EXISTS(SELECT 1 FROM realm_authorities a \
-                WHERE a.realm_id=$1 AND a.service_id=$2 \
-                AND NOT EXISTS(SELECT 1 FROM realm_authorities agent WHERE agent.realm_id=$3)) AS present")
-                .bind::<Text,_>(&controller_pcr.realm_id).bind::<Text,_>(controller.station_id.as_str())
-                .bind::<Text,_>(pcr.as_str()).get_result::<super::ExistsRow>(&mut *conn).await.map_err(PersistenceError::database)?.present;
-            if pending {
-                continue;
-            }
-            return Err(invalid("owned Agent lacks accepted lifecycle current"));
+            return Err(invalid(
+                "owned joined Agent lacks accepted lifecycle current",
+            ));
         };
-        remember(&status, &mut refs, &mut streams)?;
-        let actor: ActorId = serde_json::from_value(status.value["actor_id"].clone())
+        remember(&status, &mut streams)?;
+        let status_actor: ActorId = serde_json::from_value(status.value["actor_id"].clone())
             .map_err(PersistenceError::database)?;
-        if actor.as_account_id().is_none_or(|account| {
-            account.principal_id != agent_id || account.station_id != controller.station_id
-        }) {
-            return Err(invalid("Agent lifecycle current names another principal"));
-        }
-        let membership = member_fact(conn, realm, &actor).await?;
-        if let Some(member) = &membership {
-            remember(member, &mut refs, &mut streams)?;
+        if status_actor != actor {
+            return Err(invalid(
+                "Agent lifecycle current names another complete Account",
+            ));
         }
         let keys = sql_query("SELECT e.envelope->>'event_id' AS event_id,c.commit_id,c.stream_position,c.stream_ref, \
             k.value || jsonb_build_object('key_id',k.agent_key_id) AS value \
@@ -210,7 +237,7 @@ pub(crate) async fn in_connection(
             .load::<FactRow>(&mut *conn).await.map_err(PersistenceError::database)?;
         let mut authorized = false;
         for key in keys {
-            remember(&key, &mut refs, &mut streams)?;
+            remember(&key, &mut streams)?;
             let entries = key
                 .value
                 .get("authorizations")
@@ -245,46 +272,27 @@ pub(crate) async fn in_connection(
                     .and_then(Value::as_str)
                     .and_then(|tag| tag.strip_suffix(":1"))
                     .ok_or_else(|| invalid("invalid Agent authorization dot"))?;
-                let event = EventId::new(dot).map_err(PersistenceError::database)?;
-                refs.push(event);
+                let _ = EventId::new(dot).map_err(PersistenceError::database)?;
                 if !payload.expires_at.is_some_and(|expiry| expiry <= at) {
                     authorized = true;
                 }
             }
         }
-        if status.value.get("state").and_then(Value::as_str) == Some("active")
-            && authorized
-            && membership.as_ref().is_some_and(|member| {
-                member.value.get("membership").and_then(Value::as_str) == Some("join")
-                    && member
-                        .value
-                        .get("agent_controller_binding")
-                        .is_some_and(|binding| {
-                            serde_json::from_value::<AccountId>(
-                                binding["controller_account_id"].clone(),
-                            )
-                            .ok()
-                            .as_ref()
-                                == Some(controller)
-                                && binding
-                                    .get("controller_membership_generation_ref")
-                                    .and_then(Value::as_str)
-                                    == Some(member_controller_generation.as_str())
-                        })
-            })
-        {
-            desired.push(agent_id);
+        if status.value.get("state").and_then(Value::as_str) == Some("active") && authorized {
+            desired.push(
+                arkret_models_collaboration::agent_sidecar::SidecarParticipantAuthorityAgent {
+                    agent_id,
+                    join_event_ref: EventId::new(member.event_id)
+                        .map_err(PersistenceError::database)?,
+                },
+            );
         }
     }
-    let refs =
-        arkret_models_collaboration::agent_sidecar::normalize_sidecar_authority_stream_head(&refs)
-            .map_err(|_| invalid("Sidecar participant authority cut exceeds 64 accepted refs"))?;
-    desired.sort_by(|a, b| a.as_str().as_bytes().cmp(b.as_str().as_bytes()));
-    desired.dedup();
     let digest = arkret_models_collaboration::agent_sidecar::sidecar_participant_authority_digest(
         sidecar, realm, controller, &desired,
     )
     .map_err(PersistenceError::database)?;
+    let desired = desired.into_iter().map(|pair| pair.agent_id).collect();
     streams.sort();
     streams.dedup();
     let mut heads = Vec::new();
@@ -316,7 +324,6 @@ pub(crate) async fn in_connection(
         controller_account_id: controller.clone(),
         desired_agent_ids: desired,
         participant_authority_digest: digest,
-        authority_stream_head: refs,
         visible_stream_heads: heads,
     }))
 }
@@ -451,6 +458,18 @@ pub(crate) async fn caller_floor_in_connection(
     let Some(account) = caller.as_account_id() else {
         return Ok(None);
     };
+    let Some(controller) =
+        crate::sidecar_access::controller_account_in_connection(conn, realm, sidecar).await?
+    else {
+        return Ok(None);
+    };
+    if !crate::sidecar_replica_authority::is_owning_station_in_connection(conn, &controller).await?
+    {
+        return crate::sidecar_replica_authority::agent_floor_in_connection(
+            conn, realm, sidecar, caller,
+        )
+        .await;
+    }
     let Some(cut) = crate::sidecar_access::cut_in_connection(conn, realm, sidecar).await? else {
         return Ok(None);
     };
@@ -461,47 +480,7 @@ pub(crate) async fn caller_floor_in_connection(
     {
         return Ok(None);
     }
-    let Some(member) = member_fact(conn, realm, caller).await? else {
-        return Ok(None);
-    };
-    let Some(controller) =
-        member_fact(conn, realm, &ActorId::account(cut.controller_account_id)).await?
-    else {
-        return Ok(None);
-    };
-    #[derive(QueryableByName)]
-    struct FloorRow {
-        #[diesel(sql_type=Text)]
-        commit_id: String,
-        #[diesel(sql_type=BigInt)]
-        stream_position: i64,
-    }
-    let stream = CommitStreamRef::Sidecar {
-        realm_id: realm.clone(),
-        sidecar_id: sidecar.clone(),
-    };
-    let floor=sql_query("SELECT c.commit_id,c.stream_position FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' \
-        WHERE c.realm_id=$1 AND c.stream_key=$2 AND e.kind IN ('ak.mls.genesis','ak.mls.commit') \
-        AND e.envelope->'payload'->'governance_binding'->'authority_stream_head' @> jsonb_build_array($3::text,$4::text) \
-        ORDER BY c.stream_position LIMIT 1")
-        .bind::<Text,_>(realm.as_str()).bind::<Text,_>(crate::authority_commit::stream_key(&stream)?)
-        .bind::<Text,_>(member.event_id).bind::<Text,_>(controller.event_id)
-        .get_result::<FloorRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
-    floor
-        .map(|row| {
-            let oldest_position =
-                u64::try_from(row.stream_position).map_err(PersistenceError::database)?;
-            Ok(arkret_wire::ReadableFloor {
-                oldest_position,
-                floor_commit_id: row.commit_id.parse().map_err(PersistenceError::database)?,
-                floor_reason: if oldest_position == 0 {
-                    arkret_wire::ReadableFloorReason::StreamStart
-                } else {
-                    arkret_wire::ReadableFloorReason::HistoryAccessPolicy
-                },
-            })
-        })
-        .transpose()
+    crate::sidecar_replica_authority::agent_floor_in_connection(conn, realm, sidecar, caller).await
 }
 
 /// Preserve the ordinary effective interval, or prove the restricted public
@@ -531,63 +510,41 @@ pub(crate) async fn handshake_floor_in_connection(
     if let Some(floor) = controller_floor_in_connection(conn, realm, sidecar, caller).await? {
         return Ok(Some(floor));
     }
+    let Some(controller) =
+        crate::sidecar_access::controller_account_in_connection(conn, realm, sidecar).await?
+    else {
+        return Ok(None);
+    };
+    if !crate::sidecar_replica_authority::is_owning_station_in_connection(conn, &controller).await?
+    {
+        return crate::sidecar_replica_authority::agent_floor_in_connection(
+            conn, realm, sidecar, caller,
+        )
+        .await;
+    }
     let Some(cut) = crate::sidecar_access::cut_in_connection(conn, realm, sidecar).await? else {
         return Ok(None);
     };
     if !crate::sidecar_access::desired_participant(&cut, caller) {
         return Ok(None);
     }
-    #[derive(QueryableByName)]
-    struct FloorRow {
-        #[diesel(sql_type = Text)]
-        commit_id: String,
-        #[diesel(sql_type = BigInt)]
-        stream_position: i64,
+    // Desired metadata is not a promise that this Agent has ever occupied a
+    // Sidecar leaf. Do not require a remote G-issued floor for that known
+    // absence, or block its otherwise valid parent Realm Snapshot.
+    if !crate::sidecar_effective_access::accepted_tree_contains_actor_in_connection(
+        conn, realm, sidecar, caller,
+    )
+    .await?
+    {
+        return Ok(None);
     }
-    let stream = CommitStreamRef::Sidecar {
-        realm_id: realm.clone(),
-        sidecar_id: sidecar.clone(),
-    };
-    let floor = sql_query(
-        "SELECT c.commit_id,c.stream_position FROM realm_commits c \
-         JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' \
-         WHERE c.realm_id=$1 AND c.stream_key=$2 AND e.kind IN ('ak.mls.genesis','ak.mls.commit') \
-         AND e.envelope->'scope_ref'=c.stream_ref \
-         AND e.envelope->'payload'->'governance_binding'->>'participant_authority_digest'=$3 \
-         AND e.envelope->'payload'->'governance_binding'->'authority_stream_head'=$4 \
-         ORDER BY c.stream_position LIMIT 1",
-    )
-    .bind::<Text, _>(realm.as_str())
-    .bind::<Text, _>(crate::authority_commit::stream_key(&stream)?)
-    .bind::<Text, _>(cut.participant_authority_digest.as_str())
-    .bind::<Jsonb, _>(
-        serde_json::to_value(cut.authority_stream_head).map_err(PersistenceError::database)?,
-    )
-    .get_result::<FloorRow>(&mut *conn)
-    .await
-    .optional()
-    .map_err(PersistenceError::database)?;
-    floor
-        .map(|row| {
-            let oldest_position =
-                u64::try_from(row.stream_position).map_err(PersistenceError::database)?;
-            Ok(arkret_wire::ReadableFloor {
-                oldest_position,
-                floor_commit_id: row.commit_id.parse().map_err(PersistenceError::database)?,
-                floor_reason: if oldest_position == 0 {
-                    arkret_wire::ReadableFloorReason::StreamStart
-                } else {
-                    arkret_wire::ReadableFloorReason::HistoryAccessPolicy
-                },
-            })
-        })
-        .transpose()
+    crate::sidecar_replica_authority::agent_floor_in_connection(conn, realm, sidecar, caller).await
 }
 
-/// Hold the controller ownership stream before discovering its Agent PCRs.
-/// Every authority mutation already holds its source Realm authority row;
-/// these shared locks therefore protect both current rows and new ownership
-/// rows until the enclosing Event transaction has committed or rolled back.
+/// H holds the controller ownership stream before discovering relevant Agent
+/// PCRs. Only joined Agents are locked; unrelated provisioning does not become
+/// a Sidecar dependency. Authority mutations hold these same source rows, so
+/// the relevant inputs remain held through the enclosing Event transaction.
 pub(crate) async fn locked_in_connection(
     conn: &mut AsyncPgConnection,
     realm: &RealmId,
@@ -615,10 +572,15 @@ pub(crate) async fn locked_in_connection(
         .map_err(PersistenceError::database)?;
     let owned = sql_query(
         "SELECT a.realm_id FROM realm_authorities a JOIN agent_provisioning_current_states p \
-        ON a.realm_id=p.value->>'principal_control_realm_id' WHERE p.realm_id=$1 \
-        ORDER BY a.realm_id FOR SHARE OF a",
+        ON a.realm_id=p.value->>'principal_control_realm_id' \
+        JOIN member_state_current_states m ON m.realm_id=$2 AND m.membership='join' \
+          AND m.value->>'membership'='join' AND m.member_id::jsonb=jsonb_build_object('kind','account', \
+            'account_id',jsonb_build_object('principal_id',p.agent_id,'station_id',$3::text)) \
+        WHERE p.realm_id=$1 ORDER BY a.realm_id FOR SHARE OF a",
     )
     .bind::<Text, _>(&pcr.realm_id)
+    .bind::<Text, _>(realm.as_str())
+    .bind::<Text, _>(controller.station_id.as_str())
     .load::<RealmRow>(&mut *conn)
     .await
     .map_err(PersistenceError::database)?;
@@ -626,8 +588,8 @@ pub(crate) async fn locked_in_connection(
     in_connection(conn, realm, sidecar, controller).await
 }
 
-/// The same signed Sidecar authority coordinates must still describe the
-/// current participant cut after locking every accepted source authority.
+/// H rechecks the signed desired/join digest after locking its relevant native
+/// sources. G independently checks its own membership/RFC/fence cut.
 pub(crate) async fn validate_mls_binding_in_connection(
     conn: &mut AsyncPgConnection,
     binding: &arkret_models_crypto::MlsGovernanceBindingPayload,
@@ -653,13 +615,100 @@ pub(crate) async fn validate_mls_binding_in_connection(
     let supplied = binding
         .sidecar_binding()
         .ok_or_else(|| invalid("Sidecar MLS binding lacks its closed authority coordinates"))?;
-    if supplied.participant_authority_digest != cut.participant_authority_digest
-        || supplied.authority_stream_head != cut.authority_stream_head
-    {
+    if supplied.participant_authority_digest != cut.participant_authority_digest {
         return Err(PersistenceError::Conflict(format!(
             "{}: Sidecar signed participant cut is stale",
             coland_storage::ConflictCode::FailedPrecondition
         )));
     }
     Ok(cut)
+}
+
+/// Check only H's native responsibility before its exact original is forwarded.
+/// Claim originals and signatures are verified by the serving owner; G separately
+/// decides the complete RFC transition and its own membership/fence cut.
+pub(crate) async fn mls_authoring_is_current(
+    pool: &PgPool,
+    event: &arkret_wire::Event,
+    actors: &std::collections::BTreeSet<ActorId>,
+    endpoints: &[(AccountId, arkret_wire::MlsWelcomeRecipientEndpoint, EventId)],
+) -> PersistenceResult<bool> {
+    use arkret_event_draft::EventPayloadExt as _;
+
+    let arkret_wire::ScopeRef::Sidecar {
+        realm_id,
+        sidecar_id,
+    } = &event.scope_ref
+    else {
+        return Ok(false);
+    };
+    if realm_id != &event.realm_id || actors.is_empty() {
+        return Ok(false);
+    }
+    let binding = match event.kind {
+        arkret_wire::EventKind::MlsGenesis => {
+            event
+                .as_mls_genesis()
+                .map_err(PersistenceError::database)?
+                .governance_binding
+        }
+        arkret_wire::EventKind::MlsCommit => event
+            .as_mls_commit()
+            .map_err(PersistenceError::database)?
+            .governance_binding()
+            .clone(),
+        _ => return Ok(false),
+    };
+    if binding.effective_scope() != &event.scope_ref {
+        return Ok(false);
+    }
+    let Some(supplied) = binding.sidecar_binding() else {
+        return Ok(false);
+    };
+    let mut conn = pg_conn(pool).await?;
+    conn.transaction::<_, PgTransactionError, _>(async |conn| {
+        sql_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            .execute(&mut *conn)
+            .await?;
+        let Some(controller) =
+            crate::sidecar_access::controller_account_in_connection(conn, realm_id, sidecar_id)
+                .await?
+        else {
+            return Ok(false);
+        };
+        if !crate::sidecar_replica_authority::is_owning_station_in_connection(conn, &controller)
+            .await?
+        {
+            return Ok(false);
+        }
+        let Some(cut) = in_connection(conn, realm_id, sidecar_id, &controller).await? else {
+            return Ok(false);
+        };
+        if supplied.participant_authority_digest != cut.participant_authority_digest
+            || !crate::sidecar_access::desired_participant(&cut, &event.actor_id)
+            || actors
+                .iter()
+                .any(|actor| !crate::sidecar_access::desired_participant(&cut, actor))
+        {
+            return Ok(false);
+        }
+        for (account, endpoint, authorization) in endpoints {
+            let actor = ActorId::account(account.clone());
+            if !actors.contains(&actor)
+                || !crate::sidecar_access::desired_participant(&cut, &actor)
+                || !crate::sidecar_mls_readiness::endpoint_current_in_connection(
+                    conn,
+                    account,
+                    endpoint,
+                    authorization,
+                )
+                .await?
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    })
+    .await
+    .map_err(PgTransactionError::into_persistence)
 }

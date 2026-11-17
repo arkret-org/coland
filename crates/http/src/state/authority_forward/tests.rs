@@ -426,24 +426,24 @@ async fn a_forwarded_genesis_carries_its_local_blobs_only_when_they_address_thei
     let mut ordinary = genesis.clone();
     ordinary.kind = arkret_wire::EventKind::RealmProfile;
     assert!(
-        forwarded_mls_public_material(&state, &ordinary)
+        forwarded_mls_public_material(&state, &ordinary, &[])
             .await
             .unwrap()
             .is_none()
     );
     assert!(refused(
-        forwarded_mls_public_material(&state, &genesis).await
+        forwarded_mls_public_material(&state, &genesis, &[]).await
     ));
     store_blob(&state, &blob_ref(&group_info), &group_info).await;
     assert!(refused(
-        forwarded_mls_public_material(&state, &genesis).await
+        forwarded_mls_public_material(&state, &genesis, &[]).await
     ));
     store_blob(&state, &blob_ref(&tree), b"bytes another ref addresses").await;
     assert!(refused(
-        forwarded_mls_public_material(&state, &genesis).await
+        forwarded_mls_public_material(&state, &genesis, &[]).await
     ));
     store_blob(&state, &blob_ref(&tree), &tree).await;
-    let material = forwarded_mls_public_material(&state, &genesis)
+    let material = forwarded_mls_public_material(&state, &genesis, &[])
         .await
         .unwrap()
         .expect("both Blobs address their refs");
@@ -481,14 +481,14 @@ async fn a_forwarded_genesis_carries_its_local_blobs_only_when_they_address_thei
     )
     .unwrap();
     assert!(refused(
-        forwarded_mls_public_material(&state, &update_event).await
+        forwarded_mls_public_material(&state, &update_event, &[]).await
     ));
     store_blob(&state, &blob_ref(&next_info), &next_info).await;
     assert!(refused(
-        forwarded_mls_public_material(&state, &update_event).await
+        forwarded_mls_public_material(&state, &update_event, &[]).await
     ));
     store_blob(&state, &blob_ref(&next_tree), &next_tree).await;
-    let material = forwarded_mls_public_material(&state, &update_event)
+    let material = forwarded_mls_public_material(&state, &update_event, &[])
         .await
         .unwrap()
         .unwrap();

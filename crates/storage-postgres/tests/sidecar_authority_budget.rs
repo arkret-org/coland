@@ -1,4 +1,4 @@
-//! A source admission must preserve the whole 64-ref cut atomically.
+//! Unjoined own-Agent provisioning does not consume a Sidecar decoder budget.
 #[path = "../../test-support/src/device_authorization_history.rs"]
 #[allow(dead_code)]
 mod device_authorization_history;
@@ -59,7 +59,7 @@ async fn counts(pool: &coland_storage_postgres::PgPool) -> Counts {
 }
 
 #[tokio::test]
-async fn provision_ref_65_is_refused_without_accepted_source_or_current_writes() {
+async fn unjoined_agent_provision_is_not_limited_by_sidecar_decoder_budget() {
     let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
     let pool = database.pool();
     let station = ordinary_realm::station();
@@ -107,13 +107,18 @@ async fn provision_ref_65_is_refused_without_accepted_source_or_current_writes()
         .unwrap();
     let realm = &create.authority_commit.event.realm_id;
     let sidecar = arkret_wire::SidecarId::from_event_id(&create.authority_commit.event.event_id);
-    let mut head = principal.unit.transactions[1].commit.clone();
+    let (mut head, history_custody) = sidecar_agent::history_custody(&pool, &principal).await;
     let authority = principal.unit.transactions[1].expected_authority.clone();
     let profiles = coland_storage_postgres::PgActorProfileStore { pool: pool.clone() };
-    // Two initial refs (Sidecar creation and controller parent join) leave
-    // exactly 62 refs for accepted ownership declarations. The Agent PCRs
-    // have not been founded, so none of these Agents is a desired participant.
-    for ordinal in 0..63 {
+    let initial_cut =
+        coland_storage_postgres::sidecar_authority_cut::read(&pool, realm, &sidecar, controller)
+            .await
+            .unwrap()
+            .unwrap();
+    let before = counts(&pool).await;
+    // These Agents have not joined this Realm. Their ownership declarations
+    // are valid native writes, independent of any Sidecar decoder collection.
+    for ordinal in 0..66 {
         let did = arkret_wire::Did::new(format!(
             "did:web:budget-{}-{}.example",
             ordinal,
@@ -127,7 +132,7 @@ async fn provision_ref_65_is_refused_without_accepted_source_or_current_writes()
         );
         let agent_pcr = arkret_wire::RealmId::from_event_id(&future_genesis);
         let at = head.committed_at + chrono::TimeDelta::seconds(1);
-        let event = sidecar_agent::agent_provision_event(
+        let mut event = sidecar_agent::agent_provision_event(
             controller,
             &head.realm_id,
             &principal.history.device_verification_method,
@@ -136,6 +141,15 @@ async fn provision_ref_65_is_refused_without_accepted_source_or_current_writes()
             &agent_pcr,
             &format!("{did}#managed-controller"),
             at,
+        );
+        event.payload.insert(
+            "history_custody".into(),
+            serde_json::to_value(&history_custody).unwrap(),
+        );
+        let event = device_authorization_history::sign_event(
+            event,
+            principal.history.device_verification_method.clone(),
+            principal.history.founding_device_signing_seed,
         );
         let commit = sidecar_agent::station_successor(&head, &event, &station_did, 1);
         let write = AgentProvisionAdmissionWrite {
@@ -151,19 +165,8 @@ async fn provision_ref_65_is_refused_without_accepted_source_or_current_writes()
             },
             queued_at: commit.committed_at,
         };
-        if ordinal < 62 {
-            profiles.admit_agent_provision(write).await.unwrap();
-            head = commit;
-        } else {
-            let before = counts(&pool).await;
-            let error = profiles.admit_agent_provision(write).await.unwrap_err();
-            assert!(error.to_string().contains("failed_precondition"), "{error}");
-            assert_eq!(
-                counts(&pool).await,
-                before,
-                "overflow must roll back accepted Event, Commit and all current carriers"
-            );
-        }
+        profiles.admit_agent_provision(write).await.unwrap();
+        head = commit;
         let cut = coland_storage_postgres::sidecar_authority_cut::read(
             &pool, realm, &sidecar, controller,
         )
@@ -171,14 +174,18 @@ async fn provision_ref_65_is_refused_without_accepted_source_or_current_writes()
         .unwrap()
         .unwrap();
         assert!(cut.desired_agent_ids.is_empty());
-        assert_eq!(cut.authority_stream_head.len(), (ordinal + 3).min(64));
         assert_eq!(
-            cut.visible_stream_heads
-                .iter()
-                .find(|entry| entry.stream_ref == head.stream_ref)
-                .unwrap()
-                .commit_id,
-            head.commit_id
+            cut.participant_authority_digest,
+            initial_cut.participant_authority_digest
         );
+        assert_eq!(cut.visible_stream_heads, initial_cut.visible_stream_heads);
     }
+    let after = counts(&pool).await;
+    assert_eq!(after.events, before.events + 66);
+    assert_eq!(after.commits, before.commits + 66);
+    assert_eq!(after.provisions, before.provisions + 66);
+    assert_eq!(after.declarations, before.declarations + 66);
+    assert_eq!(after.accountability, before.accountability + 66);
+    assert_eq!(after.selectors, before.selectors + 66);
+    assert_eq!(after.deliveries, before.deliveries);
 }

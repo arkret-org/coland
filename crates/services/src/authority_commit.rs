@@ -2134,6 +2134,22 @@ impl AuthorityCommitApplication {
             .await?)
     }
 
+    pub async fn sidecar_mls_authoring_is_current(
+        &self,
+        event: &arkret_wire::Event,
+        actors: &std::collections::BTreeSet<arkret_wire::ActorId>,
+        endpoints: &[(
+            arkret_wire::AccountId,
+            arkret_wire::MlsWelcomeRecipientEndpoint,
+            arkret_wire::EventId,
+        )],
+    ) -> ServiceResult<bool> {
+        Ok(self
+            .store()
+            .sidecar_mls_authoring_is_current(event, actors, endpoints)
+            .await?)
+    }
+
     /// Record a verified remote current authority of a Realm this Station
     pub async fn sidecar_access_cut(
         &self,

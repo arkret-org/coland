@@ -55,9 +55,8 @@ pub(super) async fn download(
         return Err(AppError::not_found("MIMI asset is unavailable"));
     }
     let issued_at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
-    let expires_at = issued_at + chrono::Duration::seconds(
-        super::super::blob::BLOB_PRESIGN_MAX_TTL_SECONDS,
-    );
+    let expires_at =
+        issued_at + chrono::Duration::seconds(super::super::blob::BLOB_PRESIGN_MAX_TTL_SECONDS);
     let envelope = super::super::blob::issue_presign_envelope(
         state,
         reference.as_str(),

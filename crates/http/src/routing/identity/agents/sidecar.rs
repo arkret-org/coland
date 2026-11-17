@@ -282,11 +282,11 @@ fn sidecar_access_readiness(
 
 #[cfg(test)]
 /// Decode one signed MLS governance binding and apply its closed member rules:
-/// the five shared members, plus `participant_authority_digest` and
-/// `authority_stream_head` exactly for Sidecar scope, where the head holds
-/// 1..=64 UTF-8 sorted unique refs (`encryption-and-audit.md` §2.5.1,
-/// `sidecar.md` §6). Realm and Circle bindings carrying either Sidecar member
-/// are rejected before any state comparison.
+/// the five shared members, plus `participant_authority_digest` exactly for
+/// Sidecar scope (`encryption-and-audit.md` §2.5.1, `sidecar.md` §6).
+/// The removed `authority_stream_head` is an unknown member for every scope;
+/// Realm and Circle bindings carrying the Sidecar digest are also rejected
+/// before any state comparison.
 fn decode_mls_governance_binding(
     value: &Value,
 ) -> Result<MlsGovernanceBindingPayload, &'static str> {
@@ -339,7 +339,6 @@ async fn sidecar_view(
     let expected_binding = SidecarMlsBinding {
         sidecar_id: cut.sidecar_id,
         participant_authority_digest: cut.participant_authority_digest,
-        authority_stream_head: cut.authority_stream_head,
     };
     let epoch_binding_current = match &epoch_row {
         Some(row) => {
@@ -372,7 +371,6 @@ async fn sidecar_view(
     );
     let mls_context = AgentSidecarMlsContext {
         participant_authority_digest: expected_binding.participant_authority_digest.clone(),
-        authority_stream_head: expected_binding.authority_stream_head.clone(),
         mls_group_id: epoch_row
             .as_ref()
             .map(|row| row.effective_scope.canonical_mls_group_id())
@@ -1695,13 +1693,7 @@ mod tests {
         EventId::from_digest(arkret_canonical::DigestSuite::Sha256, [seed; 32]).to_string()
     }
 
-    fn sorted_event_refs(count: u8) -> Vec<String> {
-        let mut refs = (1..=count).map(binding_event_ref).collect::<Vec<_>>();
-        refs.sort();
-        refs
-    }
-
-    fn sidecar_binding_value(authority_stream_head: Vec<String>) -> Value {
+    fn sidecar_binding_value() -> Value {
         json!({
             "effective_scope": {
                 "kind": "sidecar",
@@ -1713,65 +1705,58 @@ mod tests {
             "next_epoch": "0",
             "key_access_revision": "0",
             "participant_authority_digest": format!("sha256:{}", "4".repeat(64)),
-            "authority_stream_head": authority_stream_head,
         })
     }
 
     #[test]
-    fn sidecar_governance_binding_carries_the_seven_members() {
-        let head = sorted_event_refs(2);
-        let binding = decode_mls_governance_binding(&sidecar_binding_value(head.clone()))
-            .expect("the seven-member Sidecar binding decodes");
+    fn sidecar_governance_binding_carries_the_six_members() {
+        let value = sidecar_binding_value();
+        assert_eq!(value.as_object().unwrap().len(), 6);
+        let binding =
+            decode_mls_governance_binding(&value).expect("the six-member Sidecar binding decodes");
         assert!(matches!(
             binding.effective_scope(),
             arkret_wire::ScopeRef::Sidecar { .. }
         ));
-        let sidecar = binding.sidecar_binding().expect("Sidecar members");
+        let sidecar = binding.sidecar_binding().expect("Sidecar member");
         assert_eq!(sidecar.sidecar_id.as_str(), BINDING_SIDECAR_ID);
         assert_eq!(
-            sidecar
-                .authority_stream_head
-                .iter()
-                .map(|event_id| event_id.to_string())
-                .collect::<Vec<_>>(),
-            head
+            sidecar.participant_authority_digest.as_str(),
+            format!("sha256:{}", "4".repeat(64))
         );
+        assert_eq!(serde_json::to_value(&binding).unwrap(), value);
     }
 
     #[test]
     fn governance_binding_rejects_sidecar_member_violations() {
-        for member in ["participant_authority_digest", "authority_stream_head"] {
-            let mut missing = sidecar_binding_value(sorted_event_refs(1));
-            missing.as_object_mut().unwrap().remove(member);
-            assert_eq!(
-                decode_mls_governance_binding(&missing).unwrap_err(),
-                "mls_governance_binding_invalid",
-                "Sidecar binding without {member}"
-            );
-        }
+        let mut missing = sidecar_binding_value();
+        missing
+            .as_object_mut()
+            .unwrap()
+            .remove("participant_authority_digest");
+        assert_eq!(
+            decode_mls_governance_binding(&missing).unwrap_err(),
+            "mls_governance_binding_invalid",
+            "Sidecar binding without its participant digest"
+        );
 
-        let mut realm = sidecar_binding_value(sorted_event_refs(1));
+        let mut realm = sidecar_binding_value();
         realm["effective_scope"] = json!({"kind": "realm", "realm_id": BINDING_REALM_ID});
         assert_eq!(
             decode_mls_governance_binding(&realm).unwrap_err(),
             "mls_governance_binding_invalid",
-            "a Realm binding must not carry Sidecar members"
+            "a Realm binding must not carry the Sidecar digest"
         );
 
-        let mut unsorted = sorted_event_refs(2);
-        unsorted.reverse();
-        let duplicate = vec![binding_event_ref(1), binding_event_ref(1)];
-        for head in [unsorted, duplicate, Vec::new(), sorted_event_refs(65)] {
+        for count in [0, 1, 64, 65] {
+            let mut removed_member = sidecar_binding_value();
+            removed_member["authority_stream_head"] =
+                json!((1..=count).map(binding_event_ref).collect::<Vec<_>>());
             assert_eq!(
-                decode_mls_governance_binding(&sidecar_binding_value(head)).unwrap_err(),
-                "mls_governance_binding_invalid"
+                decode_mls_governance_binding(&removed_member).unwrap_err(),
+                "mls_governance_binding_invalid",
+                "the removed head member is rejected independently of its array length"
             );
         }
-        assert_eq!(
-            arkret_models_collaboration::agent_sidecar::SIDECAR_AUTHORITY_STREAM_HEAD_MAX_ITEMS,
-            64
-        );
-        decode_mls_governance_binding(&sidecar_binding_value(sorted_event_refs(64)))
-            .expect("64 authority refs fit the decoder bound");
     }
 }

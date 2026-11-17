@@ -1192,12 +1192,52 @@ CREATE TABLE public.realm_commits (
     governance_generation bigint NOT NULL CHECK (governance_generation >= 0),
     commit_json jsonb NOT NULL,
     committed_at timestamptz NOT NULL,
+    sidecar_membership_basis jsonb,
     CONSTRAINT realm_commits_position_key UNIQUE (stream_key, stream_position),
+    CONSTRAINT realm_commits_sidecar_membership_shape CHECK (
+        sidecar_membership_basis IS NULL OR (
+            stream_ref->>'kind'='sidecar' AND event_pk IS NOT NULL
+            AND jsonb_typeof(sidecar_membership_basis)='object'
+            AND sidecar_membership_basis ?& ARRAY['controller_join_event_ref','agent_join_event_refs']
+            AND sidecar_membership_basis - ARRAY['controller_join_event_ref','agent_join_event_refs']='{}'::jsonb
+            AND jsonb_typeof(sidecar_membership_basis->'controller_join_event_ref')='string'
+            AND jsonb_typeof(sidecar_membership_basis->'agent_join_event_refs')='array'
+        )
+    ),
     CONSTRAINT realm_commits_predecessor_shape CHECK (
         (stream_position = 0 AND previous_commit_ref IS NULL)
         OR (stream_position > 0 AND previous_commit_ref IS NOT NULL)
     )
 );
+
+-- A source is attached only to its accepted original. Replicas may acquire the
+-- explicit private handoff source once; an accepted source is never refreshed.
+CREATE FUNCTION public.preserve_sidecar_membership_basis() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF OLD.sidecar_membership_basis IS NOT NULL AND NEW IS DISTINCT FROM OLD THEN
+        RAISE EXCEPTION 'accepted Sidecar membership provenance is immutable';
+    END IF;
+    IF NEW.sidecar_membership_basis IS DISTINCT FROM OLD.sidecar_membership_basis
+       AND (to_jsonb(NEW)-'sidecar_membership_basis') IS DISTINCT FROM
+           (to_jsonb(OLD)-'sidecar_membership_basis') THEN
+        RAISE EXCEPTION 'Sidecar membership attachment changed its original Commit';
+    END IF;
+    IF NEW.sidecar_membership_basis IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM public.canonical_events e WHERE e.pk=NEW.event_pk
+        AND e.state='committed' AND e.realm_id=NEW.realm_id
+        AND e.kind IN ('ak.mls.genesis','ak.mls.commit')
+        AND e.envelope->'scope_ref'=NEW.stream_ref
+    ) THEN
+        RAISE EXCEPTION 'Sidecar membership provenance lacks its accepted MLS original';
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+CREATE TRIGGER realm_commits_preserve_sidecar_membership_basis
+BEFORE UPDATE ON public.realm_commits
+FOR EACH ROW EXECUTE FUNCTION public.preserve_sidecar_membership_basis();
 
 CREATE INDEX realm_commits_realm_stream_tail_idx
     ON public.realm_commits (realm_id, stream_key, stream_position DESC);

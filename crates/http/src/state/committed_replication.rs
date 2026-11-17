@@ -178,7 +178,7 @@ async fn verified_replicated_welcomes(
             continue;
         }
         let preparation: ServiceResult<_> = async {
-            let (claim, _) =
+            let (claim, ..) =
                 super::authority_mls_unit::resolve_claim(state, event, welcome).await?;
             let guard = super::authority_mls_unit::native_welcome_target(state, welcome).await?;
             Ok((claim, guard))

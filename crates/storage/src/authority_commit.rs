@@ -3131,6 +3131,23 @@ pub trait AuthorityCommitStore: Send + Sync {
         ))
     }
 
+    /// H's exact-original native authoring decision. This is independent of
+    /// G's RFC transition, membership basis and governing acceptance cut.
+    async fn sidecar_mls_authoring_is_current(
+        &self,
+        _event: &arkret_wire::Event,
+        _actors: &std::collections::BTreeSet<arkret_wire::ActorId>,
+        _endpoints: &[(
+            arkret_wire::AccountId,
+            arkret_wire::MlsWelcomeRecipientEndpoint,
+            arkret_wire::EventId,
+        )],
+    ) -> PersistenceResult<bool> {
+        Err(crate::PersistenceError::Internal(
+            "H-native Sidecar MLS authoring cut is unavailable".into(),
+        ))
+    }
+
     /// Read the maximal-disclosure snapshot material from one consistent
     async fn sidecar_access_cut(
         &self,

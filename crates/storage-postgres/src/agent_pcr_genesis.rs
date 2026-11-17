@@ -326,7 +326,6 @@ pub(crate) async fn admit_agent_pcr_genesis_in_connection(
     )
     .await?;
     crate::agent_current_states::project_agent_status_in_connection(conn, event, commit).await?;
-    crate::sidecar_authority_change_guard::after_current_writes_in_connection(conn, event).await?;
 
     let resolution = arkret_models_identity::PrincipalResolutionProjection {
         did: initial_resolution.did.clone(),

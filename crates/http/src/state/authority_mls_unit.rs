@@ -227,6 +227,7 @@ async fn admit_mls_event_inner(
             ));
         }
     };
+    require_own_sidecar_authoring(state, event, &installation.member_principals, welcomes).await?;
     let welcomes = verify_welcomes(state, event, welcomes, &added_leaves, producer_key).await?;
     let outcome = super::authority_self_event_unit::commit_event_unit(
         state,
@@ -296,6 +297,66 @@ async fn admit_mls_event_inner(
         };
     }
     Ok(outcome)
+}
+
+/// The owning H checks its participant intent and only the selected native
+/// endpoints. G's complete transition verification stays in the existing unit.
+pub(super) async fn require_own_sidecar_authoring(
+    state: &AppState,
+    event: &Event,
+    actors: &std::collections::BTreeSet<arkret_wire::ActorId>,
+    welcomes: &[MlsWelcomeDelivery],
+) -> ServiceResult<()> {
+    if !matches!(event.scope_ref, ScopeRef::Sidecar { .. })
+        || event
+            .actor_id
+            .as_account_id()
+            .is_none_or(|account| account.station_id != state.service_core_id())
+    {
+        return Ok(());
+    }
+    let mut endpoints = Vec::with_capacity(welcomes.len());
+    let mut selected_deadline: Option<i64> = None;
+    for welcome in welcomes {
+        let account = welcome
+            .recipient_actor_id
+            .as_account_id()
+            .filter(|account| account.station_id == state.service_core_id())
+            .ok_or_else(|| {
+                failed_precondition("a personal Sidecar recipient is not hosted by its owning H")
+            })?;
+        let (_, claim, deadline) = resolve_claim(state, event, welcome).await?;
+        let deadline = deadline
+            .ok_or_else(|| {
+                failed_precondition("the selected Sidecar claim has no original deadline")
+            })?
+            .min(claim.expires_at.timestamp_millis());
+        selected_deadline = Some(selected_deadline.map_or(deadline, |known| known.min(deadline)));
+        let authorization = match &welcome.recipient_endpoint {
+            MlsWelcomeRecipientEndpoint::Device { .. } => claim.device_authorize_event_id,
+            MlsWelcomeRecipientEndpoint::AgentRuntime { .. } => claim.agent_key_authorize_event_id,
+        }
+        .ok_or_else(|| {
+            failed_precondition("the selected Sidecar claim has no native authorization original")
+        })?;
+        endpoints.push((
+            account.clone(),
+            welcome.recipient_endpoint.clone(),
+            authorization,
+        ));
+    }
+    if !state
+        .authority_commits()
+        .sidecar_mls_authoring_is_current(event, actors, &endpoints)
+        .await?
+        || selected_deadline
+            .is_some_and(|deadline| deadline <= crate::wire::now().timestamp_millis())
+    {
+        return Err(failed_precondition(
+            "the owning H participant intent or selected endpoint is no longer current",
+        ));
+    }
+    Ok(())
 }
 
 fn ordinary_retry_outcome(
@@ -968,7 +1029,7 @@ async fn verify_welcomes(
         if owner != local {
             continue;
         }
-        let (claim, record) = resolve_claim(state, event, welcome).await?;
+        let (claim, record, _) = resolve_claim(state, event, welcome).await?;
         if let Some(guard) = native_welcome_target(state, welcome).await? {
             native_targets.insert(welcome.welcome_id.clone(), guard);
         }
@@ -1056,7 +1117,7 @@ pub(super) async fn resolve_claim(
     state: &AppState,
     event: &Event,
     welcome: &MlsWelcomeDelivery,
-) -> ServiceResult<(MlsWelcomeClaimLedgerKey, KeyPackageClaimRecord)> {
+) -> ServiceResult<(MlsWelcomeClaimLedgerKey, KeyPackageClaimRecord, Option<i64>)> {
     let local = state.service_core_id();
     let row = state
         .mls_key_packages()
@@ -1224,6 +1285,7 @@ pub(super) async fn resolve_claim(
             request_digest: row.request_digest,
         },
         record,
+        row.claim_expires_at_unix_ms,
     ))
 }
 
@@ -1527,7 +1589,6 @@ mod tests {
                 next,
                 0,
                 arkret_wire::Hash::new(arkret_canonical::sha256_digest([0x81])).unwrap(),
-                vec![event_ref(0x82)],
             )
             .unwrap()
         };

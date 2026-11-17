@@ -127,6 +127,7 @@ DROP TABLE IF EXISTS current_state_versions;
 DROP TABLE IF EXISTS current_state_heads;
 DROP FUNCTION IF EXISTS enforce_canonical_event_immutability() CASCADE;
 DROP FUNCTION IF EXISTS record_realm_commit_event_kind() CASCADE;
+DROP FUNCTION IF EXISTS preserve_sidecar_membership_basis() CASCADE;
 DROP FUNCTION IF EXISTS invalidate_account_device_create() CASCADE;
 DROP FUNCTION IF EXISTS account_data_source_current(TEXT,TEXT) CASCADE;
 DROP FUNCTION IF EXISTS bind_device_inventory_station() CASCADE;

@@ -747,15 +747,6 @@ async fn admit_agent_control_in_connection(
             ));
         }
     }
-    // Lifecycle transitions replace one distinct accepted status ref. They
-    // cannot grow the Sidecar cut. MLS admissions still lock the Agent PCR.
-    if !matches!(
-        event.kind,
-        EventKind::SelfAgentPause | EventKind::SelfAgentResume | EventKind::SelfAgentDeactivate
-    ) {
-        crate::sidecar_authority_change_guard::after_current_writes_in_connection(conn, event)
-            .await?;
-    }
     crate::agent_producer_signer_keys::retain_self_outcome_in_connection(
         conn, event, commit, historical,
     )

@@ -84,10 +84,9 @@ struct AcceptedGroup {
     genesis: serde_json::Value,
 }
 
-/// Validate every occupied endpoint, including leaves outside the projected
-/// desired subset. Accepted Add/Genesis provenance pins the endpoint and its
-/// authorization dot; a newer authorization for the same Actor is not a lease
-/// for an old leaf. Pending desired endpoints need not have a leaf yet.
+/// H checks the actual Actor set and retained historical endpoint origins.
+/// Current-native checks belong to actual producers, selected Add endpoints
+/// and concrete recipients, rather than every retained authorization ref.
 pub(crate) async fn tree_authorized_in_connection(
     conn: &mut crate::AsyncPgConnection,
     cut: &crate::sidecar_authority_cut::SidecarParticipantAuthorityCut,
@@ -96,7 +95,6 @@ pub(crate) async fn tree_authorized_in_connection(
     candidate: Option<&coland_storage::AuthorityCommitTransaction>,
 ) -> coland_storage::PersistenceResult<bool> {
     use coland_storage::PersistenceError;
-    use diesel::sql_types::Jsonb;
     let scope = ScopeRef::Sidecar {
         realm_id: cut.realm_id.clone(),
         sidecar_id: cut.sidecar_id.clone(),
@@ -121,129 +119,123 @@ pub(crate) async fn tree_authorized_in_connection(
         {
             return Ok(false);
         }
-        let Some((endpoint, authorization)) =
+        let Some((endpoint, _)) =
             leaf_origin_in_connection(conn, current, &leaf, candidate).await?
         else {
             return Ok(false);
         };
-        match endpoint {
-            MlsWelcomeRecipientEndpoint::Device { device_id } => {
-                if account != &cut.controller_account_id {
+        if !matches!(
+            (&endpoint, account == &cut.controller_account_id),
+            (MlsWelcomeRecipientEndpoint::Device { .. }, true)
+                | (MlsWelcomeRecipientEndpoint::AgentRuntime { .. }, false)
+        ) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Current native authorization for one actual producer/Add/recipient at H.
+/// Its MLS key binding is independently checked from the original creator,
+/// claim or Add source; the Event producer key need not equal the MLS key.
+pub(crate) async fn endpoint_current_in_connection(
+    conn: &mut crate::AsyncPgConnection,
+    account: &arkret_wire::AccountId,
+    endpoint: &MlsWelcomeRecipientEndpoint,
+    authorization: &EventId,
+) -> coland_storage::PersistenceResult<bool> {
+    use coland_storage::PersistenceError;
+    let actor = ActorId::account(account.clone());
+    match endpoint.clone() {
+        MlsWelcomeRecipientEndpoint::Device { device_id } => {
+            let Some(status) =
+                crate::pcr_device_status_reader::confirmed_pcr_device_status_cut_in_connection(
+                    conn,
+                    account,
+                    &device_id,
+                    chrono::Utc::now(),
+                )
+                .await
+                .map_err(crate::PgTransactionError::into_persistence)?
+            else {
+                return Ok(false);
+            };
+            if status.lifecycle != crate::pcr_device_status_fold::PcrDeviceLifecycle::Active {
+                return Ok(false);
+            }
+            let Some(source) = status.authority.authorization else {
+                return Ok(false);
+            };
+            if &source.event_id != authorization {
+                return Ok(false);
+            }
+        }
+        MlsWelcomeRecipientEndpoint::AgentRuntime {
+            verification_method,
+        } => {
+            #[derive(QueryableByName)]
+            struct RuntimeRow {
+                #[diesel(sql_type = Jsonb)]
+                value: serde_json::Value,
+                #[diesel(sql_type = Text)]
+                agent_key_id: String,
+            }
+            let keys = diesel::sql_query("SELECT k.value,k.agent_key_id FROM agent_key_current_states k \
+                JOIN agent_status_current_states s ON s.realm_id=k.realm_id AND s.agent_id=k.agent_id \
+                JOIN realm_commits c ON c.realm_id=k.realm_id AND c.commit_id=k.current_commit_id AND c.stream_position=k.current_stream_position \
+                JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' \
+                WHERE k.agent_id=$1 AND s.actor_id=$2::jsonb AND s.value='\"active\"'::jsonb")
+                .bind::<Text,_>(account.principal_id.as_str()).bind::<Text,_>(actor.to_string())
+                .load::<RuntimeRow>(&mut *conn).await.map_err(PersistenceError::database)?;
+            let tag = format!("{}:1", authorization);
+            let mut authorized = false;
+            for key in keys {
+                let Some(entries) = key
+                    .value
+                    .get("authorizations")
+                    .and_then(serde_json::Value::as_array)
+                else {
                     return Ok(false);
-                }
-                let Some(status) =
-                    crate::pcr_device_status_reader::confirmed_pcr_device_status_cut_in_connection(
-                        conn,
-                        account,
-                        &device_id,
-                        chrono::Utc::now(),
+                };
+                for entry in entries {
+                    if entry.get("tag_id").and_then(serde_json::Value::as_str) != Some(tag.as_str())
+                    {
+                        continue;
+                    }
+                    let payload: arkret_models_collaboration::events_payloads::agent::AgentKeyAuthorizePayload =
+                        serde_json::from_value(entry["value"].clone()).map_err(PersistenceError::database)?;
+                    if payload.agent_id != account.principal_id
+                        || payload.key_id.as_str() != key.agent_key_id
+                        || payload.verification_method != verification_method
+                        || payload
+                            .expires_at
+                            .is_some_and(|expiry| expiry <= chrono::Utc::now())
+                    {
+                        continue;
+                    }
+                    arkret_signatures::agent::validate_agent_runtime_public_key(
+                        &payload.public_key,
+                        &verification_method,
                     )
-                    .await
-                    .map_err(crate::PgTransactionError::into_persistence)?
-                else {
-                    return Ok(false);
-                };
-                if status.lifecycle != crate::pcr_device_status_fold::PcrDeviceLifecycle::Active {
-                    return Ok(false);
-                }
-                let Some(source) = status.authority.authorization else {
-                    return Ok(false);
-                };
-                if source.event_id != authorization {
-                    return Ok(false);
-                }
-                let Some(key) = source
-                    .payload
-                    .device_public_key_did
-                    .as_str()
-                    .strip_prefix("did:key:")
-                else {
-                    return Ok(false);
-                };
-                let key = arkret_canonical::multibase::decode_ed25519_multibase(key)
                     .map_err(PersistenceError::database)?;
-                if arkret_canonical::base64url_encode(key) != leaf.signature_key.as_str() {
-                    return Ok(false);
+                    #[derive(QueryableByName)]
+                    struct Source {
+                        #[diesel(sql_type = Jsonb)]
+                        payload: serde_json::Value,
+                    }
+                    let source = diesel::sql_query("SELECT e.envelope->'payload' AS payload FROM canonical_events e \
+                        JOIN realm_commits c ON c.event_pk=e.pk JOIN agent_status_current_states s ON s.realm_id=c.realm_id \
+                        WHERE e.envelope->>'event_id'=$1 AND e.state='committed' AND e.kind=$3 \
+                        AND e.envelope->'actor_id'=$2::jsonb AND s.actor_id=$2::jsonb")
+                        .bind::<Text,_>(authorization.as_str()).bind::<Jsonb,_>(serde_json::to_value(&actor).map_err(PersistenceError::database)?)
+                        .bind::<Text,_>(arkret_wire::EventKind::AgentKeyAuthorize.as_str())
+                        .get_result::<Source>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+                    authorized |= source.is_some_and(|source| serde_json::from_value::<arkret_models_collaboration::events_payloads::agent::AgentKeyAuthorizePayload>(source.payload).ok().is_some_and(|original|
+                        serde_json::to_value(original).ok() == serde_json::to_value(&payload).ok()));
                 }
             }
-            MlsWelcomeRecipientEndpoint::AgentRuntime {
-                verification_method,
-            } => {
-                if account == &cut.controller_account_id {
-                    return Ok(false);
-                }
-                #[derive(QueryableByName)]
-                struct RuntimeRow {
-                    #[diesel(sql_type = Jsonb)]
-                    value: serde_json::Value,
-                    #[diesel(sql_type = Text)]
-                    agent_key_id: String,
-                }
-                let keys = diesel::sql_query("SELECT k.value,k.agent_key_id FROM agent_key_current_states k \
-                    JOIN agent_status_current_states s ON s.realm_id=k.realm_id AND s.agent_id=k.agent_id \
-                    JOIN realm_commits c ON c.realm_id=k.realm_id AND c.commit_id=k.current_commit_id AND c.stream_position=k.current_stream_position \
-                    JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' \
-                    WHERE k.agent_id=$1 AND s.actor_id=$2::jsonb")
-                    .bind::<Text,_>(account.principal_id.as_str()).bind::<Text,_>(leaf.actor_id.to_string())
-                    .load::<RuntimeRow>(&mut *conn).await.map_err(PersistenceError::database)?;
-                let tag = format!("{}:1", authorization);
-                let mut authorized = false;
-                for key in keys {
-                    let Some(entries) = key
-                        .value
-                        .get("authorizations")
-                        .and_then(serde_json::Value::as_array)
-                    else {
-                        return Ok(false);
-                    };
-                    for entry in entries {
-                        if entry.get("tag_id").and_then(serde_json::Value::as_str)
-                            != Some(tag.as_str())
-                        {
-                            continue;
-                        }
-                        let payload: arkret_models_collaboration::events_payloads::agent::AgentKeyAuthorizePayload =
-                            serde_json::from_value(entry["value"].clone()).map_err(PersistenceError::database)?;
-                        if payload.agent_id != account.principal_id
-                            || payload.key_id.as_str() != key.agent_key_id
-                            || payload.verification_method != verification_method
-                            || payload
-                                .expires_at
-                                .is_some_and(|expiry| expiry <= chrono::Utc::now())
-                        {
-                            continue;
-                        }
-                        arkret_signatures::agent::validate_agent_runtime_public_key(
-                            &payload.public_key,
-                            &verification_method,
-                        )
-                        .map_err(PersistenceError::database)?;
-                        let value = serde_json::to_value(&payload.public_key)
-                            .map_err(PersistenceError::database)?;
-                        if value.get("key").and_then(serde_json::Value::as_str)
-                            != Some(leaf.signature_key.as_str())
-                        {
-                            continue;
-                        }
-                        #[derive(QueryableByName)]
-                        struct Source {
-                            #[diesel(sql_type = Jsonb)]
-                            payload: serde_json::Value,
-                        }
-                        let source = diesel::sql_query("SELECT e.envelope->'payload' AS payload FROM canonical_events e \
-                            JOIN realm_commits c ON c.event_pk=e.pk JOIN agent_status_current_states s ON s.realm_id=c.realm_id \
-                            WHERE e.envelope->>'event_id'=$1 AND e.state='committed' AND e.kind=$3 \
-                            AND e.envelope->'actor_id'=$2::jsonb AND s.actor_id=$2::jsonb")
-                            .bind::<Text,_>(authorization.as_str()).bind::<Jsonb,_>(serde_json::to_value(&leaf.actor_id).map_err(PersistenceError::database)?)
-                            .bind::<Text,_>(arkret_wire::EventKind::AgentKeyAuthorize.as_str())
-                            .get_result::<Source>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
-                        authorized |= source.is_some_and(|source| serde_json::from_value::<arkret_models_collaboration::events_payloads::agent::AgentKeyAuthorizePayload>(source.payload).ok().is_some_and(|original|
-                            serde_json::to_value(original).ok() == serde_json::to_value(&payload).ok()));
-                    }
-                }
-                if !authorized {
-                    return Ok(false);
-                }
+            if !authorized {
+                return Ok(false);
             }
         }
     }
@@ -457,7 +449,6 @@ pub(crate) async fn controller_device_ready_in_connection(
     if binding.effective_scope() != &scope
         || binding.sidecar_binding().is_none_or(|binding| {
             binding.participant_authority_digest != cut.participant_authority_digest
-                || binding.authority_stream_head != cut.authority_stream_head
         })
     {
         return Ok(false);
@@ -551,6 +542,9 @@ pub(crate) async fn consumed_endpoint_in_connection(
     let account = actor
         .as_account_id()
         .ok_or_else(|| invalid("Sidecar endpoint actor is not an Account"))?;
+    if !endpoint_current_in_connection(conn, account, endpoint, authorization_ref).await? {
+        return Ok(false);
+    }
     // Agent packages belong to their controller's local Account; device
     // packages belong to the recipient itself. Both keep the exact Station.
     if owner_account.station_id != account.station_id

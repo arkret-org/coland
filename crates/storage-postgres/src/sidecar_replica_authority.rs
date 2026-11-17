@@ -6,6 +6,61 @@ use diesel::QueryableByName;
 use diesel::sql_types::Jsonb;
 use horme::{OptionalExtension, RunQueryDsl};
 
+/// Select the local native role from the configured Station identity, never
+/// from missing PCR rows or the success of a native-authority query.
+pub(crate) async fn is_owning_station_in_connection(
+    conn: &mut crate::AsyncPgConnection,
+    account: &arkret_wire::AccountId,
+) -> PersistenceResult<bool> {
+    Ok(account.station_id == local_station_in_connection(conn).await?)
+}
+
+async fn local_station_in_connection(
+    conn: &mut crate::AsyncPgConnection,
+) -> PersistenceResult<DidCoreId> {
+    let row = diesel::sql_query(
+        "SELECT to_jsonb(station_id) AS payload FROM device_inventory_station WHERE singleton",
+    )
+    .get_result::<crate::JsonPayloadRow>(&mut *conn)
+    .await
+    .map_err(PersistenceError::database)?;
+    serde_json::from_value(row.payload).map_err(PersistenceError::database)
+}
+
+/// G owns the accepted membership basis. A distinct H cannot infer that
+/// private source from its native state; an unregistered remote source stays
+/// unavailable rather than granting a floor or inventing a new protocol.
+pub(crate) async fn agent_floor_in_connection(
+    conn: &mut crate::AsyncPgConnection,
+    realm: &arkret_wire::RealmId,
+    sidecar: &arkret_wire::SidecarId,
+    caller: &arkret_wire::ActorId,
+) -> PersistenceResult<Option<arkret_wire::ReadableFloor>> {
+    use diesel::sql_types::Text;
+    let authority = diesel::sql_query(
+        "SELECT to_jsonb(service_id) AS payload FROM realm_authorities WHERE realm_id=$1",
+    )
+    .bind::<Text, _>(realm.as_str())
+    .get_result::<crate::JsonPayloadRow>(&mut *conn)
+    .await
+    .optional()
+    .map_err(PersistenceError::database)?;
+    let Some(authority) = authority else {
+        return Ok(None);
+    };
+    let governor: DidCoreId =
+        serde_json::from_value(authority.payload).map_err(PersistenceError::database)?;
+    if governor == local_station_in_connection(conn).await? {
+        return crate::sidecar_membership_provenance::agent_floor_in_connection(
+            conn, realm, sidecar, caller,
+        )
+        .await;
+    }
+    Err(PersistenceError::Conflict(
+        "revision_unavailable: the owning Station has no registered governing Sidecar membership-floor source".into(),
+    ))
+}
+
 #[derive(QueryableByName)]
 struct Owner {
     #[diesel(sql_type = Jsonb)]

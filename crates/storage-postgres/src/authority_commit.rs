@@ -6231,6 +6231,20 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         crate::sidecar_authority_cut::read(&self.pool, realm_id, sidecar_id, controller).await
     }
 
+    async fn sidecar_mls_authoring_is_current(
+        &self,
+        event: &arkret_wire::Event,
+        actors: &std::collections::BTreeSet<arkret_wire::ActorId>,
+        endpoints: &[(
+            arkret_wire::AccountId,
+            arkret_wire::MlsWelcomeRecipientEndpoint,
+            arkret_wire::EventId,
+        )],
+    ) -> PersistenceResult<bool> {
+        crate::sidecar_authority_cut::mls_authoring_is_current(&self.pool, event, actors, endpoints)
+            .await
+    }
+
     async fn realm_state_snapshot_material_for_account(
         &self,
         realm_id: &arkret_wire::RealmId,

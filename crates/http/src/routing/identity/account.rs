@@ -1625,9 +1625,16 @@ async fn direct_conversation_resolve(
 ) -> JsonResult<DirectConversationResolveResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
-    let body = body.into_inner();
+    crate::boxed_future(|| resolve_direct_peer(state, &session, body.into_inner())).await
+}
+
+async fn resolve_direct_peer(
+    state: &AppState,
+    session: &SessionRecord,
+    body: DirectConversationResolveRequestBody,
+) -> JsonResult<DirectConversationResolveResponseBody> {
     let peer_descriptor = &body.peer;
-    let actor = super::session_actor::validated_session_actor(state, &session).await?;
+    let actor = super::session_actor::validated_session_actor(state, session).await?;
     if peer_descriptor.contact_actor_id() == actor {
         return Err(AppError::param_invalid("invalid direct conversation peer"));
     }
@@ -1668,7 +1675,9 @@ async fn direct_conversation_resolve(
     let contact = if agent_basis.is_some() {
         None
     } else {
-        let contact = direct_contact_for_pair(state, &actor, &peer).await?;
+        let contact = crate::boxed_future(|| direct_contact_for_pair(state, &actor, &peer))
+            .await?
+            .map(Box::new);
         if contact.is_none() {
             return Err(direct_resolve_precondition(
                 arkret_wire::ErrorCode::DIRECT_CONVERSATION_UNAVAILABLE,
@@ -1681,11 +1690,10 @@ async fn direct_conversation_resolve(
         }
         contact
     };
-    let accepted_contact = if agent_basis.is_some() {
-        None
-    } else {
-        accepted_contact_for_pair(state, &actor, &peer, scope).await?
-    };
+    let has_accepted_contact = agent_basis.is_none()
+        && crate::boxed_future(|| accepted_contact_for_pair(state, &actor, &peer, scope))
+            .await?
+            .is_some();
 
     let pair_key = direct_pair_key(state, &actor, &peer)?;
     let pair_key_hash = Hash::new(pair_key.clone())
@@ -1707,7 +1715,7 @@ async fn direct_conversation_resolve(
     {
         let realm_id = RealmId::new(facts.founding_slot.realm_id.clone())
             .map_err(|error| AppError::internal(format!("Direct Realm id: {error}")))?;
-        crate::state::refresh_direct_conversation_peer_claim(state, &realm_id)
+        crate::boxed_future(|| crate::state::refresh_direct_conversation_peer_claim(state, &realm_id))
             .await
             .map_err(|error| AppError::internal(format!("Direct peer claim refresh: {error}")))?;
         durable = state
@@ -1777,9 +1785,11 @@ async fn direct_conversation_resolve(
             if authority.is_some_and(|authority| authority.service_id != state.service_core_id())
                 && facts.group_current_exact_pair.is_none()
             {
-                if !crate::state::foreign_direct_mls::refresh(state, &realm, &actor)
-                    .await
-                    .unwrap_or(false)
+                if !crate::boxed_future(|| {
+                    crate::state::foreign_direct_mls::refresh(state, &realm, &actor)
+                })
+                .await
+                .unwrap_or(false)
                 {
                     return json_ok(
                         DirectConversationResolveResponseBody::TemporarilyUnavailable {
@@ -1935,11 +1945,11 @@ async fn direct_conversation_resolve(
         state,
         &actor,
         &peer,
-        contact.as_ref(),
+        contact.as_deref(),
         agent_basis.is_some(),
     )
     .await?;
-    if agent_basis.is_none() && accepted_contact.is_none() {
+    if agent_basis.is_none() && !has_accepted_contact {
         tracing::warn!(
             diagnostic = "accepted_contact",
             "Direct founding resolution is unavailable"
@@ -2008,8 +2018,10 @@ async fn direct_conversation_resolve(
                     },
                 );
             };
-            let Some(contact_round_evidence) =
-                social::direct::fresh_direct_contact_evidence(state, contact).await?
+            let Some(contact_round_evidence) = crate::boxed_future(|| {
+                social::direct::fresh_direct_contact_evidence(state, contact)
+            })
+            .await?
             else {
                 tracing::warn!(
                     diagnostic = "fresh_contact_evidence",

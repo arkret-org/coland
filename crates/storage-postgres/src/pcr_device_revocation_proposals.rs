@@ -205,43 +205,13 @@ pub(crate) async fn confirmed_pcr_device_cut_in_connection(
         "SELECT p.realm_id AS pcr_realm_id, h.commit_id AS head_commit_id, \
            g.current_commit_id AS generation_commit_id, \
                g.current_stream_position AS generation_stream_position, g.value AS generation_value, \
-           (SELECT c.commit_id FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk \
-            WHERE c.realm_id=p.realm_id AND \
-              (e.kind='ak.device.reanchor' OR \
-               (e.kind='ak.device.authorize' AND \
-                e.envelope->'payload'->>'authorization_binding_kind'='registration_anchor')) \
-            ORDER BY c.stream_position DESC LIMIT 1) AS latest_generation_commit_id, \
-               (SELECT c.stream_position FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk \
-            WHERE c.realm_id=p.realm_id AND \
-              (e.kind='ak.device.reanchor' OR \
-               (e.kind='ak.device.authorize' AND \
-                e.envelope->'payload'->>'authorization_binding_kind'='registration_anchor')) \
-            ORDER BY c.stream_position DESC LIMIT 1) AS latest_generation_stream_position, \
-           (SELECT jsonb_build_object('current_device_generation_ref', \
-                    CASE WHEN e.kind='ak.device.reanchor' \
-                      THEN e.envelope->'payload'->'new_device_generation' \
-                          ELSE e.envelope->'payload'->'authorized_generation_ref' END) \
-            FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk \
-            WHERE c.realm_id=p.realm_id AND \
-              (e.kind='ak.device.reanchor' OR \
-               (e.kind='ak.device.authorize' AND \
-                e.envelope->'payload'->>'authorization_binding_kind'='registration_anchor')) \
-            ORDER BY c.stream_position DESC LIMIT 1) AS expected_generation_value, \
+           generation.commit_id AS latest_generation_commit_id, \
+           generation.stream_position AS latest_generation_stream_position, \
+           generation.expected_value AS expected_generation_value, \
            a.current_commit_id AS authorization_commit_id, a.current_stream_position AS authorization_stream_position, a.value AS authorization_value, \
-           (SELECT c.commit_id FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk \
-            WHERE c.realm_id=p.realm_id AND e.kind='ak.device.authorize' \
-              AND e.envelope->'payload'->>'device_id'=$3 \
-            ORDER BY c.stream_position DESC LIMIT 1) AS latest_authorization_commit_id, \
-           (SELECT c.stream_position FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk \
-            WHERE c.realm_id=p.realm_id AND e.kind='ak.device.authorize' \
-              AND e.envelope->'payload'->>'device_id'=$3 \
-            ORDER BY c.stream_position DESC LIMIT 1) AS latest_authorization_stream_position, \
-           (SELECT ((e.envelope->'payload') - 'device_id'::text) || \
-                    jsonb_build_object('device_authorize_event_id',e.envelope->>'event_id') \
-            FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk \
-            WHERE c.realm_id=p.realm_id AND e.kind='ak.device.authorize' \
-              AND e.envelope->'payload'->>'device_id'=$3 \
-            ORDER BY c.stream_position DESC LIMIT 1) AS expected_authorization_value, \
+           auth_event.commit_id AS latest_authorization_commit_id, \
+           auth_event.stream_position AS latest_authorization_stream_position, \
+           auth_event.expected_value AS expected_authorization_value, \
            (SELECT count(*) FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk \
             WHERE c.realm_id=p.realm_id AND e.kind='ak.device.revoke' \
               AND e.envelope->'payload'->>'device_id'=$3) AS accepted_count, \
@@ -263,6 +233,24 @@ pub(crate) async fn confirmed_pcr_device_cut_in_connection(
                        WHERE realm_id=p.realm_id \
                          AND stream_ref=jsonb_build_object('kind','realm','realm_id',p.realm_id) \
                        ORDER BY stream_position DESC LIMIT 1) h ON TRUE \
+         LEFT JOIN LATERAL ( \
+           SELECT c.commit_id,c.stream_position, \
+             jsonb_build_object('current_device_generation_ref', \
+               CASE WHEN e.kind='ak.device.reanchor' THEN e.envelope->'payload'->'new_device_generation' \
+                    ELSE e.envelope->'payload'->'authorized_generation_ref' END) AS expected_value \
+           FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk \
+           WHERE c.realm_id=p.realm_id AND (e.kind='ak.device.reanchor' OR \
+             (e.kind='ak.device.authorize' AND e.envelope->'payload'->>'authorization_binding_kind'='registration_anchor')) \
+           ORDER BY c.stream_position DESC LIMIT 1 \
+         ) generation ON TRUE \
+         LEFT JOIN LATERAL ( \
+           SELECT c.commit_id,c.stream_position, \
+             ((e.envelope->'payload') - 'device_id'::text) || \
+               jsonb_build_object('device_authorize_event_id',e.envelope->>'event_id') AS expected_value \
+           FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk \
+           WHERE c.realm_id=p.realm_id AND e.kind='ak.device.authorize' AND e.envelope->'payload'->>'device_id'=$3 \
+           ORDER BY c.stream_position DESC LIMIT 1 \
+         ) auth_event ON TRUE \
          LEFT JOIN pcr_device_generation_current_states g ON g.realm_id=p.realm_id \
          LEFT JOIN pcr_device_authorization_current_states a \
            ON a.realm_id=p.realm_id AND a.device_id=$3 \

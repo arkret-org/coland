@@ -806,6 +806,7 @@ async fn accepted_forward_witness_recovery_scenario() {
         Some(disclosure)
     );
     let human = historical_human::HumanFixture::new(&origin_pool, origin.service_did()).await;
+    let session = authenticated_context(&origin_pool, &human).await;
     let actor = ActorId::account(human.pcr.history.account.clone());
     let previous = governor.unit.transactions.last().unwrap();
     let at = previous.commit.committed_at + Duration::seconds(1);
@@ -1018,7 +1019,6 @@ async fn accepted_forward_witness_recovery_scenario() {
     let witness = queued.forward_attempt.unwrap();
     assert_eq!(witness.accepted_commit().cloned(), Some(commit.clone()));
     assert_eq!(witness.original_submission, Some(intent));
-    let session = authenticated_context(&origin_pool, &human).await;
     let route =
         crate::routing::system::service_resolution::current_authenticated_service_resolution(
             &governor_state,
@@ -1637,6 +1637,7 @@ async fn accepted_own_opening_join_without_anchor_uses_original_peer_fact_then_s
         Some(disclosure)
     );
     let human = historical_human::HumanFixture::new(&origin_pool, origin.service_did()).await;
+    let session = authenticated_context(&origin_pool, &human).await;
     let actor = ActorId::account(human.pcr.history.account.clone());
     let previous = governor.unit.transactions.last().unwrap();
     let at = previous.commit.committed_at + Duration::seconds(1);
@@ -1746,7 +1747,6 @@ async fn accepted_own_opening_join_without_anchor_uses_original_peer_fact_then_s
     let event = &join.authority_commit.event;
     let commit = &join.authority_commit.commit;
     let key = ed25519_dalek::SigningKey::from_bytes(&historical_human::station_authority_seed());
-    let session = authenticated_context(&origin_pool, &human).await;
     let route =
         crate::routing::system::service_resolution::current_authenticated_service_resolution(
             &governor_state,
@@ -2074,6 +2074,7 @@ async fn accepted_own_opening_join_without_anchor_uses_original_peer_fact_then_s
     // reads the authorized continuous prefix and keeps Alice's old anchor.
     register_original_peer_history(&listener, &governor_state, &governor_pool).await;
     let bob = historical_human::HumanFixture::new(&origin_pool, origin.service_did()).await;
+    let bob_session = authenticated_context(&origin_pool, &bob).await;
     let bob_actor = ActorId::account(bob.pcr.history.account.clone());
     let gap_at = commit.committed_at + Duration::seconds(1);
     let gap_event = historical_human::signed_ordinary_event(
@@ -2102,7 +2103,6 @@ async fn accepted_own_opening_join_without_anchor_uses_original_peer_fact_then_s
         .unwrap();
     let bob_event = &bob_join.authority_commit.event;
     let bob_commit = &bob_join.authority_commit.commit;
-    let bob_session = authenticated_context(&origin_pool, &bob).await;
     store
         .queue_event(bob_event, bob_commit.committed_at)
         .await
@@ -2390,6 +2390,7 @@ fn accepted_own_leave_scenario() -> std::pin::Pin<Box<impl std::future::Future<O
             Some(disclosure)
         );
         let human = historical_human::HumanFixture::new(&origin_pool, origin.service_did()).await;
+        let session = authenticated_context(&origin_pool, &human).await;
         let actor = ActorId::account(human.pcr.history.account.clone());
         let previous = governor.unit.transactions.last().unwrap();
         let at = previous.commit.committed_at + Duration::seconds(1);
@@ -2528,7 +2529,6 @@ fn accepted_own_leave_scenario() -> std::pin::Pin<Box<impl std::future::Future<O
         let commit = &join.authority_commit.commit;
         let key =
             ed25519_dalek::SigningKey::from_bytes(&historical_human::station_authority_seed());
-        let session = authenticated_context(&origin_pool, &human).await;
         let route =
             crate::routing::system::service_resolution::current_authenticated_service_resolution(
                 &governor_state,

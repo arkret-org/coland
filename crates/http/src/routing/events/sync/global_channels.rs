@@ -19,11 +19,8 @@ struct GlobalProgress {
     offsets: BTreeMap<String, String>,
     completed: BTreeSet<String>,
     positions: BTreeMap<String, i64>,
-    #[serde(default)]
     pending_snapshot_cut_position: Option<i64>,
-    #[serde(default)]
     pending_page_offset: u64,
-    #[serde(default)]
     pending_projection_position: i64,
 }
 
@@ -111,7 +108,7 @@ pub(crate) async fn read(
         .map_err(|error| error.to_string())?;
     let mut progress = if let Some(context) = &after.global_baseline {
         serde_json::from_value::<GlobalProgress>(context.clone())
-            .map_err(|error| error.to_string())?
+            .map_err(|_| GlobalReadError::ResyncRequired)?
     } else {
         GlobalProgress {
             snapshot_cursor: arkret_wire::Cursor::new(format!(
@@ -442,19 +439,12 @@ mod tests {
     }
 
     #[test]
-    fn legacy_cursor_context_defaults_private_channel_progress() {
-        let value = serde_json::json!({
-            "snapshot_cursor": "ak:cursor:01964137000070008000000000000001",
-            "snapshot_watermark": 7,
-            "snapshot_expires_at_ms": 9,
-            "offsets": {},
-            "completed": [],
-            "positions": {}
-        });
-        let decoded: GlobalProgress = serde_json::from_value(value).unwrap();
-        assert_eq!(decoded.pending_snapshot_cut_position, None);
-        assert_eq!(decoded.pending_page_offset, 0);
-        assert_eq!(decoded.pending_projection_position, 0);
+    fn cursor_context_requires_both_private_progress_coordinates() {
+        for key in ["pending_page_offset", "pending_projection_position"] {
+            let mut encoded = serde_json::to_value(progress(&[])).unwrap();
+            encoded.as_object_mut().unwrap().remove(key);
+            assert!(serde_json::from_value::<GlobalProgress>(encoded).is_err());
+        }
     }
 
     #[test]

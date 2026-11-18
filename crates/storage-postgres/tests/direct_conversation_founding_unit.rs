@@ -625,6 +625,7 @@ async fn founding_unit(
             "governance_station_id":pair.station,
             "initial_join_rule":shape.join_rule,
             "initial_history_access":"since_join",
+            "initial_encryption_backup_strategy":arkret_wire::EncryptionBackupStrategy::EpochContentRoots,
             "initial_discoverability":shape.discoverability
         }}),
         vec![shape.authority_ref.clone()],
@@ -1389,6 +1390,35 @@ async fn committed_direct_conversation_founding_rebuilds_resolver_projection_aft
         );
         assert!(state.strands.contains_key(strand.as_str()));
     }
+
+    // Keep the signed founding originals but remove the founder join from
+    // the stream index. The peer join now skips a readable Commit.
+    let mut conn = pool.get().await.unwrap();
+    assert_eq!(
+        diesel::sql_query(
+            "UPDATE realm_commits SET stream_key=stream_key || '-detached' WHERE commit_id=$1"
+        )
+        .bind::<Text, _>(unit.transactions[1].commit.commit_id.as_str())
+        .execute(&mut *conn)
+        .await
+        .unwrap(),
+        1
+    );
+    drop(conn);
+    let projection = coland_services::projection::ProjectionService::new("damaged-dm-restart");
+    let error = projection
+        .hydrate_from_persistence(
+            &PgPersistenceStore::new(pool),
+            &CanonicalHydrationAdapter,
+            [realm.clone()],
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("skipped readable position 1"),
+        "{error}"
+    );
+    assert!(!projection.snapshot().strands.contains_key(strand.as_str()));
 }
 
 #[tokio::test]

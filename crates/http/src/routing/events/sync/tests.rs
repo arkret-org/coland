@@ -334,6 +334,34 @@ async fn accepted_leave_preserves_the_ordinary_unavailable_continuation() {
 }
 
 #[tokio::test]
+async fn obsolete_private_cursor_context_returns_resync_frame() {
+    let state = test_state();
+    let session = roster_session(&state, ROSTER_CALLER);
+    let cursor = "ak:cursor:01964137000070008000000000000001";
+    let body: AccountSubscribeParameters =
+        serde_json::from_value(json!({"after": cursor, "catchup": true})).unwrap();
+    let after = SyncCursor {
+        global_baseline: Some(json!({
+            "snapshot_cursor": cursor,
+            "snapshot_watermark": 0,
+            "snapshot_expires_at_ms": (Utc::now() + chrono::Duration::hours(1)).timestamp_millis(),
+            "offsets": {},
+            "completed": [],
+            "positions": {}
+        })),
+        ..SyncCursor::default()
+    };
+    let frame = super::build_sync_snapshot(&state, Some(&session), &body, &after)
+        .await
+        .unwrap();
+    frame.validate().unwrap();
+    assert_eq!(
+        serde_json::to_value(frame).unwrap(),
+        json!({"kind": "resync_required"})
+    );
+}
+
+#[tokio::test]
 async fn global_storage_failure_returns_503_without_reset_or_new_delivery_material() {
     use coland_test_support::pcr_genesis::PcrGenesisFixture;
     use diesel::sql_types::Jsonb;
@@ -360,6 +388,20 @@ async fn global_storage_failure_returns_503_without_reset_or_new_delivery_materi
     let store = state.test_persistence();
     let genesis = PcrGenesisFixture::new(state.service_did());
     let device = genesis.admit_founding_device(store.as_ref()).await.unwrap();
+    store
+        .accounts()
+        .put(&coland_storage::AccountRecord {
+            pk: coland_storage::AccountPk(0),
+            principal_id: genesis.history.account.principal_id.clone(),
+            station_id: genesis.history.account.station_id.clone(),
+            localpart: String::new(),
+            display_name: None,
+            biography: None,
+            avatar_blob_ref: None,
+            created_at: Utc::now(),
+        })
+        .await
+        .unwrap();
     let mut session = roster_session(&state, genesis.history.account.principal_id.as_str());
     session.endpoint = coland_services::identity::SessionEndpointState::HumanDevice {
         device_id: device.device_id,

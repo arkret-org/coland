@@ -4755,7 +4755,7 @@ async fn member_station_anchors_on_the_bootstrap_snapshot_and_keeps_chain_nodes(
 
 async fn member_station_anchor_case() {
     use arkret_wire::StreamScanDirection::After;
-    use coland_storage::AccountStreamScan;
+    use coland_storage::{AccountPk, AccountRecord, AccountStore, AccountStreamScan};
 
     let governance_database = TestDatabase::lease().await;
     let member_database = TestDatabase::lease().await;
@@ -4785,9 +4785,31 @@ async fn member_station_anchor_case() {
     let realm_id = unit.transactions[0].event.realm_id.clone();
     let last = unit.transactions.last().unwrap();
     let at = last.commit.committed_at;
-    let alice = remote_member("member-anchor-alice");
+    let alice = heap_future(|| {
+        accepted_pcr_account::accepted_pcr_account(
+            &member_pool,
+            ordinary_realm::human_profile::station_did(&member_station()),
+        )
+    })
+    .await;
     let bob = remote_member("member-anchor-bob");
     let alice_account = alice.as_account_id().unwrap().clone();
+    // Only a hosted active account receives private account summary rows.
+    coland_storage_postgres::PgAccountStore {
+        pool: member_pool.clone(),
+    }
+    .put(&AccountRecord {
+        pk: AccountPk(0),
+        principal_id: alice_account.principal_id.clone(),
+        station_id: alice_account.station_id.clone(),
+        localpart: String::new(),
+        display_name: None,
+        biography: None,
+        avatar_blob_ref: None,
+        created_at: at,
+    })
+    .await
+    .unwrap();
 
     // Reversible lifecycle state precedes the reader's history floor. A member
     // must consume its verified current snapshot without the old Event bytes.
@@ -4943,26 +4965,18 @@ async fn member_station_anchor_case() {
     );
     let head = material.visible_stream_heads[0].clone();
     assert_eq!(head.commit_id, message.authority_commit.commit.commit_id);
+    let verified_snapshot = bootstrap_snapshot_from_material(&material);
+    assert_bootstrap_join_floor(&verified_snapshot, &join.authority_commit.commit);
     member
-        .install_replica_anchor(&{
-            let mut install = ReplicaAnchorInstall {
-                realm_id: realm_id.clone(),
-                genesis_original: coland_test_support::member_bootstrap::genesis_from_unit(&unit),
-                join_commit_id: join.authority_commit.commit.commit_id.clone(),
-                governance_generation: join.authority_commit.commit.governance_generation,
-                snapshot_head: head.clone(),
-                visible_stream_heads: material.visible_stream_heads.clone(),
-                current_state_entries: material.current_state_entries.clone(),
-
-                verified_snapshot: bootstrap_snapshot(&(realm_id.clone()), 0, &[], &[]),
-            };
-            install.verified_snapshot = bootstrap_snapshot(
-                &install.realm_id,
-                install.governance_generation,
-                &install.visible_stream_heads,
-                &install.current_state_entries,
-            );
-            install
+        .install_replica_anchor(&ReplicaAnchorInstall {
+            realm_id: realm_id.clone(),
+            genesis_original: coland_test_support::member_bootstrap::genesis_from_unit(&unit),
+            join_commit_id: join.authority_commit.commit.commit_id.clone(),
+            governance_generation: material.governance_generation,
+            snapshot_head: head.clone(),
+            visible_stream_heads: material.visible_stream_heads,
+            current_state_entries: material.current_state_entries,
+            verified_snapshot,
         })
         .await
         .unwrap();

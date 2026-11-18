@@ -1,3 +1,7 @@
+use arkret_models_crypto::{
+    DeviceQuorumProofBodyWithSignatures, DidRootProofBody, RecoverySessionProof,
+    RecoverySignatureAlgorithm, RecoveryUnlockProofBody, RecoveryUnlockProofBodyWithSignature,
+};
 use coland_services::identity::RecoverySessionState as RecoverySessionServiceState;
 
 use super::*;
@@ -54,16 +58,19 @@ fn recovery_method(
     policy: &RecoveryPolicy,
     kind: RecoveryProofKind,
 ) -> Option<&arkret_models_crypto::RecoveryMethod> {
-    let expected = match kind {
+    policy
+        .methods
+        .iter()
+        .find(|method| method.kind_str() == recovery_kind_label(kind))
+}
+
+fn recovery_kind_label(kind: RecoveryProofKind) -> &'static str {
+    match kind {
         RecoveryProofKind::DidRoot => "did_root",
         RecoveryProofKind::RecoveryUnlock => "recovery_unlock",
         RecoveryProofKind::DeviceQuorum => "device_quorum",
         RecoveryProofKind::TrustedRecoveryService => "trusted_recovery_service",
-    };
-    policy
-        .methods
-        .iter()
-        .find(|method| method.kind_str() == expected)
+    }
 }
 
 fn device_quorum_transcript_body(
@@ -92,6 +99,49 @@ mod possession_tests {
     use ed25519_dalek::Signer as _;
 
     use super::*;
+
+    #[test]
+    fn submitted_proofs_reproduce_the_four_registered_transcripts() {
+        let fixture: Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../arkret-spec/spec/v1/artifacts/fixtures/recovery-transcript-fixture.json"
+        )))
+        .unwrap();
+        let cases = fixture["cases"].as_array().unwrap();
+        assert_eq!(cases.len(), 4);
+        for case in cases {
+            let proof: RecoverySessionProof =
+                serde_json::from_value(case["source_proof"].clone()).unwrap();
+            let (method, body) = recovery_summary_fields(&proof);
+            assert_eq!(
+                serde_json::to_value(proof.proof_kind()).unwrap(),
+                case["kind"]
+            );
+            assert_eq!(
+                method.as_ref().map(DidUrl::as_str),
+                case["source_proof"]["verification_method"].as_str()
+            );
+            let bytes = match body {
+                Some(body) => {
+                    let mut transcript: GenericRecoveryTranscript =
+                        serde_json::from_value(case["transcript"].clone()).unwrap();
+                    transcript.proof_body = body;
+                    arkret_canonical::canonical_json_bytes(&transcript).unwrap()
+                }
+                None => {
+                    assert_eq!(proof.proof_kind(), RecoveryProofKind::DidRoot);
+                    let transcript: DidRootRecoveryTranscript =
+                        serde_json::from_value(case["transcript"].clone()).unwrap();
+                    arkret_canonical::canonical_json_bytes(&transcript).unwrap()
+                }
+            };
+            assert_eq!(bytes, case["transcript_jcs"].as_str().unwrap().as_bytes());
+            assert_eq!(
+                arkret_canonical::sha256_digest(&bytes),
+                case["transcript_digest"].as_str().unwrap()
+            );
+        }
+    }
 
     #[test]
     fn create_possession_rejects_another_grant_or_replacement_key() {
@@ -181,9 +231,7 @@ fn constant_time_str_eq(left: &str, right: &str) -> bool {
 // C-P3 — `/proofs` cryptographically verifies the four closed recovery methods
 // (did_root, recovery_unlock, device_quorum, trusted_recovery_service) over the
 // canonical recovery-proof transcript and advances `pending -> verified` ONLY on
-// success. Any other kind fails closed with 501
-// `recovery_proof_kind_unimplemented` rather than silently leaving the session
-// pending.
+// success. The SDK request type enforces the closed proof family.
 //
 // Completion is exclusively owned by the bound RecoveryTransaction. There is
 // no second public recovery-session completion command.
@@ -193,69 +241,56 @@ fn constant_time_str_eq(left: &str, right: &str) -> bool {
 /// canonical recovery-proof transcript, deterministically recomputed from the
 /// stored session fields (no separate column needed).
 pub(super) fn recovery_proof_summary(record: &RecoverySessionServiceState) -> Option<ProofSummary> {
-    let proof = record.proof_payload.as_ref()?.get("proof")?.as_object()?;
-    let kind = match proof.get("kind").and_then(Value::as_str)? {
-        "did_root" => RecoveryProofKind::DidRoot,
-        "recovery_unlock" => RecoveryProofKind::RecoveryUnlock,
-        "device_quorum" => RecoveryProofKind::DeviceQuorum,
-        "trusted_recovery_service" => RecoveryProofKind::TrustedRecoveryService,
-        _ => return None,
-    };
-    let verification_method = proof
-        .get("verification_method")
-        .and_then(Value::as_str)
-        .map(DidUrl::new)
-        .transpose()
-        .ok()?;
-    let transcript = recovery_proof_summary_transcript(record, proof)?;
-    let transcript_bytes = arkret_canonical::canonical_json_bytes(&transcript).ok()?;
+    let payload: RecoverySessionProofSubmitRequestBody =
+        serde_json::from_value(record.proof_payload.as_ref()?.clone()).ok()?;
+    summarize_recovery_proof(record, &payload.proof)
+}
+
+fn summarize_recovery_proof(
+    record: &RecoverySessionServiceState,
+    proof: &RecoverySessionProof,
+) -> Option<ProofSummary> {
+    let (verification_method, transcript_body) = recovery_summary_fields(proof);
+    let transcript_bytes = match transcript_body {
+        Some(body) => arkret_canonical::canonical_json_bytes(
+            &generic_recovery_proof_transcript(record, body).ok()?,
+        ),
+        None => arkret_canonical::canonical_json_bytes(
+            &did_root_recovery_proof_transcript(record).ok()?,
+        ),
+    }
+    .ok()?;
     let proof_digest = Hash::new(arkret_canonical::sha256_digest(&transcript_bytes)).ok()?;
     Some(ProofSummary {
-        kind,
+        kind: proof.proof_kind(),
         proof_digest,
         verification_method,
     })
 }
 
-fn recovery_proof_summary_transcript(
-    record: &RecoverySessionServiceState,
-    proof: &Map<String, Value>,
-) -> Option<Value> {
-    let kind = proof.get("kind").and_then(Value::as_str)?;
-    match kind {
-        "trusted_recovery_service" => {
-            let proof_body = trusted_recovery_service_proof_body(proof).ok()?;
-            let transcript = generic_recovery_proof_transcript(
-                record,
-                RecoveryTranscriptProofBody::TrustedRecoveryService(proof_body),
-            )
-            .ok()?;
-            serde_json::to_value(transcript).ok()
-        }
-        "recovery_unlock" => {
-            let proof_body = recovery_unlock_proof_body(proof).ok()?;
-            let transcript = generic_recovery_proof_transcript(
-                record,
-                RecoveryTranscriptProofBody::RecoveryUnlock(proof_body),
-            )
-            .ok()?;
-            serde_json::to_value(transcript).ok()
-        }
-        "device_quorum" => {
-            let proof: arkret_models_crypto::DeviceQuorumProofBodyWithSignatures =
-                serde_json::from_value(Value::Object(proof.clone())).ok()?;
-            let body = device_quorum_transcript_body(&proof);
-            serde_json::to_value(
-                generic_recovery_proof_transcript(
-                    record,
-                    RecoveryTranscriptProofBody::DeviceQuorum(body),
-                )
-                .ok()?,
-            )
-            .ok()
-        }
-        "did_root" => serde_json::to_value(did_root_recovery_proof_transcript(record).ok()?).ok(),
-        _ => None,
+fn recovery_summary_fields(
+    proof: &RecoverySessionProof,
+) -> (Option<DidUrl>, Option<RecoveryTranscriptProofBody>) {
+    match proof {
+        RecoverySessionProof::DidRoot(body) => (Some(body.verification_method.clone()), None),
+        RecoverySessionProof::RecoveryUnlock(body) => (
+            Some(body.verification_method.clone()),
+            Some(RecoveryTranscriptProofBody::RecoveryUnlock(
+                recovery_unlock_proof_body(body),
+            )),
+        ),
+        RecoverySessionProof::TrustedRecoveryService(body) => (
+            Some(body.verification_method.clone()),
+            Some(RecoveryTranscriptProofBody::TrustedRecoveryService(
+                trusted_recovery_service_proof_body(body),
+            )),
+        ),
+        RecoverySessionProof::DeviceQuorum(body) => (
+            None,
+            Some(RecoveryTranscriptProofBody::DeviceQuorum(
+                device_quorum_transcript_body(body),
+            )),
+        ),
     }
 }
 
@@ -712,7 +747,7 @@ fn selected_recovery_method_active(
 pub(crate) async fn validate_frozen_session_policy(
     state: &AppState,
     record: &RecoverySessionServiceState,
-    proof_payload: Option<&Value>,
+    submitted_proof: Option<&RecoverySessionProof>,
 ) -> Result<(), AppError> {
     let frozen: RecoveryPolicy =
         serde_json::from_value(record.policy_payload.clone()).map_err(|error| {
@@ -733,15 +768,22 @@ pub(crate) async fn validate_frozen_session_policy(
         .map_err(|error| {
             recovery_proof_authority_error(format!("accepted policy invalid: {error}"))
         })?;
-    let proof = proof_payload
-        .or(record.proof_payload.as_ref())
-        .map(|value| {
-            serde_json::from_value::<arkret_models_crypto::RecoverySessionProofSubmitRequestBody>(
-                value.clone(),
-            )
-        })
-        .transpose()
-        .map_err(|error| recovery_proof_authority_error(format!("bound proof invalid: {error}")))?;
+    let stored_proof;
+    let proof = if let Some(submitted) = submitted_proof {
+        Some(submitted)
+    } else {
+        stored_proof = record
+            .proof_payload
+            .as_ref()
+            .map(|value| {
+                serde_json::from_value::<RecoverySessionProofSubmitRequestBody>(value.clone())
+            })
+            .transpose()
+            .map_err(|error| {
+                recovery_proof_authority_error(format!("bound proof invalid: {error}"))
+            })?;
+        stored_proof.as_ref().map(|request| &request.proof)
+    };
     if updates.first() != Some(&frozen) {
         return Err(recovery_proof_authority_error(
             "frozen recovery policy is not the accepted policy at its version",
@@ -757,9 +799,7 @@ pub(crate) async fn validate_frozen_session_policy(
             || policy
                 .expires_at
                 .is_some_and(|expires_at| now >= expires_at)
-            || proof
-                .as_ref()
-                .is_some_and(|value| !selected_recovery_method_active(policy, &value.proof, now))
+            || proof.is_some_and(|value| !selected_recovery_method_active(policy, value, now))
         {
             return Err(recovery_proof_authority_error(
                 "bound recovery method was revoked, expired, or no longer active",
@@ -1202,42 +1242,17 @@ pub(super) async fn recovery_session_proof_submit(
     }
 
     let payload = body.into_inner();
-    let payload_value = serde_json::to_value(&payload)
-        .map_err(|error| AppError::internal(format!("recovery proof submit serialize: {error}")))?;
-    let proof = payload_value
-        .get("proof")
-        .ok_or_else(|| AppError::param_invalid("proof object is required"))?
-        .as_object()
-        .ok_or_else(|| AppError::param_invalid("proof object is required"))?;
-    let proof_kind = proof
-        .get("kind")
-        .and_then(Value::as_str)
-        .ok_or_else(|| AppError::param_invalid("proof.kind is required"))?;
-    if !ALLOWED_PROOF_KINDS.contains(&proof_kind) {
-        return Err(AppError::param_invalid(
-            format!("proof.kind `{proof_kind}` not in spec enum",),
-        )
-        .with_reason_code("recovery_proof_kind_unknown"));
-    }
-    // The proof kind MUST be one the bound policy snapshot permits.
-    let policy_allows = record
-        .policy_payload
-        .get("methods")
-        .and_then(Value::as_array)
-        .map(|kinds| {
-            kinds
-                .iter()
-                .any(|k| k.get("kind").and_then(Value::as_str) == Some(proof_kind))
-        })
-        .unwrap_or(false);
-    if !policy_allows {
+    let proof = &payload.proof;
+    let proof_kind = proof.proof_kind();
+    let bound_policy: RecoveryPolicy = serde_json::from_value(record.policy_payload.clone())
+        .map_err(|e| recovery_proof_authority_error(format!("bound policy invalid: {e}")))?;
+    if recovery_method(&bound_policy, proof_kind).is_none() {
         return Err(AppError::conflict(format!(
-            "proof.kind `{proof_kind}` is not permitted by the bound recovery policy",
+            "proof.kind `{}` is not permitted by the bound recovery policy",
+            recovery_kind_label(proof_kind)
         ))
         .with_internal_reason("recovery_proof_kind_not_allowed"));
     }
-    let bound_policy: RecoveryPolicy = serde_json::from_value(record.policy_payload.clone())
-        .map_err(|e| recovery_proof_authority_error(format!("bound policy invalid: {e}")))?;
     if bound_policy.cooldown_seconds.is_some_and(|seconds| {
         chrono::Utc::now()
             .signed_duration_since(record.created_at)
@@ -1249,11 +1264,7 @@ pub(super) async fn recovery_session_proof_submit(
         ));
     }
     // Anti-replay: the proof MUST echo the server-issued session challenge.
-    let echoed = proof
-        .get("challenge")
-        .and_then(Value::as_str)
-        .ok_or_else(|| AppError::param_invalid("proof.challenge is required"))?;
-    if !constant_time_str_eq(echoed, &record.challenge) {
+    if !constant_time_str_eq(proof.challenge().as_str(), &record.challenge) {
         return Err(crate::app_error!(
             SignatureInvalid,
             "proof.challenge does not match the session challenge",
@@ -1261,26 +1272,16 @@ pub(super) async fn recovery_session_proof_submit(
         .with_reason_code("recovery_session_challenge_mismatch"));
     }
 
-    validate_frozen_session_policy(state, &record, Some(&payload_value)).await?;
+    validate_frozen_session_policy(state, &record, Some(proof)).await?;
     // Each enabled method is verified independently against its frozen policy.
-    match proof_kind {
-        "did_root" => {
-            verify_did_root_proof(state, &record, proof).await?;
+    match proof {
+        RecoverySessionProof::DidRoot(body) => verify_did_root_proof(state, &record, body).await?,
+        RecoverySessionProof::RecoveryUnlock(body) => verify_recovery_unlock_proof(&record, body)?,
+        RecoverySessionProof::TrustedRecoveryService(body) => {
+            verify_trusted_recovery_service_proof(state, &record, body, &bound_policy).await?
         }
-        "recovery_unlock" => {
-            verify_recovery_unlock_proof(state, &record, proof).await?;
-        }
-        "trusted_recovery_service" => {
-            verify_trusted_recovery_service_proof(state, &record, proof).await?;
-        }
-        "device_quorum" => {
-            verify_device_quorum_recovery_proof(state, &record, proof).await?;
-        }
-        other => {
-            return Err(AppError::unsupported_feature(format!(
-                "proof.kind `{other}` verification not yet implemented (C-P3)"
-            ))
-            .with_internal_reason("recovery_proof_kind_unimplemented"));
+        RecoverySessionProof::DeviceQuorum(body) => {
+            verify_device_quorum_recovery_proof(state, &record, body, &bound_policy).await?
         }
     }
 
@@ -1289,7 +1290,8 @@ pub(super) async fn recovery_session_proof_submit(
     let now = chrono::Utc::now();
     let updated = RecoverySessionServiceState {
         state: SessionState::Verified,
-        proof_payload: Some(payload_value.clone()),
+        proof_payload: Some(serde_json::to_value(&payload)
+            .map_err(|error| AppError::internal(format!("recovery proof submit serialize: {error}")))?),
         updated_at: now,
         ..record
     };
@@ -1304,7 +1306,7 @@ pub(super) async fn recovery_session_proof_submit(
         .await
         .map_err(recovery_session_store_error)?;
 
-    let proof_summary = recovery_proof_summary(&updated);
+    let proof_summary = summarize_recovery_proof(&updated, proof);
     append_audit_log(
         state,
         Some(updated.principal_id.as_str()),
@@ -1315,14 +1317,11 @@ pub(super) async fn recovery_session_proof_submit(
             "policy_id": updated.policy_id.clone(),
             "trust_domain": updated.trust_domain.clone(),
             "proof_kind": proof_kind,
-            "verification_method": proof
-                .get("verification_method")
-                .cloned()
-                .unwrap_or(Value::Null),
-            "service_id": proof
-                .get("service_id")
-                .cloned()
-                .unwrap_or(Value::Null),
+            "verification_method": proof_summary.as_ref().and_then(|summary| summary.verification_method.as_ref()),
+            "service_id": match proof {
+                RecoverySessionProof::TrustedRecoveryService(body) => Some(&body.service_id),
+                _ => None,
+            },
             "proof_summary": proof_summary,
         }),
         "verified",
@@ -1334,35 +1333,20 @@ pub(super) async fn recovery_session_proof_submit(
     json_ok(RecoverySessionProofSubmitResponseBody {
         recovery_session_id: RecoverySessionId::new(updated.recovery_session_id.clone())
             .map_err(|error| stored_recovery_type_error("recovery_session_id", error))?,
-        proof_summary: recovery_proof_summary(&updated),
+        proof_summary,
     })
 }
 
-/// C-P3 — verify a `did_root` recovery proof.
-///
-/// The proof MUST carry an Ed25519 signature by the principal's signing key
-/// over the canonical recovery-proof transcript, which binds every
-/// session-defining field: `(principal_id, requesting_device_id, trust_domain,
-/// policy_id, policy_version, recovery_session_id, device generation, challenge,
-/// created_at, expires_at)`.
-/// Because the transcript is reconstructed server-side from the stored session,
-/// any proof signed over a different binding (stale policy, replayed across
-/// principal/domain, different session) fails verification — this gives the
-/// `recovery_evidence_unbound` guarantee for free.
 async fn verify_device_quorum_recovery_proof(
     state: &AppState,
     record: &RecoverySessionServiceState,
-    proof: &Map<String, Value>,
+    proof: &DeviceQuorumProofBodyWithSignatures,
+    policy: &RecoveryPolicy,
 ) -> Result<(), AppError> {
-    let proof: arkret_models_crypto::DeviceQuorumProofBodyWithSignatures =
-        serde_json::from_value(Value::Object(proof.clone()))
-            .map_err(|e| recovery_signature_error(format!("invalid device quorum proof: {e}")))?;
-    let policy: RecoveryPolicy = serde_json::from_value(record.policy_payload.clone())
-        .map_err(|e| recovery_proof_authority_error(format!("bound policy invalid: {e}")))?;
     let Some(arkret_models_crypto::RecoveryMethod::DeviceQuorum {
         min_device_count,
         member_ids,
-    }) = recovery_method(&policy, RecoveryProofKind::DeviceQuorum)
+    }) = recovery_method(policy, RecoveryProofKind::DeviceQuorum)
     else {
         return Err(recovery_proof_authority_error(
             "device quorum method is not enabled",
@@ -1381,7 +1365,7 @@ async fn verify_device_quorum_recovery_proof(
             "quorum threshold does not equal the accepted method",
         ));
     }
-    let body = device_quorum_transcript_body(&proof);
+    let body = device_quorum_transcript_body(proof);
     let transcript =
         generic_recovery_proof_transcript(record, RecoveryTranscriptProofBody::DeviceQuorum(body))?;
     let bytes = arkret_canonical::canonical_json_bytes(&transcript)
@@ -1421,17 +1405,17 @@ async fn verify_device_quorum_recovery_proof(
     Ok(())
 }
 
-pub(super) async fn verify_did_root_proof(
+async fn verify_did_root_proof(
     state: &AppState,
     record: &RecoverySessionServiceState,
-    proof: &Map<String, Value>,
+    proof: &DidRootProofBody,
 ) -> Result<(), AppError> {
     if record.station_id.as_str() != state.service_id() {
         return Err(recovery_signature_error(
             "recovery session principal authority pair does not bind this Station",
         ));
     }
-    let verification_method = required_proof_string(proof, "verification_method")?;
+    let verification_method = proof.verification_method.as_str();
     let account_id = AccountId::new(record.principal_id.clone(), record.station_id.clone());
     let (document, roots) = current_recovery_root_authority(state, &account_id).await?;
     if !roots
@@ -1452,7 +1436,7 @@ pub(super) async fn verify_did_root_proof(
         arkret_canonical::canonical_json_bytes(&transcript).map_err(|error| {
             AppError::internal(format!("recovery proof transcript failed: {error}"))
         })?;
-    let signature_b64 = required_proof_string(proof, "signature")?;
+    let signature_b64 = proof.signature.as_str();
     let raw = URL_SAFE_NO_PAD
         .decode(signature_b64.as_bytes())
         .or_else(|_| STANDARD.decode(signature_b64.as_bytes()))
@@ -1465,28 +1449,28 @@ pub(super) async fn verify_did_root_proof(
     })
 }
 
-pub(super) async fn verify_trusted_recovery_service_proof(
+async fn verify_trusted_recovery_service_proof(
     state: &AppState,
     record: &RecoverySessionServiceState,
-    proof: &Map<String, Value>,
+    proof: &TrustedRecoveryServiceProofBodyWithSignature,
+    policy: &RecoveryPolicy,
 ) -> Result<(), AppError> {
-    let signature_algorithm = required_proof_string(proof, "signature_algorithm")?;
-    if signature_algorithm != "Ed25519" {
-        return Err(AppError::param_invalid(format!(
-            "proof.signature_algorithm `{signature_algorithm}` must be `Ed25519`",
-        )));
+    match proof.signature_algorithm {
+        RecoverySignatureAlgorithm::Ed25519 => {}
+        RecoverySignatureAlgorithm::MlDsa65 => {
+            return Err(AppError::param_invalid(
+                "proof.signature_algorithm `ML-DSA-65` must be `Ed25519`",
+            ));
+        }
     }
-    let service_id = required_proof_string(proof, "service_id")?;
-    let audience = required_proof_string(proof, "audience")?;
-    let verification_method = required_proof_string(proof, "verification_method")?;
-    let _service_id =
-        arkret_identifiers::DidCoreId::new(service_id.to_owned()).map_err(|error| {
-            recovery_proof_authority_error(format!("proof.service_id is invalid: {error}"))
-        })?;
-    let policy: RecoveryPolicy = serde_json::from_value(record.policy_payload.clone())
-        .map_err(|e| recovery_proof_authority_error(format!("bound policy invalid: {e}")))?;
+    let service_id = proof.service_id.as_str();
+    let audience = proof.audience.trim();
+    if audience.is_empty() {
+        return Err(AppError::param_invalid("proof.audience is required"));
+    }
+    let verification_method = proof.verification_method.as_str();
     let Some(arkret_models_crypto::RecoveryMethod::TrustedRecoveryService { services }) =
-        recovery_method(&policy, RecoveryProofKind::TrustedRecoveryService)
+        recovery_method(policy, RecoveryProofKind::TrustedRecoveryService)
     else {
         return Err(recovery_proof_authority_error(
             "trusted service method is not enabled",
@@ -1515,7 +1499,7 @@ pub(super) async fn verify_trusted_recovery_service_proof(
         .map_err(|error| {
             recovery_proof_authority_error(format!("trusted recovery service key invalid: {error}"))
         })?;
-    let proof_body = trusted_recovery_service_proof_body(proof)?;
+    let proof_body = trusted_recovery_service_proof_body(proof);
     let transcript = generic_recovery_proof_transcript(
         record,
         RecoveryTranscriptProofBody::TrustedRecoveryService(proof_body),
@@ -1524,7 +1508,7 @@ pub(super) async fn verify_trusted_recovery_service_proof(
         arkret_canonical::canonical_json_bytes(&transcript).map_err(|error| {
             AppError::internal(format!("recovery proof transcript failed: {error}"))
         })?;
-    let signature_b64 = required_proof_string(proof, "signature")?;
+    let signature_b64 = proof.signature.as_str();
     let raw = URL_SAFE_NO_PAD
         .decode(signature_b64.as_bytes())
         .or_else(|_| STANDARD.decode(signature_b64.as_bytes()))
@@ -1551,18 +1535,19 @@ pub(super) async fn verify_trusted_recovery_service_proof(
 ///     generic recovery transcript whose proof_body is this proof object with
 ///     `signature` removed, using the public key decoded from the entry's
 ///     `public_key_multibase`.
-pub(super) async fn verify_recovery_unlock_proof(
-    _state: &AppState,
+fn verify_recovery_unlock_proof(
     record: &RecoverySessionServiceState,
-    proof: &Map<String, Value>,
+    proof: &RecoveryUnlockProofBodyWithSignature,
 ) -> Result<(), AppError> {
-    let signature_algorithm = required_proof_string(proof, "signature_algorithm")?;
-    if signature_algorithm != "Ed25519" {
-        return Err(AppError::param_invalid(format!(
-            "proof.signature_algorithm `{signature_algorithm}` must be `Ed25519` for recovery_unlock",
-        )));
+    match proof.signature_algorithm {
+        RecoverySignatureAlgorithm::Ed25519 => {}
+        RecoverySignatureAlgorithm::MlDsa65 => {
+            return Err(AppError::param_invalid(
+                "proof.signature_algorithm `ML-DSA-65` must be `Ed25519` for recovery_unlock",
+            ));
+        }
     }
-    let verification_method = required_proof_string(proof, "verification_method")?;
+    let verification_method = proof.verification_method.as_str();
 
     // (a) Resolve the recovery key entry from the bound recovery policy.
     let entry = resolve_recovery_key_entry(
@@ -1583,7 +1568,7 @@ pub(super) async fn verify_recovery_unlock_proof(
         .get("signature_algorithm")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if entry_signature_algorithm != signature_algorithm {
+    if entry_signature_algorithm != "Ed25519" {
         return Err(recovery_evidence_unbound_error(
             "recovery_unlock proof.signature_algorithm does not match the recovery key entry signature_algorithm",
         ));
@@ -1593,7 +1578,7 @@ pub(super) async fn verify_recovery_unlock_proof(
     // Build the SDK-owned signature-independent binding transcript once. The
     // exact frozen policy method and every session coordinate are covered by
     // this one possession signature; there is no second public commitment.
-    let proof_body = recovery_unlock_proof_body(proof)?;
+    let proof_body = recovery_unlock_proof_body(proof);
     let transcript = generic_recovery_proof_transcript(
         record,
         RecoveryTranscriptProofBody::RecoveryUnlock(proof_body),
@@ -1604,7 +1589,7 @@ pub(super) async fn verify_recovery_unlock_proof(
         })?;
 
     // Signature possession proof.
-    let signature_b64 = required_proof_string(proof, "signature")?;
+    let signature_b64 = proof.signature.as_str();
     let raw = URL_SAFE_NO_PAD
         .decode(signature_b64.as_bytes())
         .or_else(|_| STANDARD.decode(signature_b64.as_bytes()))
@@ -1620,21 +1605,14 @@ pub(super) async fn verify_recovery_unlock_proof(
 }
 
 fn recovery_unlock_proof_body(
-    proof: &Map<String, Value>,
-) -> Result<arkret_models_crypto::RecoveryUnlockProofBody, AppError> {
-    let proof =
-        serde_json::from_value::<arkret_models_crypto::RecoveryUnlockProofBodyWithSignature>(
-            Value::Object(proof.clone()),
-        )
-        .map_err(|error| {
-            AppError::param_invalid(format!("invalid recovery_unlock proof: {error}"))
-        })?;
-    Ok(arkret_models_crypto::RecoveryUnlockProofBody {
+    proof: &RecoveryUnlockProofBodyWithSignature,
+) -> RecoveryUnlockProofBody {
+    RecoveryUnlockProofBody {
         kind: proof.kind,
-        challenge: proof.challenge,
-        verification_method: proof.verification_method,
+        challenge: proof.challenge.clone(),
+        verification_method: proof.verification_method.clone(),
         signature_algorithm: proof.signature_algorithm,
-    })
+    }
 }
 
 /// Resolve a non-revoked, in-window `methods[kind=recovery_unlock].keys[]`
@@ -1728,35 +1706,17 @@ pub(super) fn decode_recovery_key_public_key(
         .map_err(|error| recovery_evidence_unbound_error(format!("recovery key invalid: {error}")))
 }
 
-fn required_proof_string<'a>(
-    proof: &'a Map<String, Value>,
-    key: &str,
-) -> Result<&'a str, AppError> {
-    proof
-        .get(key)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| AppError::param_invalid(format!("proof.{key} is required")))
-}
-
 fn trusted_recovery_service_proof_body(
-    proof: &Map<String, Value>,
-) -> Result<TrustedRecoveryServiceProofBody, AppError> {
-    let proof = serde_json::from_value::<TrustedRecoveryServiceProofBodyWithSignature>(
-        Value::Object(proof.clone()),
-    )
-    .map_err(|error| {
-        AppError::param_invalid(format!("invalid trusted_recovery_service proof: {error}"))
-    })?;
-    Ok(TrustedRecoveryServiceProofBody {
+    proof: &TrustedRecoveryServiceProofBodyWithSignature,
+) -> TrustedRecoveryServiceProofBody {
+    TrustedRecoveryServiceProofBody {
         kind: proof.kind,
-        challenge: proof.challenge,
-        service_id: proof.service_id,
-        audience: proof.audience,
-        verification_method: proof.verification_method,
+        challenge: proof.challenge.clone(),
+        service_id: proof.service_id.clone(),
+        audience: proof.audience.clone(),
+        verification_method: proof.verification_method.clone(),
         signature_algorithm: proof.signature_algorithm,
-    })
+    }
 }
 
 fn recovery_proof_authority_error(message: impl Into<String>) -> AppError {

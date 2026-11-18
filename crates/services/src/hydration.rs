@@ -468,15 +468,11 @@ async fn hydrate_canonical_realm_bootstraps(
             continue;
         }
 
-        // A current ordinary bootstrap is one confirmed Realm stream prefix.
-        // `snapshot_all` orders by receive time and Event id, neither of which
-        // proves the order of Events committed in an atomic bootstrap. Read
-        // the first stream positions instead and restore every facet before
-        // the later membership replay. Legacy single-Event genesis remains
-        // on the established path below.
-        if let Some(facets) =
-            confirmed_ordinary_bootstrap_facets(persistence, &records, &create_event).await?
-        {
+        // Both governing branches require a valid confirmed stream prefix.
+        // Snapshot receive order cannot establish the founding Commit order.
+        let prefix = confirmed_realm_bootstrap_prefix(persistence, &create_event.realm_id).await?;
+        if create_payload.object.purpose == RealmPurpose::Collaboration {
+            let facets = confirmed_ordinary_bootstrap_facets(&prefix, &records, &create_event)?;
             let operations = facets
                 .iter()
                 .map(|record| {
@@ -507,8 +503,8 @@ async fn hydrate_canonical_realm_bootstraps(
             continue;
         }
 
-        // Keep original-event shape validation distinct from the complete
-        // bootstrap validation above and from member custody classification.
+        // Direct Conversation founding has its own admitted unit; the ordinary
+        // collaboration bootstrap slots do not describe its Realm projection.
         arkret_policy::realm_bootstrap::validate_realm_genesis_event(&create_event).map_err(
             |error| {
                 coland_storage::PersistenceError::Internal(format!(
@@ -546,20 +542,16 @@ async fn hydrate_canonical_realm_bootstraps(
     Ok(())
 }
 
-async fn confirmed_ordinary_bootstrap_facets(
+async fn confirmed_realm_bootstrap_prefix(
     persistence: &dyn coland_storage::PersistenceStore,
-    records: &[CanonicalEventRecord],
-    create: &Event,
-) -> coland_storage::PersistenceResult<Option<Vec<CanonicalEventRecord>>> {
-    use arkret_schema::{
-        RealmBootstrapPresence, RealmBootstrapProfile, realm_bootstrap_profile_descriptor,
-    };
-    use arkret_wire::{CommitStreamRef, StreamScanDirection, StreamScanRequestBody};
+    realm: &RealmId,
+) -> coland_storage::PersistenceResult<Vec<arkret_wire::CommittedEventView>> {
+    use arkret_wire::{StreamScanDirection, StreamScanRequestBody};
 
     let request = StreamScanRequestBody {
-        realm_id: create.realm_id.clone(),
+        realm_id: realm.clone(),
         stream_ref: CommitStreamRef::Realm {
-            realm_id: create.realm_id.clone(),
+            realm_id: realm.clone(),
         },
         direction: StreamScanDirection::After(None),
         limit: 9,
@@ -570,21 +562,28 @@ async fn confirmed_ordinary_bootstrap_facets(
         .await?;
     scan.validate_for_request(&request).map_err(|error| {
         coland_storage::PersistenceError::Internal(format!(
-            "ordinary bootstrap confirmed stream is invalid: {error}"
+            "Realm bootstrap confirmed stream is invalid: {error}"
         ))
     })?;
-    let items = &scan.committed_events;
+    Ok(scan.committed_events)
+}
+
+fn confirmed_ordinary_bootstrap_facets(
+    items: &[arkret_wire::CommittedEventView],
+    records: &[CanonicalEventRecord],
+    create: &Event,
+) -> coland_storage::PersistenceResult<Vec<CanonicalEventRecord>> {
+    use arkret_schema::{
+        RealmBootstrapPresence, RealmBootstrapProfile, realm_bootstrap_profile_descriptor,
+    };
+
     if items
         .first()
         .is_none_or(|item| item.commit().event_ref != create.event_id)
     {
-        return Ok(None);
-    }
-    if items.get(1).is_none_or(|item| {
-        item.reducer_input()
-            .is_none_or(|event| event.kind != arkret_wire::EventKind::RealmProfile)
-    }) {
-        return Ok(None);
+        return Err(coland_storage::PersistenceError::Internal(
+            "ordinary bootstrap confirmed stream does not start at the Realm genesis".to_owned(),
+        ));
     }
     let mut prefix = Vec::new();
     for (position, item) in items.iter().enumerate() {
@@ -654,8 +653,7 @@ async fn confirmed_ordinary_bootstrap_facets(
                     ))
                 })
         })
-        .collect::<coland_storage::PersistenceResult<Vec<_>>>()
-        .map(Some)
+        .collect()
 }
 
 /// Rebuild Agent and Applet-managed PCR state from canonical Events.

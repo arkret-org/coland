@@ -1691,6 +1691,56 @@ async fn confirmed_bootstrap_recovers_after_postcommit_projection_install_is_los
 }
 
 #[tokio::test]
+async fn governor_hydration_rejects_genesis_without_confirmed_facets() {
+    let database = TestDatabase::lease().await;
+    let pool = database.pool();
+    human_profile::admit(
+        &pool,
+        &arkret_wire::DidCoreId::new("ak:did_core:web:bootstrap-station.example").unwrap(),
+        "bootstrap-actor",
+    )
+    .await;
+    let unit = unit(&pool).await;
+    let realm = &unit.transactions[0].event.realm_id;
+    PgAuthorityCommitStore { pool: pool.clone() }
+        .admit_ordinary_realm_bootstrap_unit(&unit, unit.transactions[0].commit.committed_at)
+        .await
+        .unwrap();
+    // Preserve the accepted originals for replay, but leave only Genesis
+    // in the governing stream index.
+    let mut connection = pool.get().await.unwrap();
+    let hidden = diesel::sql_query(
+        "UPDATE realm_commits SET stream_key=stream_key || '-detached' WHERE realm_id=$1 AND stream_position>0",
+    )
+    .bind::<Text, _>(realm.as_str())
+    .execute(&mut *connection)
+    .await
+    .unwrap();
+    assert!(hidden > 0);
+    drop(connection);
+
+    let restarted = ProjectionService::new("incomplete-governor-bootstrap-restart");
+    let error = restarted
+        .hydrate_from_persistence(
+            &coland_storage_postgres::PgPersistenceStore::new(pool),
+            &BootstrapHydrationAdapter,
+            [realm.clone()],
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("missing required slot"),
+        "{error}"
+    );
+    assert!(
+        restarted
+            .snapshot()
+            .realm_create_log(realm.as_str())
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn governor_hydration_rejects_corrupted_bootstrap_prefix() {
     let database = TestDatabase::lease().await;
     let pool = database.pool();

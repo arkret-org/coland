@@ -1781,12 +1781,7 @@ async fn submit_recovery_unit(
             "Recovery R changed the verified proof summary, quorum participants or Session start",
         ));
     }
-    validate_frozen_session_policy(
-        state,
-        &recovery_session,
-        recovery_session.proof_payload.as_ref(),
-    )
-    .await?;
+    validate_frozen_session_policy(state, &recovery_session, None).await?;
     let principal = state
         .persistence()
         .principal_resolution_by_account_id(&receipt.account_id)

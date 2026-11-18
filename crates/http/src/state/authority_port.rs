@@ -808,43 +808,53 @@ impl AuthorityProtocolPort for AppState {
         if let Some(original) = retry.replay(self).await? {
             return ordinary_mls_outcome(original);
         }
-        let result = async {
+        let result = crate::boxed_future(|| async {
             let event = &request.commit_event;
-            if let Some(original) = super::authority_forward::recover_forwarded_original(
-                self,
-                session,
-                &arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::MlsCommit(
-                    request.clone(),
-                ),
-            )
+            let replay_request = SelfAuthoritySubmitRequestBody::MlsCommit(request.clone());
+            if let Some(original) = crate::boxed_future(|| {
+                super::authority_forward::recover_forwarded_original(self, session, &replay_request)
+            })
             .await?
             {
                 return Ok(original);
             }
-            if super::authority_self_event_unit::exact_replay(self, event).await?.is_some() {
+            if super::authority_self_event_unit::exact_replay(self, event)
+                .await?
+                .is_some()
+            {
                 return Err(ServiceError::Conflict(
-                    "duplicate_conflict: MLS Event already has a different complete retry unit".into(),
+                    "duplicate_conflict: MLS Event already has a different complete retry unit"
+                        .into(),
                 ));
             }
-            let (producer_guard, producer_key) =
+            let (producer_guard, producer_key) = crate::boxed_future(|| {
                 super::authority_producer_validation::verify_self_event_producer_key(
                     self, session, event,
                 )
-                .await?;
+            })
+            .await?;
             if let Some(governance) = remote_governance(self, &event.realm_id).await? {
-                return super::authority_forward::forward_self_mls(self, &governance, request, session)
-                    .await;
+                return crate::boxed_future(|| {
+                    super::authority_forward::forward_self_mls(self, &governance, request, session)
+                })
+                .await;
             }
-            super::authority_mls_unit::admit_native_mls_event(
-                self,
-                event,
-                &request.welcomes,
-                None,
-                super::authority_self_event_unit::AdmittedProducer::Local(Box::new(producer_guard)),
-                &producer_key,
-                Some(retry.clone()),
-            ).await
-        }.await;
+            crate::boxed_future(|| {
+                super::authority_mls_unit::admit_native_mls_event(
+                    self,
+                    event,
+                    &request.welcomes,
+                    None,
+                    super::authority_self_event_unit::AdmittedProducer::Local(Box::new(
+                        producer_guard,
+                    )),
+                    &producer_key,
+                    Some(retry.clone()),
+                )
+            })
+            .await
+        })
+        .await;
         if let Some(original) = retry.replay(self).await? {
             return ordinary_mls_outcome(original);
         }

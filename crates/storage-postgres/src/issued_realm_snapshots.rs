@@ -691,6 +691,36 @@ fn require_observed_cut(
     Ok(())
 }
 
+/// A fresh bootstrap reply cannot cross an independently observed rejoin.
+/// Historical by-ref objects retain their separate disclosure contract.
+fn require_fresh_sidecar_join(
+    snapshot: &arkret_wire::RealmStateSnapshot,
+    current: &coland_storage::RealmStateSnapshotMaterial,
+    account: &arkret_wire::AccountId,
+) -> PersistenceResult<()> {
+    if snapshot.purpose != arkret_wire::RealmSnapshotPurpose::StreamHistory
+        || !snapshot.history_basis.as_ref().is_some_and(|basis| {
+            matches!(
+                basis.stream_ref,
+                arkret_wire::CommitStreamRef::Sidecar { .. }
+            )
+        })
+    {
+        return Ok(());
+    }
+    let actor = arkret_wire::ActorId::account(account.clone());
+    let join = current
+        .current_state_entries
+        .iter()
+        .find_map(|row| row.parent_membership_revision(&snapshot.realm_id, &actor));
+    if join.is_none() || snapshot.parent_membership_revision(&actor) != join {
+        return Err(undisclosable(
+            "fresh Sidecar bootstrap parent join changed during request",
+        ));
+    }
+    Ok(())
+}
+
 /// Preserve a verified original from this read's governing cut. The local
 /// replica can advance during the network round trip; that does not rewrite
 /// the signed object or regress any installed current state.
@@ -737,6 +767,9 @@ pub(crate) async fn install_verified_account_snapshot(
                     "the governing Snapshot does not cover this read's complete known cut",
                 )
                 .into());
+            }
+            if genesis_original.is_some() {
+                require_fresh_sidecar_join(snapshot, &material, account)?;
             }
             require_observed_cut(snapshot, minimum, &material)?;
             let signer = arkret_identity::verification_method_did(

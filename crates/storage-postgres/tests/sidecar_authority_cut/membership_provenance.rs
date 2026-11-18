@@ -488,6 +488,19 @@ pub(super) async fn assert_agent_generation_after_consume(
         history.purpose,
         arkret_wire::RealmSnapshotPurpose::StreamHistory
     );
+    let history_request = |join: &arkret_wire::RealmCommitId| {
+        arkret_models_collaboration::governance::realm_join_intake::PeerRealmJoinBootstrapRequestBody {
+            request_id: arkret_wire::RequestId::new(format!("ak:request:{}", uuid::Uuid::now_v7())).unwrap(),
+            realm_id: realm.clone(),
+            member_account_id: agent.clone(),
+            membership_commit_id: join.clone(),
+            history_stream_ref: Some(stream.clone()),
+        }
+    };
+    let original_request = history_request(&original_join.commit.commit_id);
+    original_request
+        .validate_history_snapshot(&history)
+        .unwrap();
     let history_basis = history.history_basis.as_ref().unwrap();
     assert_eq!(history_basis.account_id, *agent);
     assert_eq!(history_basis.stream_ref, stream);
@@ -507,6 +520,13 @@ pub(super) async fn assert_agent_generation_after_consume(
             .any(|floor| floor.stream_ref == stream
                 && floor.oldest_position == accepted_add.commit.stream_position)
     );
+    // Freeze H's independently accepted pre-request cut, rather than deriving
+    // its opening join from the reply being archived.
+    let archive_minimum = store
+        .realm_state_snapshot_material_for_account(realm, agent)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(
         coland_storage_postgres::PgIssuedRealmSnapshotArchive::new(pool.clone())
             .by_ref(agent, realm, &history.snapshot_id, &controller.station_id)
@@ -769,7 +789,16 @@ pub(super) async fn assert_agent_generation_after_consume(
         .is_none(),
         "a newly confirmed MLS cut does not revive the old join request"
     );
-    let history = governing_history_snapshot(
+    let fresh_request = history_request(&rejoin.authority_commit.commit.commit_id);
+    assert!(
+        fresh_request
+            .validate_history_snapshot(&history)
+            .unwrap_err()
+            .to_string()
+            .contains("requested parent join"),
+        "the receiving Station must reject the original signed for the previous join"
+    );
+    let fresh_history = governing_history_snapshot(
         pool,
         principal,
         agent,
@@ -779,8 +808,11 @@ pub(super) async fn assert_agent_generation_after_consume(
     .await
     .unwrap()
     .unwrap();
+    fresh_request
+        .validate_history_snapshot(&fresh_history)
+        .unwrap();
     assert!(
-        history
+        fresh_history
             .retention_and_history_floor
             .stream_floors
             .iter()
@@ -800,6 +832,66 @@ pub(super) async fn assert_agent_generation_after_consume(
             .any(|floor| floor.stream_ref == stream
                 && floor.oldest_position == accepted.commit.stream_position)
     );
+    // The old request still matches its genuine signed Ja1 reply. A rejoin
+    // raced that request: final fresh-bootstrap archival must consult Ja2 in
+    // the durable native cut, before floor comparison or any archive writes.
+    original_request
+        .validate_history_snapshot(&history)
+        .unwrap();
+    let original_genesis = store
+        .committed_event(&realm.event_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let genesis_fact = store
+        .producer_signer_fact(&original_genesis.event, &original_genesis.commit)
+        .await
+        .unwrap();
+    let original_genesis = arkret_wire::CommittedEventFullView {
+        event: original_genesis.event,
+        commit: original_genesis.commit,
+    };
+    let parent_stream = CommitStreamRef::Realm {
+        realm_id: realm.clone(),
+    };
+    let archive_state = || async {
+        let mut conn = pool.get().await.unwrap();
+        let rows = diesel::sql_query(
+            "SELECT jsonb_build_object(\
+                'snapshots',(SELECT coalesce(jsonb_agg(to_jsonb(s) ORDER BY s.snapshot_id),'[]'::jsonb) FROM realm_state_snapshots s),\
+                'issuances',(SELECT coalesce(jsonb_agg(to_jsonb(i) ORDER BY i.snapshot_id,i.account_id),'[]'::jsonb) FROM realm_state_snapshot_issuances i),\
+                'events',(SELECT count(*) FROM canonical_events),\
+                'commits',(SELECT count(*) FROM realm_commits)) AS value",
+        )
+        .get_result::<StoredSource>(&mut *conn)
+        .await
+        .unwrap()
+        .value;
+        drop(conn);
+        let heads = (
+            store.held_stream_head_commit(&parent_stream).await.unwrap(),
+            store.held_stream_head_commit(&stream).await.unwrap(),
+        );
+        (rows, heads)
+    };
+    let before_archive = archive_state().await;
+    let archive_error = store
+        .install_verified_account_bootstrap_snapshot(
+            agent,
+            &controller.station_id,
+            &history,
+            &archive_minimum,
+            &(original_genesis, genesis_fact),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        archive_error
+            .to_string()
+            .contains("fresh Sidecar bootstrap parent join changed during request"),
+        "the archive must reject the changed opening join, not merely a changed floor: {archive_error}"
+    );
+    assert_eq!(archive_state().await, before_archive);
     let scan = store
         .scan_stream_for_account(
             &arkret_wire::StreamScanRequestBody {

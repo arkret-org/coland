@@ -56,6 +56,7 @@ pub(super) async fn assert_current(
         .unwrap()
         .unwrap()
         .value;
+    publish_human_root(pool, principal, group, &current).await;
     use coland_storage::KeyBackupStore as _;
     let backups = coland_storage_postgres::PgKeyBackupStore { pool: pool.clone() }
         .snapshot_all()
@@ -309,4 +310,105 @@ pub(super) async fn assert_current(
             "a refused control cannot advance an accepted native head"
         );
     }
+}
+
+async fn publish_human_root(
+    pool: &PgPool,
+    principal: &pcr_genesis::PcrGenesisFixture,
+    group: &arkret_mls::ArkretMlsGroup,
+    current: &arkret_wire::MlsGroupValue,
+) {
+    use arkret_crypto::content_history::{ContentRootBackupAuthor, ContentRootBackupDraft};
+    use arkret_event_draft::EventPayloadExt as _;
+    use arkret_models_crypto::*;
+    use coland_storage::{DeviceRevocationStore as _, KeyBackupStore as _};
+    use ed25519_dalek::Signer as _;
+
+    let (head, custody) = super::sidecar_agent::history_custody(pool, principal).await;
+    let generation = coland_storage_postgres::PgDeviceRevocationStore { pool: pool.clone() }
+        .pcr_device_generation(&principal.history.account)
+        .await
+        .unwrap()
+        .unwrap();
+    let declaration = PgAuthorityCommitStore { pool: pool.clone() }
+        .committed_event(&group.scope().realm_id().event_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let context = ContentRootContext {
+        effective_scope: group.scope().clone(),
+        genesis_event_ref: current.genesis_event_ref.clone(),
+        epoch: current.epoch,
+        group_state_ref: current.current_mls_commit_event_ref.clone(),
+        cipher_suite: group.group_ciphersuite_canonical_id().unwrap().to_owned(),
+        encryption_backup_strategy: declaration
+            .event
+            .as_realm_create()
+            .unwrap()
+            .object
+            .initial_encryption_backup_strategy,
+        backup_strategy_ref: declaration.event.event_id,
+    };
+    let root = group.export_content_root(&context).unwrap();
+    let recovery =
+        arkret_crypto::identity_root::derive_identity_recovery_key_material(&[149; 32], 0).unwrap();
+    let signer =
+        ed25519_dalek::SigningKey::from_bytes(&principal.history.founding_device_signing_seed);
+    let packet = ContentRootBackupDraft {
+        backup_id: arkret_wire::BackupId::new(format!("ak:backup:{}", uuid::Uuid::now_v7()))
+            .unwrap(),
+        actor_id: ActorId::account(principal.history.account.clone()),
+        created_at: arkret_canonical::normalize_timestamp_canonical(
+            chrono::Utc::now().max(head.committed_at),
+        ),
+        expires_at: None,
+        author: ContentRootBackupAuthor::Device {
+            binding: arkret_crypto::backup::KeyBackupAuthorizationBinding {
+                device_id: principal.history.founding_device_id.clone(),
+                verification_method: principal.history.device_verification_method.clone(),
+                signature_algorithm: KeyBackupSignatureAlgorithm::Ed25519,
+                device_authorize_event_id: principal.history.events[1].event_id.clone(),
+            },
+            source: KeyBackupSourceCommitRef {
+                realm_commit_id: head.commit_id,
+                device_generation_ref: generation.current_device_generation_ref,
+            },
+        },
+        recipient_key_ref: custody.recipient_key_ref.to_string(),
+        recovery_policy_ref: custody.recovery_policy_ref,
+        domain_separation: KeyBackupDomainSeparation {
+            subdomain: "key_backup".into(),
+            aead_aad_extensions: Default::default(),
+        },
+        series_id: arkret_wire::BackupSeriesId::new(format!(
+            "ak:backup_series:{}",
+            uuid::Uuid::now_v7()
+        ))
+        .unwrap(),
+        series_sequence: 0,
+        supersedes: None,
+        custody: None,
+    }
+    .seal(
+        vec![ContentRootBackupEntry {
+            item_kind: ContentRootItemKind::ContentEpochRoot,
+            secret_id: "sidecar_current_epoch_root".into(),
+            root_ref: arkret_crypto::content_history::content_root_ref(&root, &context).unwrap(),
+            root_context: context,
+            root_base64url: root,
+        }],
+        &recovery.backup_hpke_public_key,
+        |bytes| Ok(signer.sign(bytes).to_bytes().to_vec()),
+    )
+    .unwrap();
+    let backups = coland_storage_postgres::PgKeyBackupStore { pool: pool.clone() };
+    let body = serde_json::to_value(&packet).unwrap();
+    backups
+        .put(packet.backup_id.to_string(), body.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        backups.get(packet.backup_id.as_str()).await.unwrap(),
+        Some(body)
+    );
 }

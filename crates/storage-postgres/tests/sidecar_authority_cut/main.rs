@@ -5337,9 +5337,9 @@ async fn sidecar_post_tree_preserves_historical_endpoint_and_rejects_paused_self
     let footprint = counts(pool).await;
     let error = uow.commit_event(request).await.unwrap_err();
     assert!(
-        error
-            .to_string()
-            .contains("the Sidecar post-transition tree retains an unauthorized endpoint"),
+        error.to_string().contains(
+            "the Sidecar post-transition tree retains an unauthorized Actor or historical endpoint"
+        ),
         "paused extra-leaf SelfUpdate must reach the new tree gate: {error}"
     );
     assert_eq!(counts(pool).await, footprint);
@@ -13867,7 +13867,7 @@ async fn agent_content_session_circle_requires_both_exact_memberships() {
 async fn agent_content_session_owned_grant_requires_current_source_and_never_revives_on_rejoin() {
     fixture_step(fixture_future(|| async {
         use arkret_wire::ActorId;
-        let fixture = boxed_owned_consumer_fixture(1).await;
+        let fixture = fixture_step(boxed_owned_consumer_fixture(1)).await;
         let pool = &fixture.pool;
         let realm = &fixture.head.event.realm_id;
         let controller = ActorId::account(fixture.controller.history.account.clone());

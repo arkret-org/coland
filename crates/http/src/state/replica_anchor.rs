@@ -541,16 +541,11 @@ async fn prepare_history_original(
     .await?;
     let outcome: PeerRealmJoinBootstrapResponseBody =
         serde_json::from_slice(&body).map_err(temporary)?;
-    let history = outcome.snapshot.clone();
-    history.validate_purpose().map_err(temporary)?;
-    let signed = history
-        .history_basis
-        .as_ref()
-        .ok_or("source returned a full snapshot for history")?;
+    let history = &outcome.snapshot;
+    request
+        .validate_history_snapshot(history)
+        .map_err(temporary)?;
     if outcome.request_id != request.request_id
-        || history.realm_id != *realm_id
-        || signed.account_id != *account
-        || signed.stream_ref != head.stream_ref
         || outcome.visible_stream_heads != history.visible_stream_heads
     {
         return Err("history response differs from requested coverage".into());
@@ -576,14 +571,14 @@ async fn prepare_history_original(
         verify_bootstrap_genesis(state, &outcome, &mut served).await?,
         outcome.producer_signer_fact.clone(),
     );
-    verify_snapshot(state, &mut served, &history).await?;
-    complete_snapshot_tails(state, &history, material, &mut served).await?;
+    verify_snapshot(state, &mut served, history).await?;
+    complete_snapshot_tails(state, history, material, &mut served).await?;
     state
         .authority_commits()
         .install_verified_account_bootstrap_snapshot(
             account,
             &state.service_core_id(),
-            &history,
+            history,
             material,
             &genesis_original,
         )

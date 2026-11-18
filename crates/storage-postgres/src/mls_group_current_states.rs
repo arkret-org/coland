@@ -551,11 +551,13 @@ async fn install_authorized_mls_group(
                 resolution.clone()
             },
         };
-        crate::mls_roster_attest_add::install_in_connection(
-            conn,
-            &verified,
-            &transaction.expected_authority.service_id,
-        )
+        crate::boxed_future(|| {
+            crate::mls_roster_attest_add::install_in_connection(
+                conn,
+                &verified,
+                &transaction.expected_authority.service_id,
+            )
+        })
         .await?;
     }
     Ok(())

@@ -2,6 +2,7 @@
 use arkret_models_collaboration::governance::grant_constraint::{
     CapabilityGrant, GrantConstraint, GrantConstraintKind, GrantConstraintSubkind,
 };
+use arkret_policy::grant_authority::approval_not_before;
 use arkret_wire::{
     ApprovalContext, CapabilityActionId, Event, GrantId, RealmCommit, WireResourceSelector,
 };
@@ -48,15 +49,6 @@ pub(crate) fn approval_deadline(
     })
 }
 
-pub(crate) fn approval_not_before(grant: &CapabilityGrant) -> chrono::DateTime<chrono::Utc> {
-    grant
-        .constraints
-        .iter()
-        .filter(|constraint| constraint.constraint_kind == GrantConstraintKind::Temporal)
-        .filter_map(|constraint| constraint.not_before)
-        .fold(grant.issued_at, std::cmp::max)
-}
-
 /// A grant-context vote retains its declared time limits when reused by the
 /// independent governance layer. Another fresh vote cannot revive its nonce.
 pub(crate) fn grant_vote_is_current(
@@ -65,7 +57,7 @@ pub(crate) fn grant_vote_is_current(
     signature: &arkret_wire::ApprovalSignature,
     at: chrono::DateTime<chrono::Utc>,
 ) -> bool {
-    if signature.input.approved_at < approval_not_before(grant) {
+    if signature.input.approved_at < approval_not_before(grant, signature.input.action) {
         return false;
     }
     grant
@@ -244,7 +236,7 @@ async fn require_with_source(
             {
                 continue;
             }
-            if vote.input.approved_at < approval_not_before(grant)
+            if vote.input.approved_at < approval_not_before(grant, vote.input.action)
                 || !approval_deadline(vote.input.approved_at, source.at(), timeout)
             {
                 continue;

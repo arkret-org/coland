@@ -349,7 +349,8 @@ fn accepted_approvals(
                 ),
                 None => None,
             };
-            if vote.input.approved_at < crate::grant_approval_admission::approval_not_before(grant)
+            if vote.input.approved_at
+                < arkret_policy::grant_authority::approval_not_before(grant, vote.input.action)
                 || !crate::grant_approval_admission::approval_deadline(
                     vote.input.approved_at,
                     commit.committed_at,

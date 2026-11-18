@@ -199,9 +199,12 @@ async fn message_create_approval_transaction(pool: PgPool, setup: Box<GrantSetup
     let requirement = Box::pin(ordinary_realm::source_request(&pool, next_request(
         &head, arkret_wire::EventKind::CapabilityGrant, &founder(),
         json!({"grant":{"schema":"ak.schema.capability.v1","realm_id":realm,
-            "issuer_id":actor,"subject":actor,"actions":["ak.message.create"],"resources":[target],
+            "issuer_id":actor,"subject":actor,"actions":["ak.message.create","ak.strand.move"],"resources":[target],
             "constraints":[{"constraint_kind":"claim_based","constraint_subkind":"approval","effect":"require_review","approval_required":true,
-                "approval_mode":"before_commit","approval_principal_ids":roster,"approval_threshold":"majority","timeout":"PT60S"}],
+                "approval_mode":"before_commit","approval_principal_ids":roster,"approval_threshold":"majority","timeout":"PT60S"},
+                {"constraint_kind":"temporal","effect":"allow","applies_to_actions":["ak.message.create"],"not_before":arkret_canonical::format_timestamp_canonical(at)},
+                {"constraint_kind":"temporal","effect":"allow","applies_to_actions":["ak.strand.move"],"not_before":arkret_canonical::format_timestamp_canonical(at + chrono::TimeDelta::hours(1))},
+                {"constraint_kind":"temporal","effect":"deny","applies_to_actions":["ak.message.create"],"not_before":arkret_canonical::format_timestamp_canonical(at + chrono::TimeDelta::hours(2))}],
             "issuer_authority_refs":[{"kind":"realm_root","realm_id":realm,"authority_event_ref":setup.opened.unit.transactions[0].event.event_id,"authority_generation":"0"}],
             "issued_at":arkret_canonical::format_timestamp_canonical(at)}}), at,
     ))).await;

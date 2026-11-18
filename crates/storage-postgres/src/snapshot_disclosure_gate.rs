@@ -906,6 +906,291 @@ pub(crate) async fn account_snapshot_material_in_connection(
     actor_snapshot_material_in_connection(conn, realm_id, &ActorId::account(account.clone())).await
 }
 
+/// The authenticated owning H has asserted its native/effective/read ceiling.
+/// G proves only its own exact Sidecar membership, policy and accepted MLS cut.
+/// This entry never constructs an Agent full-recovery disclosure or reads H's PCR.
+pub(crate) async fn governing_sidecar_agent_history_material_in_connection(
+    conn: &mut AsyncPgConnection,
+    realm: &RealmId,
+    account: &AccountId,
+    sidecar: &arkret_wire::SidecarId,
+    expected_join: &arkret_wire::RealmCommitId,
+) -> PersistenceResult<Option<coland_storage::RealmStateSnapshotMaterial>> {
+    use arkret_wire::{RealmSnapshotHistoryBasis, RealmSnapshotPurpose};
+    let Some(controller) =
+        crate::sidecar_membership_provenance::controller_in_connection(conn, realm, sidecar)
+            .await?
+    else {
+        return Ok(None);
+    };
+    let caller = ActorId::account(account.clone());
+    if account == &controller
+        || account.station_id != controller.station_id
+        || !crate::sidecar_membership_provenance::actor_is_member_in_connection(
+            conn, realm, sidecar, &caller,
+        )
+        .await?
+    {
+        return Ok(None);
+    }
+    let scope = arkret_wire::ScopeRef::Sidecar {
+        realm_id: realm.clone(),
+        sidecar_id: sidecar.clone(),
+    };
+    let Some(group) = crate::mls_group_current_states::locked_group(
+        conn,
+        &crate::mls_group_current_states::scope_key(&scope)?,
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    if !crate::sidecar_membership_provenance::current_state_is_confirmed(
+        conn, realm, sidecar, &group,
+    )
+    .await?
+        || !crate::sidecar_effective_access::accepted_tree_contains_actor_in_connection(
+            conn, realm, sidecar, &caller,
+        )
+        .await?
+    {
+        return Ok(None);
+    }
+    let Some(parent_floor) =
+        crate::account_stream_scan::member_realm_floor_in_connection(conn, realm, &caller).await?
+    else {
+        return Ok(None);
+    };
+    let Some(floor) = crate::sidecar_membership_provenance::agent_floor_in_connection(
+        conn, realm, sidecar, &caller,
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    let Some(mut source) =
+        crate::authority_commit::realm_state_snapshot_material_in_connection(conn, realm).await?
+    else {
+        return Ok(None);
+    };
+    prove_handoff_tenure_in_connection(conn, &source).await?;
+    require_audited_families_in_connection(conn).await?;
+    let stream = CommitStreamRef::Sidecar {
+        realm_id: realm.clone(),
+        sidecar_id: sidecar.clone(),
+    };
+    let member = CurrentSelector::MemberState {
+        actor_id: caller.clone(),
+    };
+    let definition = CurrentSelector::Sidecar {
+        sidecar_id: sidecar.clone(),
+    };
+    if !source.current_state_entries.iter().any(|row| matches!(row,
+        CurrentState::Value { selector, source_stream_ref: CommitStreamRef::Realm { realm_id }, revision, .. }
+        if selector == &member && realm_id == realm && &revision.commit_id == expected_join))
+    {
+        return Ok(None);
+    }
+    source.current_state_entries.retain(|row| {
+        let CurrentState::Value {
+            selector,
+            source_stream_ref,
+            ..
+        } = row;
+        source_stream_ref == &stream
+            || selector == &member
+            || selector == &definition
+            || matches!(
+                selector,
+                CurrentSelector::RealmGenesis
+                    | CurrentSelector::RealmAuthorityRoot
+                    | CurrentSelector::RealmHistoryAccess
+            )
+    });
+    let facts = scoped_disclosure_facts_in_connection(
+        conn,
+        realm,
+        &caller,
+        &source,
+        &source,
+        Some((sidecar, &floor, &parent_floor)),
+    )
+    .await?;
+    let mut material = disclose_to_account(source, account, &facts)?;
+    material.current_state_entries.retain(|row| {
+        let CurrentState::Value {
+            selector,
+            source_stream_ref,
+            ..
+        } = row;
+        (source_stream_ref == &stream
+            && !matches!(
+                selector,
+                CurrentSelector::Circle { .. } | CurrentSelector::Sidecar { .. }
+            ))
+            || selector == &member
+            || selector == &definition
+    });
+    let policies =
+        crate::policy_current_states::read_scoped_agent_management_policy_snapshot_in_connection(
+            conn, realm, None,
+        )
+        .await?;
+    let at = chrono::Utc::now();
+    for row in &material.current_state_entries {
+        let CurrentState::Value {
+            source_stream_ref,
+            revision,
+            ..
+        } = row;
+        let original = crate::account_content_delivery::current_source_in_connection(
+            conn,
+            realm,
+            source_stream_ref,
+            revision,
+        )
+        .await?;
+        let resources = crate::agent_management_admission::event_content_resources(&original)?;
+        for operation in [
+            arkret_models_collaboration::governance::operation_wire::AgentPolicyOperation::Read,
+            arkret_models_collaboration::governance::operation_wire::AgentPolicyOperation::Deliver,
+        ] {
+            crate::agent_management_admission::require_content_policy(
+                &policies,
+                realm,
+                &controller,
+                account,
+                operation,
+                arkret_wire::CapabilityActionId::ObjectRead,
+                &resources,
+                at,
+            )?;
+        }
+    }
+    let mut dependencies = Vec::new();
+    for selector in [&member, &definition] {
+        let Some(CurrentState::Value {
+            source_stream_ref,
+            revision,
+            ..
+        }) = material.current_state_entries.iter().find(|row| {
+            matches!(row,
+                CurrentState::Value { selector: actual, .. } if actual == selector)
+        })
+        else {
+            return Ok(None);
+        };
+        if source_stream_ref
+            != &(CommitStreamRef::Realm {
+                realm_id: realm.clone(),
+            })
+        {
+            return Err(rejected(
+                "Sidecar history dependency is not on its parent Realm",
+            ));
+        }
+        let original = crate::account_content_delivery::current_source_in_connection(
+            conn,
+            realm,
+            source_stream_ref,
+            revision,
+        )
+        .await?;
+        dependencies.push(arkret_wire::CommittedEventRef {
+            event_id: original.event_id,
+            commit_id: revision.commit_id.clone(),
+            stream_ref: source_stream_ref.clone(),
+            stream_position: revision.stream_position,
+        });
+    }
+    dependencies.sort();
+    let Some(head) = material
+        .visible_stream_heads
+        .iter()
+        .find(|head| head.stream_ref == stream)
+    else {
+        return Ok(None);
+    };
+    material.history_basis = Some(RealmSnapshotHistoryBasis {
+        account_id: account.clone(),
+        stream_ref: stream.clone(),
+        anchor_position: head.stream_position,
+        anchor_commit_ref: head.commit_id.clone(),
+        accepted_dependency_refs: dependencies,
+    });
+    material.purpose = RealmSnapshotPurpose::StreamHistory;
+    let sources = std::collections::BTreeSet::from([
+        stream,
+        CommitStreamRef::Realm {
+            realm_id: realm.clone(),
+        },
+    ]);
+    material
+        .visible_stream_heads
+        .retain(|head| sources.contains(&head.stream_ref));
+    material
+        .retention_and_history_floor
+        .stream_floors
+        .retain(|floor| sources.contains(&floor.stream_ref));
+    Ok(Some(material))
+}
+
+async fn require_audited_families_in_connection(
+    conn: &mut AsyncPgConnection,
+) -> PersistenceResult<()> {
+    let families = sql_query(
+        "SELECT tablename FROM pg_catalog.pg_tables \
+         WHERE schemaname=current_schema() AND tablename LIKE '%_current_states'",
+    )
+    .load::<TableNameRow>(&mut *conn)
+    .await
+    .map_err(PersistenceError::database)?;
+    if families
+        .iter()
+        .any(|family| !AUDITED_FAMILIES.contains(&family.tablename.as_str()))
+    {
+        return Err(rejected("an unaudited typed-current family is installed"));
+    }
+    Ok(())
+}
+
+/// Exercise the G-only production issuer with already accepted PG source material.
+/// This port does not attest that an HTTP peer, remote H gate or endpoint was verified.
+#[cfg(feature = "test-support")]
+pub async fn issue_governing_sidecar_agent_history_for_test(
+    pool: &PgPool,
+    realm: &RealmId,
+    account: &AccountId,
+    issuer: &arkret_wire::DidCoreId,
+    sidecar: &arkret_wire::SidecarId,
+    expected_join: &arkret_wire::RealmCommitId,
+    sign: coland_storage::RealmStateSnapshotSigner<'_>,
+) -> PersistenceResult<Option<arkret_wire::RealmStateSnapshot>> {
+    let mut conn =
+        crate::issued_realm_snapshots::SnapshotIssuanceConnection::acquire(pool, realm).await?;
+    let result = conn
+        .transaction::<_, PgTransactionError, _>(async |conn| {
+            sql_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+                .execute(&mut *conn)
+                .await?;
+            crate::sync_cursor::retention::lock(conn, false).await?;
+            crate::issued_realm_snapshots::issue_governing_sidecar_agent_history_in_connection(
+                conn,
+                realm,
+                account,
+                issuer,
+                sidecar,
+                expected_join,
+                sign,
+            )
+            .await
+            .map_err(Into::into)
+        })
+        .await
+        .map_err(crate::issued_realm_snapshots::snapshot_transaction_error);
+    conn.finish(result).await
+}
+
 pub(crate) async fn actor_snapshot_material_in_connection(
     conn: &mut AsyncPgConnection,
     realm_id: &RealmId,
@@ -956,19 +1241,7 @@ pub(crate) async fn actor_snapshot_candidates_in_connection(
         return Ok(None);
     };
     crate::pcr_private_authority::validate_installed_governance(conn, realm_id).await?;
-    let families = sql_query(
-        "SELECT tablename FROM pg_catalog.pg_tables \
-         WHERE schemaname=current_schema() AND tablename LIKE '%_current_states'",
-    )
-    .load::<TableNameRow>(&mut *conn)
-    .await
-    .map_err(PersistenceError::database)?;
-    if families
-        .iter()
-        .any(|family| !AUDITED_FAMILIES.contains(&family.tablename.as_str()))
-    {
-        return Err(rejected("an unaudited typed-current family is installed"));
-    }
+    require_audited_families_in_connection(conn).await?;
     let caller = actor.clone();
     let controller = if actor.as_account_id().is_some()
         && crate::committed_disclosure::ordinary_agent_read_ceiling(
@@ -1223,8 +1496,26 @@ async fn disclosure_facts_in_connection(
     authority_material: &coland_storage::RealmStateSnapshotMaterial,
     material: &coland_storage::RealmStateSnapshotMaterial,
 ) -> PersistenceResult<DisclosureFacts> {
-    crate::circle_current_states::require_actor_currents_in_connection(conn, Some(realm_id), actor)
+    scoped_disclosure_facts_in_connection(conn, realm_id, actor, authority_material, material, None)
+        .await
+}
+
+async fn scoped_disclosure_facts_in_connection(
+    conn: &mut AsyncPgConnection,
+    realm_id: &RealmId,
+    actor: &ActorId,
+    authority_material: &coland_storage::RealmStateSnapshotMaterial,
+    material: &coland_storage::RealmStateSnapshotMaterial,
+    sidecar_history: Option<(&arkret_wire::SidecarId, &ReadableFloor, &ReadableFloor)>,
+) -> PersistenceResult<DisclosureFacts> {
+    if sidecar_history.is_none() {
+        crate::circle_current_states::require_actor_currents_in_connection(
+            conn,
+            Some(realm_id),
+            actor,
+        )
         .await?;
+    }
     let undisclosed_family_row = sql_query(
         "SELECT (EXISTS(SELECT 1 FROM realm_link_current_states WHERE realm_id=$1) \
             OR EXISTS(SELECT 1 FROM policy_current_states WHERE realm_id=$1 \
@@ -1268,12 +1559,12 @@ async fn disclosure_facts_in_connection(
             "snapshot cut includes an uncommitted Event".to_owned(),
         ));
     }
-    let caller_floor = crate::account_stream_scan::snapshot_realm_floor_in_connection(
-        conn,
-        realm_id,
-        &actor.clone(),
-    )
-    .await?;
+    let caller_floor = if let Some((_, _, parent_floor)) = sidecar_history {
+        Some(parent_floor.clone())
+    } else {
+        crate::account_stream_scan::snapshot_realm_floor_in_connection(conn, realm_id, actor)
+            .await?
+    };
     let mut message_streams = std::collections::BTreeMap::new();
     for entry in &material.current_state_entries {
         let CurrentState::Value {
@@ -1444,7 +1735,10 @@ async fn disclosure_facts_in_connection(
     let mut sidecar_floors = std::collections::BTreeMap::new();
     let mut sidecar_public_floors = std::collections::BTreeMap::new();
     let mut owned_sidecars = std::collections::BTreeSet::new();
-    if caller_floor.is_some() {
+    if let Some((sidecar, floor, _)) = sidecar_history {
+        sidecar_floors.insert(sidecar.clone(), floor.clone());
+        owned_sidecars.insert(sidecar.clone());
+    } else if caller_floor.is_some() {
         for row in &authority_material.current_state_entries {
             if let CurrentState::Value {
                 selector: CurrentSelector::Sidecar { sidecar_id },

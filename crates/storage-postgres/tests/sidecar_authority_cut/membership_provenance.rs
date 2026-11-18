@@ -459,6 +459,61 @@ pub(super) async fn assert_agent_generation_after_consume(
     );
     let original_endpoint = agent_origin(pool, &scope, agent).await;
     let before = groups.current(&scope).await.unwrap().unwrap();
+    assert!(
+        governing_history_snapshot(
+            pool,
+            principal,
+            controller,
+            sidecar,
+            &original_join.commit.commit_id,
+        )
+        .await
+        .unwrap()
+        .is_none(),
+        "wrong subject: an accepted Agent join cannot issue a Q for its controller"
+    );
+    // Exercise the exact G-only issuer with accepted sources. This trusted PG
+    // boundary does not claim that a remote H request or HTTP gate ran here.
+    let history = governing_history_snapshot(
+        pool,
+        principal,
+        agent,
+        sidecar,
+        &original_join.commit.commit_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        history.purpose,
+        arkret_wire::RealmSnapshotPurpose::StreamHistory
+    );
+    let history_basis = history.history_basis.as_ref().unwrap();
+    assert_eq!(history_basis.account_id, *agent);
+    assert_eq!(history_basis.stream_ref, stream);
+    assert_eq!(history_basis.accepted_dependency_refs.len(), 2);
+    assert!(
+        history_basis
+            .accepted_dependency_refs
+            .iter()
+            .any(|source| source.commit_id == original_join.commit.commit_id
+                && source.event_id == original_join.event.event_id)
+    );
+    assert!(
+        history
+            .retention_and_history_floor
+            .stream_floors
+            .iter()
+            .any(|floor| floor.stream_ref == stream
+                && floor.oldest_position == accepted_add.commit.stream_position)
+    );
+    assert!(
+        coland_storage_postgres::PgIssuedRealmSnapshotArchive::new(pool.clone())
+            .by_ref(agent, realm, &history.snapshot_id, &controller.station_id)
+            .await
+            .is_err(),
+        "an H-held floor original does not grant ordinary Agent by-ref access to its dependencies"
+    );
     assert_eq!(
         before.value.current_mls_commit_event_ref,
         accepted_add.event.event_id
@@ -505,6 +560,19 @@ pub(super) async fn assert_agent_generation_after_consume(
     assert_ne!(
         rejoin.authority_commit.event.event_id,
         original_join.event.event_id
+    );
+    assert!(
+        governing_history_snapshot(
+            pool,
+            principal,
+            agent,
+            sidecar,
+            &original_join.commit.commit_id
+        )
+        .await
+        .unwrap()
+        .is_none(),
+        "the prior join cannot disclose the new Agent incarnation"
     );
     let pending = store
         .realm_state_snapshot_material_for_account(realm, agent)
@@ -688,6 +756,37 @@ pub(super) async fn assert_agent_generation_after_consume(
         source_for_event(pool, &accepted_add.event.event_id).await,
         original_source
     );
+    assert!(
+        governing_history_snapshot(
+            pool,
+            principal,
+            agent,
+            sidecar,
+            &original_join.commit.commit_id
+        )
+        .await
+        .unwrap()
+        .is_none(),
+        "a newly confirmed MLS cut does not revive the old join request"
+    );
+    let history = governing_history_snapshot(
+        pool,
+        principal,
+        agent,
+        sidecar,
+        &rejoin.authority_commit.commit.commit_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        history
+            .retention_and_history_floor
+            .stream_floors
+            .iter()
+            .any(|floor| floor.stream_ref == stream
+                && floor.oldest_position == accepted.commit.stream_position)
+    );
     let snapshot = store
         .realm_state_snapshot_material_for_account(realm, agent)
         .await
@@ -734,6 +833,157 @@ pub(super) async fn assert_agent_generation_after_consume(
         source_for_event(pool, &accepted.event.event_id).await,
         confirmed
     );
+    let head = store
+        .held_stream_head_commit(&CommitStreamRef::Realm {
+            realm_id: realm.clone(),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let mut previous = rejoin.authority_commit.clone();
+    previous.event = store
+        .committed_event(&head.event_ref)
+        .await
+        .unwrap()
+        .unwrap()
+        .event;
+    previous.commit = head;
+    let founder = store
+        .committed_event(&realm.event_id())
+        .await
+        .unwrap()
+        .unwrap()
+        .event
+        .actor_id;
+    let policy_id = format!("ak:policy:{}", uuid::Uuid::now_v7());
+    let created_at = arkret_canonical::format_timestamp_canonical(
+        previous.commit.committed_at + chrono::TimeDelta::milliseconds(1),
+    );
+    let mut prior_policy = None;
+    for stage in ["event_read_denied", "deliver_denied", "allowed"] {
+        let rule = if stage == "event_read_denied" {
+            json!({"rule_id":"g_history_delivery","kind":"agent","effect":"deny",
+                "agent_target":{"kind":"controller","controller_account_id":controller},
+                "agent_operations":["read","deliver"],"actions":["ak.event.read"]})
+        } else {
+            json!({"rule_id":"g_history_delivery","kind":"agent",
+                "effect":if stage == "deliver_denied" { "deny" } else { "allow" },
+                "agent_target":{"kind":"controller","controller_account_id":controller},
+                "agent_operations":["deliver"]})
+        };
+        let at = previous.commit.committed_at + chrono::TimeDelta::milliseconds(1);
+        let candidate = ordinary_realm::next_request_for_actor(
+            &previous,
+            EventKind::PolicySet,
+            founder.clone(),
+            json!({"policy_id":policy_id,"expected_commit_id":prior_policy,
+                "value":{"schema":"ak.schema.policy.v1","id":policy_id,"realm_id":realm,
+                    "policy_kind":"agent","default_effect":"allow",
+                    "created_by":founder,"created_at":created_at,
+                    "rules":[rule]}}),
+            at,
+        );
+        let candidate = ordinary_realm::source_request(pool, candidate).await;
+        fixture_commit_step(pool, candidate.clone()).await.unwrap();
+        previous = candidate.authority_commit;
+        prior_policy = Some(previous.commit.commit_id.clone());
+        let issued = governing_history_snapshot(
+            pool,
+            principal,
+            agent,
+            sidecar,
+            &rejoin.authority_commit.commit.commit_id,
+        )
+        .await;
+        if stage == "deliver_denied" {
+            assert!(
+                issued
+                    .unwrap_err()
+                    .to_string()
+                    .contains("capability_denied"),
+                "G Deliver deny must refuse despite Read default allow"
+            );
+        } else {
+            assert!(
+                issued.unwrap().is_some(),
+                "ObjectRead rows remain available when only EventRead is denied or Deliver is allowed"
+            );
+        }
+    }
+}
+
+async fn governing_history_snapshot(
+    pool: &coland_storage_postgres::PgPool,
+    principal: &pcr_genesis::PcrGenesisFixture,
+    agent: &AccountId,
+    sidecar: &SidecarId,
+    join: &arkret_wire::RealmCommitId,
+) -> coland_storage::PersistenceResult<Option<arkret_wire::RealmStateSnapshot>> {
+    let key = ed25519_dalek::SigningKey::from_bytes(&[83; 32]);
+    let method =
+        arkret_wire::DidUrl::new(format!("{}#notary-key", principal.history.station_did)).unwrap();
+    let sign_calls = std::sync::atomic::AtomicUsize::new(0);
+    let sign = |material: &coland_storage::RealmStateSnapshotMaterial| {
+        sign_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            material.purpose,
+            arkret_wire::RealmSnapshotPurpose::StreamHistory,
+            "G must not sign a full-recovery object before the narrow original"
+        );
+        coland_services::authority_commit::build_signed_realm_state_snapshot(
+            material,
+            method.clone(),
+            &key,
+            chrono::Utc::now(),
+        )
+        .map_err(|error| coland_storage::PersistenceError::Internal(error.to_string()))
+    };
+    let realm = sidecar_realm(pool, join).await;
+    let result = coland_storage_postgres::issue_governing_sidecar_agent_history_for_test(
+        pool,
+        &realm,
+        agent,
+        &principal.history.account.station_id,
+        sidecar,
+        join,
+        &sign,
+    )
+    .await;
+    if !matches!(&result, Ok(Some(_))) {
+        assert_eq!(
+            std::sync::atomic::AtomicUsize::load(&sign_calls, std::sync::atomic::Ordering::Relaxed,),
+            0,
+            "a refused or absent G disclosure must not invoke the signer"
+        );
+    }
+    let Some(snapshot) = result? else {
+        return Ok(None);
+    };
+    let unsigned = arkret_canonical::unsigned_value(&snapshot, &["signature"]).unwrap();
+    arkret_signatures::detached_object::verify_detached_object_signature(
+        &snapshot.signature,
+        &unsigned,
+        arkret_wire::DetachedSignatureContext::RealmSnapshot,
+        &arkret_signatures::PublicKeyMaterial::Ed25519Raw {
+            bytes: key.verifying_key().as_bytes().to_vec(),
+        },
+    )
+    .unwrap();
+    snapshot.validate_purpose().unwrap();
+    Ok(Some(snapshot))
+}
+
+async fn sidecar_realm(
+    pool: &coland_storage_postgres::PgPool,
+    join: &arkret_wire::RealmCommitId,
+) -> arkret_wire::RealmId {
+    PgAuthorityCommitStore { pool: pool.clone() }
+        .committed_event_by_commit_id(join)
+        .await
+        .unwrap()
+        .unwrap()
+        .event
+        .realm_id
 }
 
 async fn source_for_event(

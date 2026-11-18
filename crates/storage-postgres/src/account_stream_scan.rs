@@ -626,7 +626,7 @@ pub(crate) async fn caller_realm_floor_in_connection(
     Ok(Some(floor))
 }
 
-async fn member_realm_floor_in_connection(
+pub(crate) async fn member_realm_floor_in_connection(
     conn: &mut AsyncPgConnection,
     realm_id: &arkret_wire::RealmId,
     caller: &ActorId,

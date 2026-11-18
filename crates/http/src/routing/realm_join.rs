@@ -282,7 +282,7 @@ async fn peer_bootstrap(
             )
             .await
             .map_err(unavailable)?
-            .ok_or_else(|| AppError::not_found("history basis unavailable"))?;
+            .ok_or_else(|| AppError::not_found("Realm join bootstrap not found"))?;
         return json_ok(bootstrap_response(state, body.request_id, bundle, snapshot).await?);
     }
     // The member Station anchors its held stream on this snapshot: the

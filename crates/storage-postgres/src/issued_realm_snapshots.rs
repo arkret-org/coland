@@ -1392,6 +1392,64 @@ async fn disclosed_basis_from_snapshot(
     Ok(Some(basis))
 }
 
+/// G core used after the authenticated H request has established its limited assertion.
+/// Tests may exercise this trusted PG boundary without changing same-station dispatch.
+pub(crate) async fn issue_governing_sidecar_agent_history_in_connection(
+    conn: &mut AsyncPgConnection,
+    realm: &arkret_wire::RealmId,
+    account: &arkret_wire::AccountId,
+    issuer: &arkret_wire::DidCoreId,
+    sidecar: &arkret_wire::SidecarId,
+    expected_join: &arkret_wire::RealmCommitId,
+    sign: coland_storage::RealmStateSnapshotSigner<'_>,
+) -> PersistenceResult<Option<arkret_wire::RealmStateSnapshot>> {
+    let Some(tenure) = sql_query(
+        "SELECT service_id,generation FROM realm_authorities WHERE realm_id=$1 FOR SHARE",
+    )
+    .bind::<Text, _>(realm.as_str())
+    .get_result::<ReadTenureRow>(&mut *conn)
+    .await
+    .optional()
+    .map_err(PersistenceError::database)?
+    else {
+        return Ok(None);
+    };
+    if tenure.service_id != issuer.as_str() {
+        return Err(window_rejected(
+            "only source governor can issue Sidecar history",
+        ));
+    }
+    let Some(material) = crate::boxed_future(|| {
+        crate::snapshot_disclosure_gate::governing_sidecar_agent_history_material_in_connection(
+            conn,
+            realm,
+            account,
+            sidecar,
+            expected_join,
+        )
+    })
+    .await?
+    else {
+        return Ok(None);
+    };
+    if i64::try_from(material.governance_generation).ok() != Some(tenure.generation) {
+        return Err(window_rejected(
+            "history generation differs from the locked tenure",
+        ));
+    }
+    let snapshot = sign(&material)?;
+    if !coland_storage::signed_snapshot_matches_material(&snapshot, &material) {
+        return Err(window_rejected("signer changed Sidecar history coverage"));
+    }
+    snapshot
+        .validate_purpose()
+        .map_err(PersistenceError::database)?;
+    coland_storage::enforce_inline_realm_state_snapshot_capacity(&snapshot)?;
+    Ok(Some(
+        issue_head_in_connection(conn, account, &material, snapshot).await?,
+    ))
+}
+
 pub(crate) async fn issue_stream_history_snapshot(
     pool: &PgPool,
     realm: &arkret_wire::RealmId,
@@ -1411,6 +1469,23 @@ pub(crate) async fn issue_stream_history_snapshot(
                 .execute(&mut *conn)
                 .await?;
             crate::sync_cursor::retention::lock(conn, false).await?;
+            if let arkret_wire::CommitStreamRef::Sidecar { sidecar_id, .. } = stream
+                && account.station_id != *issuer
+            {
+                let Some(controller) = crate::sidecar_membership_provenance::controller_in_connection(
+                    conn, realm, sidecar_id,
+                ).await? else {
+                    return Ok(None);
+                };
+                if &controller != account {
+                    let Some(expected_join) = expected_membership else {
+                        return Ok(None);
+                    };
+                    return Ok(issue_governing_sidecar_agent_history_in_connection(
+                        conn, realm, account, issuer, sidecar_id, expected_join, sign,
+                    ).await?);
+                }
+            }
             let Some(tenure) = sql_query(
                 "SELECT service_id,generation FROM realm_authorities WHERE realm_id=$1 FOR SHARE",
             )

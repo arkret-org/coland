@@ -531,20 +531,21 @@ async fn pending_agent_handshake_reads(
             source_candidate(pool, &mut genesis).await;
             let genesis = ordinary_realm::source_request(&pool, genesis).await;
             uow.commit_event(genesis.clone()).await.unwrap();
-            let envelope = group
-                .self_update_commit_with_governance_binding(&binding(
-                    Some(genesis.authority_commit.event.event_id.clone()),
-                    0,
-                    1,
-                ))
-                .unwrap();
+            let accepted_bindings = group.verified_leaf_bindings().unwrap();
+            let update_binding = binding(Some(genesis.authority_commit.event.event_id.clone()), 0, 1);
+            let envelope = group.self_update_commit_with_governance_binding(&update_binding).unwrap();
+            let (commit_info, commit_tree) = group
+                .pending_public_group_state_bytes(&envelope, &update_binding).unwrap();
             let wire = arkret_canonical::base64url_decode(&envelope.commit).unwrap();
-            tracker.process_public_handshake(&wire).unwrap();
+            let arkret_mls::MlsPublicHandshakeTransition::Commit { consumed_proposals, .. } =
+                tracker.process_public_handshake(&wire).unwrap()
+            else { panic!("a real pending controller Update is required") };
+            assert_eq!(tracker.ratchet_tree_bytes().unwrap(), commit_tree);
             let payload = coland_test_support::mls_content::commit_payload(&group,
                 genesis.authority_commit.event.event_id.clone(),
                 0,
                 &envelope,
-                binding(Some(genesis.authority_commit.event.event_id.clone()), 0, 1),
+                update_binding,
             )
             .unwrap();
             let mut commit = make_request(
@@ -560,12 +561,19 @@ async fn pending_agent_handshake_reads(
                 1,
                 tracker.export_state().unwrap(),
             ));
-            commit
-                .authority_commit
-                .mls_state
-                .as_mut()
-                .unwrap()
-                .public_blobs = vec![public_blob(&tracker.ratchet_tree_bytes().unwrap())];
+            let leaf = |leaf: arkret_mls::MlsPublicEndpointLeaf| coland_storage::MlsProposalLeafProvenance {
+                leaf_index: leaf.leaf_index, actor_id: leaf.actor_id, signature_key: leaf.signature_key,
+            };
+            let installed = commit.authority_commit.mls_state.as_mut().unwrap();
+            installed.public_blobs = vec![public_blob(&commit_info), public_blob(&commit_tree)];
+            installed.consumed_proposals = consumed_proposals.into_iter().map(|proposal|
+                coland_storage::MlsConsumedProposalInstallation {
+                    ordinal: proposal.ordinal, proposal_ref: proposal.proposal_ref,
+                    proposal_type: proposal.proposal_type, proposal_wire: proposal.proposal_wire,
+                    sender_leaf: leaf(proposal.sender_leaf),
+                    target_before: proposal.target_before.map(leaf),
+                    target_after: proposal.target_after.map(leaf),
+                }).collect();
             let groups = coland_storage_postgres::PgMlsGroupCurrentStore { pool: pool.clone() };
             let base = coland_storage::MlsGroupCurrentStore::current(&groups, &scope)
                 .await
@@ -584,6 +592,7 @@ async fn pending_agent_handshake_reads(
                     &base,
                 )
                 .unwrap();
+            group.install_verified_leaf_bindings(accepted_bindings).unwrap();
             let strand = ordinary_realm::next_request(
                 head,
                 EventKind::StrandCreate,
@@ -1364,7 +1373,16 @@ async fn consumed_sidecar_agent_requires_exact_controller_owner_and_consume_dige
 
 // Construct the large scenario outside the harness Future's poll frame.
 fn boxed_consumed_sidecar_agent() -> Pin<Box<dyn Future<Output = ()> + Send>> {
-    fixture_future(|| consumed_sidecar_agent_scenario(None))
+    fixture_future(|| consumed_sidecar_agent_scenario(None, false))
+}
+
+/// G core over real accepted Add/Welcome/claim inputs, without a remote H network gate.
+#[tokio::test]
+async fn governing_sidecar_history_uses_current_agent_incarnation_and_object_read_policies() {
+    fixture_step(fixture_future(|| {
+        consumed_sidecar_agent_scenario(None, true)
+    }))
+    .await;
 }
 
 #[derive(Clone, Copy)]
@@ -1742,10 +1760,13 @@ async fn owned_agent_welcome_delivery_rejects_accepted_runtime_key_revocation() 
 }
 
 fn boxed_owned_welcome(case: OwnedWelcomeCase) -> Pin<Box<dyn Future<Output = ()> + Send>> {
-    fixture_future(move || consumed_sidecar_agent_scenario(Some(case)))
+    fixture_future(move || consumed_sidecar_agent_scenario(Some(case), false))
 }
 
-async fn consumed_sidecar_agent_scenario(future_case: Option<OwnedWelcomeCase>) {
+async fn consumed_sidecar_agent_scenario(
+    future_case: Option<OwnedWelcomeCase>,
+    governing_history_only: bool,
+) {
     use coland_storage::AgentControlAdmissionWrite;
     eprintln!("[2135-stage] consumed_scenario_poll_started=1");
     let (database, resolution, principal, create, agent_did, agent, genesis,
@@ -2003,7 +2024,7 @@ async fn consumed_sidecar_agent_scenario(future_case: Option<OwnedWelcomeCase>) 
         .unwrap();
         let request_id =
             arkret_wire::Base64UrlString::new(arkret_canonical::base64url_encode([39; 32])).unwrap();
-        let claim_outcome = sidecar_readiness::claim_outcome(
+        let mut claim_outcome = sidecar_readiness::claim_outcome(
             &station_did,
             &package,
             &claim_id,
@@ -2015,25 +2036,84 @@ async fn consumed_sidecar_agent_scenario(future_case: Option<OwnedWelcomeCase>) 
             &scope,
             now,
         );
+        let requester_method = principal.history.device_verification_method.clone();
+        let requester_authorize = principal.history.events.iter()
+            .find(|event| event.kind == EventKind::DeviceAuthorize).unwrap().event_id.clone();
+        let mut claim_command = arkret_models_crypto::KeyPackagesClaimRequestBody {
+            claim_request_id: request_id.clone(), target_account_id: None, target_actor_id: None,
+            requester_account_id: Some(controller.clone()), requester_actor_id: None,
+            intended_realm_id: realm_id.clone(), effective_scope: scope.clone(),
+            mls_group_id: scope.canonical_mls_group_id().unwrap(),
+            claim_purpose: arkret_models_crypto::PeerKeyPackageClaimPurpose::RealmMembership,
+            required_capabilities: package.capabilities.iter()
+                .map(|capability| arkret_wire::NonEmptyString::new(capability).unwrap()).collect(),
+            expires_at: now + chrono::TimeDelta::minutes(4), target_device_ids: vec![],
+            target_keypackage_ref: Some(arkret_wire::KeyPackageRef::new(package.keypackage_ref.to_string()).unwrap()),
+            target_agent_id: Some(agent.principal_id.clone()),
+            target_agent_verification_method: Some(method.clone()),
+            target_agent_key_authorize_event_id: Some(key_event.event_id.clone()),
+            timeout_ms: None, strand_id: None, pair_key: None, last_resort_allowed: None,
+            service_binding: arkret_models_crypto::KeyPackagesClaimServiceBinding {
+                source_id: controller.station_id.clone(), destination_id: agent.station_id.clone(),
+            },
+            requester_authorization: arkret_models_crypto::PeerKeyPackageRequesterAuthorization::Device {
+                verification_method: requester_method.clone(),
+                requester_device_id: principal.history.founding_device_id.clone(),
+                device_authorize_event_id: requester_authorize, signed_at: now,
+                signature: KeyOperationSignature {
+                    kid: arkret_wire::NonEmptyString::new(requester_method.to_string()).unwrap(),
+                    signature_algorithm: Some(arkret_wire::NonEmptyString::new("Ed25519").unwrap()),
+                    signature: arkret_wire::Base64UrlString::new("AA").unwrap(),
+                },
+            },
+        };
+        let claim_bytes = arkret_models_crypto::keypackage_claim_authorization_signing_bytes(
+            &claim_command.unsigned_request(), &claim_command.service_binding,
+            &claim_command.requester_authorization,
+        ).unwrap();
+        let arkret_models_crypto::PeerKeyPackageRequesterAuthorization::Device { signature, .. } =
+            &mut claim_command.requester_authorization else { unreachable!() };
+        *signature = arkret_signatures::keypackages::sign_keypackage_signing_input(
+            &principal.history.founding_device_signing_seed, requester_method.as_str(), &claim_bytes,
+        ).unwrap();
+        claim_command.validate_shape().unwrap();
+        let command_digest = arkret_canonical::canonical_sha256(&claim_command).unwrap();
+        claim_outcome.claims[0].expires_at = claim_command.expires_at;
+        claim_outcome.claim_receipt.request = claim_command.unsigned_request();
+        claim_outcome.claim_receipt.request_digest = arkret_wire::Hash::new(command_digest.clone()).unwrap();
+        claim_outcome.claim_receipt.claims_digest = arkret_wire::Hash::new(
+            arkret_canonical::canonical_sha256(&claim_outcome.claims).unwrap(),
+        ).unwrap();
+        claim_outcome.claim_receipt.expires_at = claim_command.expires_at;
+        claim_outcome.claim_receipt.signature = arkret_signatures::keypackages::sign_keypackage_signing_input(
+            &[83; 32], claim_outcome.claim_receipt.signature.kid.as_str(),
+            &arkret_models_crypto::peer_keypackage_claim_receipt_signing_bytes(&claim_outcome.claim_receipt).unwrap(),
+        ).unwrap();
+        claim_outcome.validate_shape().unwrap();
+        assert_eq!(packages.record_peer_claim_attempt(&claim_command).await.unwrap(),
+            coland_storage::PeerKeyPackageClaimRateDecision::Allowed);
         let ledger = coland_storage::PeerKeyPackageClaimLedgerRecord {
             source_id: controller.station_id.to_string(),
             claim_request_id: request_id.to_string(),
-            request_digest: format!("sha256:{}", "6".repeat(64)),
+            request_digest: command_digest,
             key_package_use: "single_use".into(),
             keypackage_id: Some(package.keypackage_id.clone()),
             outcome: Some(serde_json::to_value(&claim_outcome).unwrap()),
             terminal_receipt: None,
             consume_receipt: None,
-            claim_expires_at_unix_ms: Some(now.timestamp_millis() + 3_000_000),
+            claim_expires_at_unix_ms: Some(claim_command.expires_at.timestamp_millis()),
             expires_at: now.timestamp() + 86400,
             state: "claimed".into(),
             updated_at: now.timestamp(),
         };
+        let claim_admission = std::sync::Arc::new(coland_storage::MlsKeyPackageClaimAdmission {
+            request: claim_command, requester: None, mimi_room_uri: None, claim_issuer_resolution: None,
+        });
         let group_id = scope.canonical_mls_group_id().unwrap();
         assert!(matches!(
             packages
                 .try_claim_peer(coland_storage::PeerKeyPackageClaimAttempt {
-                admission: None,
+                admission: Some(claim_admission.clone()),
                 applet_device_scope_guard: None,
                     keypackage_id: &package.keypackage_id,
                     mls_group_id: group_id.as_str(),
@@ -2041,7 +2121,7 @@ async fn consumed_sidecar_agent_scenario(future_case: Option<OwnedWelcomeCase>) 
                     agent_key_authorize_event_id: Some(key_event.event_id.as_str()),
                     device_revocation_gate: None,
                     claimed_at_unix_ms: now.timestamp_millis(),
-                    claim_expires_at_unix_ms: now.timestamp_millis() + 3_000_000,
+                    claim_expires_at_unix_ms: claim_admission.request.expires_at.timestamp_millis(),
                     ledger: &ledger,
                 })
                 .await
@@ -2065,6 +2145,8 @@ async fn consumed_sidecar_agent_scenario(future_case: Option<OwnedWelcomeCase>) 
         let add = group
             .add_member_with_governance_binding(&package, &binding)
             .unwrap();
+        let (add_info, add_tree) = group
+            .pending_public_group_state_bytes(&add.commit, &binding).unwrap();
         let transition = tracker
             .process_public_handshake(&arkret_canonical::base64url_decode(&add.commit.commit).unwrap())
             .unwrap();
@@ -2098,11 +2180,7 @@ async fn consumed_sidecar_agent_scenario(future_case: Option<OwnedWelcomeCase>) 
         request.authority_commit.commit.stream_ref = head.commit.stream_ref.clone();
         request.authority_commit.commit.stream_position = head.commit.stream_position + 1;
         request.authority_commit.commit.previous_commit_ref = Some(head.commit.commit_id.clone());
-        let tree = tracker.ratchet_tree_bytes().unwrap();
-        let sha256 = arkret_canonical::sha256_digest(&tree)
-            .strip_prefix("sha256:")
-            .unwrap()
-            .to_owned();
+        assert_eq!(tracker.ratchet_tree_bytes().unwrap(), add_tree);
         let leaf = |l: arkret_mls::MlsPublicEndpointLeaf| coland_storage::MlsProposalLeafProvenance {
             leaf_index: l.leaf_index,
             actor_id: l.actor_id,
@@ -2134,13 +2212,15 @@ async fn consumed_sidecar_agent_scenario(future_case: Option<OwnedWelcomeCase>) 
                     target_after: p.target_after.map(leaf),
                 })
                 .collect(),
-            public_blobs: vec![coland_storage::MlsPublicBlob {
-                blob_ref: arkret_wire::BlobRef::new(format!("ak:blob:sha256:{sha256}")).unwrap(),
-                size_bytes: tree.len() as i64,
-                storage_backend: "local".into(),
-                storage_key: format!("sha256/{sha256}"),
-                sha256,
-            }],
+            public_blobs: [&add_info, &add_tree].into_iter().map(|bytes| {
+                let digest = arkret_canonical::sha256_digest(bytes);
+                let sha256 = digest.trim_start_matches("sha256:").to_owned();
+                coland_storage::MlsPublicBlob {
+                    blob_ref: arkret_wire::BlobRef::new(format!("ak:blob:{digest}")).unwrap(),
+                    size_bytes: bytes.len() as i64, storage_backend: "local".into(),
+                    storage_key: format!("sha256/{sha256}"), sha256,
+                }
+            }).collect(),
         });
         let placeholder = arkret_wire::DetachedObjectSignature {
             context: arkret_wire::DetachedSignatureContext::MlsWelcomeDelivery,
@@ -2631,15 +2711,17 @@ async fn consumed_sidecar_agent_scenario(future_case: Option<OwnedWelcomeCase>) 
             status().await.unwrap().unwrap().1,
             vec![agent.principal_id.clone()]
         );
-        sidecar_exchange_controls::assert_current(
-            &pool,
-            &principal,
-            &sidecar,
-            &request.authority_commit,
-            &mut group,
-            &agent.principal_id,
-        )
-        .await;
+        if !governing_history_only {
+            sidecar_exchange_controls::assert_current(
+                &pool,
+                &principal,
+                &sidecar,
+                &request.authority_commit,
+                &mut group,
+                &agent.principal_id,
+            )
+            .await;
+        }
         Some((request, group, recipient_group))
     })
         .await;
@@ -2659,6 +2741,9 @@ async fn consumed_sidecar_agent_scenario(future_case: Option<OwnedWelcomeCase>) 
         )
     })
     .await;
+    if governing_history_only {
+        return;
+    }
     fixture_future(|| {
         sidecar_post_tree_preserves_historical_endpoint_and_rejects_paused_self_update(
             &pool,

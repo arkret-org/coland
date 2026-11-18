@@ -650,22 +650,21 @@ impl AuthorityProtocolPort for AppState {
                 return Ok(original);
             }
         }
-        if let Some(original) = Box::pin(super::authority_forward::recover_forwarded_original(
-            self,
-            session,
-            &arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::Event(
-                request.clone(),
-            ),
-        ))
-        .await?
+        if let Some(original) = crate::boxed_future(|| async {
+            let submission =
+                arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::Event(
+                    request.clone(),
+                );
+            super::authority_forward::recover_forwarded_original(self, session, &submission).await
+        }).await?
         {
             return Ok(original);
         }
-        let (producer_guard, producer_key) = Box::pin(
+        let (producer_guard, producer_key) = crate::boxed_future(|| {
             super::authority_producer_validation::verify_self_event_submission_producer_key(
                 self, session, event,
-            ),
-        )
+            )
+        })
         .await
         .inspect_err(|_error| {
             #[cfg(feature = "conformance-harness")]
@@ -681,12 +680,14 @@ impl AuthorityProtocolPort for AppState {
             );
         })?;
         if let Some(governance) = Box::pin(remote_governance(self, &event.realm_id)).await? {
-            let outcome = Box::pin(super::authority_forward::forward_self_event_with_session(
-                self,
-                &governance,
-                request,
-                session,
-            ))
+            let outcome = crate::boxed_future(|| {
+                super::authority_forward::forward_self_event_with_session(
+                    self,
+                    &governance,
+                    request,
+                    session,
+                )
+            })
             .await;
             #[cfg(feature = "conformance-harness")]
             if let Err(error) = &outcome {

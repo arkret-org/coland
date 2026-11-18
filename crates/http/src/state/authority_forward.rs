@@ -1358,7 +1358,9 @@ pub(crate) async fn recover_forwarded_original(
     let Some(queued) = commits.queued_event(&event.event_id).await? else {
         return Ok(None);
     };
-    let Some(attempt) = queued.forward_attempt else {
+    // New local submissions never need the forwarding recovery state machine.
+    // Construct it in its own frame only when a stored attempt exists.
+    let Some(attempt) = queued.forward_attempt.as_ref() else {
         if matches!(submission, SelfAuthoritySubmitRequestBody::MlsCommit(_)) {
             return Ok(None);
         }
@@ -1373,6 +1375,17 @@ pub(crate) async fn recover_forwarded_original(
             "duplicate_conflict: forwarding recovery differs from its complete original".into(),
         ));
     }
+    crate::boxed_future(|| recover_matching_attempt(state, session, submission, event, attempt))
+        .await
+}
+
+async fn recover_matching_attempt(
+    state: &AppState,
+    session: &coland_services::identity::SessionIdentityState,
+    submission: &SelfAuthoritySubmitRequestBody,
+    event: &Event,
+    attempt: &coland_storage::ForwardAttemptRecord,
+) -> ServiceResult<Option<AuthoritySubmitResponseBody>> {
     validate_recovery_caller(state, session, event).await?;
     if matches!(submission, SelfAuthoritySubmitRequestBody::MlsCommit(_)) {
         if let Some(outcome) = attempt.terminal_outcome.as_ref() {
@@ -1382,11 +1395,14 @@ pub(crate) async fn recover_forwarded_original(
         let Some(request) = attempt.peer_request.as_deref() else {
             return Ok(None);
         };
-        return recover_pending_mls_forward(state, session, submission, request)
-            .await
-            .map(Some);
+        return crate::boxed_future(|| {
+            recover_pending_mls_forward(state, session, submission, request)
+        })
+        .await
+        .map(Some);
     }
     super::authority_self_event_unit::require_governance_change_eligibility(state, event).await?;
+    let commits = state.authority_commits();
     let authority = commits
         .current_authority(&event.realm_id)
         .await?
@@ -1420,14 +1436,16 @@ pub(crate) async fn recover_forwarded_original(
             return Ok(None);
         }
     }
-    let original_commit = super::replica_anchor::ensure_forwarded_target(
-        state,
-        &governance,
-        event,
-        attempt.accepted_commit(),
-        &mut located,
-        session,
-    )
+    let original_commit = crate::boxed_future(|| {
+        super::replica_anchor::ensure_forwarded_target(
+            state,
+            &governance,
+            event,
+            attempt.accepted_commit(),
+            &mut located,
+            session,
+        )
+    })
     .await
     .map_err(temporarily_unavailable)?;
     validate_recovery_caller(state, session, event).await?;

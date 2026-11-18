@@ -28,6 +28,11 @@ authors = ["Arkret contributors"]
 [profile.dev.package.coland-storage-postgres]
 debug = "line-tables-only"
 
+# The development Station verifies producer proofs and signs every RealmCommit.
+# Optimize the arithmetic used by the SDK's Ed25519 implementation.
+[profile.dev.package."curve25519-dalek:5.0.0"]
+opt-level = 3
+
 # Workspace lint baseline. Every member opts in with `[lints] workspace = true`.
 #
 # The entries below are all at zero occurrences today, so this is a ratchet

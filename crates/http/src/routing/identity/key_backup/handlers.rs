@@ -544,13 +544,9 @@ pub(super) async fn unlock_key_backup(
         tracing::warn!(actor=%session.actor, device=%session.require_human_device_id(), %backup_id, %request_digest, %error, "key backup unlock proof rejected");
         return Err(error);
     }
-    // Ordinary active reads require the current writer trust root. The narrow
-    // history-only branch independently verifies the retained first-admission
-    // signer and the caller's current Device at the native PCR cut.
     let history_reader = if body.proof.content_history.is_some() {
         Some(crate::routing::events::pcr_history::current_reader(state, &session).await?)
     } else {
-        anchor_key_backup_auth_data_trust_root(state, &session.actor, &backup).await?;
         None
     };
     let basis = match &body.proof.authority {
@@ -796,6 +792,7 @@ fn unlock_consumption_error(error: coland_services::ServiceError) -> AppError {
     use coland_storage::ConflictCode;
 
     match error.conflict_code() {
+        Some(ConflictCode::SignatureInvalid) => super::unlock::key_backup_untrusted_signature(),
         Some(ConflictCode::BackupRevisionStale) => {
             super::unlock::backup_revision_stale(&error.to_string())
         }

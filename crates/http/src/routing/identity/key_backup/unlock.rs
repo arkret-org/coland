@@ -1,6 +1,6 @@
 use super::*;
 
-fn key_backup_untrusted_signature() -> AppError {
+pub(super) fn key_backup_untrusted_signature() -> AppError {
     crate::app_error!(
         SignatureInvalid,
         "key backup signature_proof.signature is not anchored to the actor device trust root",

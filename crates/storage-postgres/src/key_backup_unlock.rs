@@ -212,10 +212,17 @@ impl crate::key_backup::PgKeyBackupStore {
             }
             let entry=sql_query("SELECT object_digest,charge,request_digest,holder FROM key_backup_unlock_entries WHERE authority_id=$1 AND backup_id=$2 FOR UPDATE")
                 .bind::<Text,_>(&id).bind::<Text,_>(&backup_id).get_result::<EntryRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?.ok_or_else(||rejected("backup outside frozen unlock manifest"))?;
-            let current=sql_query("SELECT payload FROM key_backups WHERE id=$1 FOR SHARE")
-                .bind::<sql_types::Uuid,_>(ids::typed_uuid_part_expect_internal(&backup_id)).get_result::<JsonPayloadRow>(&mut *conn).await.map_err(PersistenceError::database)?.payload;
+            // The history branch already verified and locked its original in qualify().
+            if !historical {
+                let id = arkret_wire::BackupId::new(&backup_id).map_err(PersistenceError::database)?;
+                let original = crate::content_root_packages::read_retained_envelope(conn, &id).await?;
+                if serde_json::to_value(original).map_err(PersistenceError::database)? != backup {
+                    return Err(rejected("backup_frontier_stale").into());
+                }
+            }
+            let current = backup;
             let (digest,charge)=object_charge(&current)?;
-            if digest!=entry.object_digest || charge!=entry.charge || current!=backup {return Err(rejected("backup_frontier_stale").into());}
+            if digest!=entry.object_digest || charge!=entry.charge {return Err(rejected("backup_frontier_stale").into());}
             if history_expires.is_some_and(|expires| chrono::Utc::now() >= expires) {
                 return Err(rejected("PCR history reader expired before consumption").into());
             }

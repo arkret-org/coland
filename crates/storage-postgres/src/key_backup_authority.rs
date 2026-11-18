@@ -48,8 +48,8 @@ impl DeviceBackupAdmission {
         backup: &KeyBackup,
     ) -> crate::PersistenceResult<()> {
         let invalid = || {
-            PersistenceError::SchemaViolation(
-                "backup differs from its first native admission".into(),
+            PersistenceError::Conflict(
+                "signature_invalid: backup differs from its first native admission".into(),
             )
         };
         if !self.matches_envelope(
@@ -268,16 +268,17 @@ pub(crate) async fn verify_human_backup_signature(
         ));
     }
     let accepted_at = chrono::Utc::now();
-    if authorization.payload.not_before > accepted_at
-        || authorization
-            .payload
-            .expires_at
-            .flatten()
-            .is_some_and(|expires| expires <= accepted_at)
-    {
+    if [backup.created_at, accepted_at].into_iter().any(|at| {
+        at < authorization.payload.not_before
+            || authorization
+                .payload
+                .expires_at
+                .flatten()
+                .is_some_and(|expires| at >= expires)
+    }) {
         return Err(rejected(
             ConflictCode::DeviceUnauthorized,
-            "backup writer authorization expired before admission",
+            "backup creation or first admission is outside the writer authorization window",
         ));
     }
     Ok(DeviceBackupAdmission {

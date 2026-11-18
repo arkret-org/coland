@@ -3,6 +3,8 @@
 //! cryptographic admission.
 use arkret_models_crypto as crypto;
 use arkret_wire as wire;
+use coland_storage::IdentityStoreRegistry as _;
+use ed25519_dalek::{Signer as _, SigningKey};
 use serde_json::json;
 
 use super::*;
@@ -84,7 +86,7 @@ impl Fixture {
         let proof: crypto::RecoverySessionProofSubmitRequestBody =
             serde_json::from_value(proof_payload.clone()).unwrap();
         let device = wire::DeviceId::new("ak:device:01904100-0000-7000-8000-000000000023").unwrap();
-        let backup = crypto::KeyBackup {
+        let mut backup = crypto::KeyBackup {
             authorization_binding: None,
             custodian_actor_id: None,
             custody_authorization_ref: None,
@@ -136,7 +138,10 @@ impl Fixture {
                 agent_authorization_event_ref: None,
 
                 device_id: Some(device.clone()),
-                verification_method: wire::DidUrl::new("did:web:unlock-test.example#root").unwrap(),
+                verification_method: wire::DidUrl::new(format!(
+                    "did:web:unlock-test.example#{device}"
+                ))
+                .unwrap(),
                 signature_algorithm: crypto::KeyBackupSignatureAlgorithm::Ed25519,
                 signature: wire::Base64UrlString::new(signature.clone()).unwrap(),
                 device_authorize_event_id: Some(wire::EventId::from_digest(
@@ -159,6 +164,14 @@ impl Fixture {
             }),
             extra: Default::default(),
         };
+        let writer = SigningKey::from_bytes(&[53; 32]);
+        backup.signature_proof.signature =
+            wire::Base64UrlString::new(arkret_canonical::base64url_encode(
+                writer
+                    .sign(&backup.signing_payload_bytes().unwrap())
+                    .to_bytes(),
+            ))
+            .unwrap();
         backup.validate().unwrap();
         let backup = serde_json::to_value(backup).unwrap();
         assert!(backup.get("source_ref").is_none());
@@ -331,6 +344,20 @@ impl Fixture {
                 .len(),
             64
         );
+        crate::PgPersistenceStore::new(pool.clone())
+            .accounts()
+            .put(&coland_storage::AccountRecord {
+                pk: coland_storage::AccountPk(0),
+                principal_id: typed_policy.account_id.principal_id.clone(),
+                station_id: typed_policy.account_id.station_id.clone(),
+                localpart: String::new(),
+                display_name: None,
+                biography: None,
+                avatar_blob_ref: None,
+                created_at: now,
+            })
+            .await
+            .unwrap();
         insert_policy(&pool, &policy).await;
         let mut conn = pg_conn(&pool).await.unwrap();
         sql_query("INSERT INTO recovery_sessions SELECT * FROM jsonb_populate_record(NULL::recovery_sessions,$1)")
@@ -352,16 +379,25 @@ impl Fixture {
             .bind::<Timestamptz,_>(now)
             .bind::<crate::Binary,_>(basis_token.to_vec())
             .execute(&mut *conn).await.unwrap();
-        // This storage-only seed assumes prior admission. It deliberately has
-        // no native writer witness and cannot satisfy historical-root access.
+        // The storage fixture starts after first PUT, at the retained writer admission.
         let packet: crypto::KeyBackup = serde_json::from_value(backup.clone()).unwrap();
-        sql_query("INSERT INTO key_backup_identities(id,actor_id,series_id,series_sequence,envelope_digest,signing_payload_digest,content_index,writer_admission) VALUES($1,$2,$3,$4,$5,$6,$7,'{}'::jsonb)")
+        let source = packet.source_commit_ref.as_ref().unwrap();
+        let witness = json!({
+            "envelope_digest": arkret_canonical::canonical_sha256(&packet).unwrap(),
+            "signer_actor": packet.actor_id, "signer_device": packet.signature_proof.device_id,
+            "authorization_event_ref": packet.signature_proof.device_authorize_event_id,
+            "source_head": source.realm_commit_id, "generation": source.device_generation_ref,
+            "public_key_did": format!("did:key:{}", arkret_canonical::ed25519_pubkey_to_did_key_multibase(writer.verifying_key().as_bytes())),
+            "accepted_at": arkret_canonical::format_timestamp_canonical(now)
+        });
+        sql_query("INSERT INTO key_backup_identities(id,actor_id,series_id,series_sequence,envelope_digest,signing_payload_digest,content_index,writer_admission) VALUES($1,$2,$3,$4,$5,$6,$7,$8)")
             .bind::<sql_types::Uuid,_>(ids::typed_uuid_part_expect_internal(BACKUP))
             .bind::<Text,_>(packet.actor_id.to_string()).bind::<Text,_>(packet.series_id.as_str())
             .bind::<BigInt,_>(packet.series_sequence as i64)
             .bind::<Text,_>(arkret_canonical::canonical_sha256(&backup).unwrap())
             .bind::<Text,_>(arkret_canonical::sha256_digest(packet.signing_payload_bytes().unwrap()))
-            .bind::<Jsonb,_>(serde_json::to_value(&packet.contents).unwrap())
+            .bind::<Jsonb,_>(serde_json::to_value(crate::key_backup::content_root_index(&packet)).unwrap())
+            .bind::<Jsonb,_>(witness)
             .execute(&mut *conn).await.unwrap();
         sql_query("INSERT INTO key_backups(id,payload,actor_id) VALUES($1,$2,$3)")
             .bind::<sql_types::Uuid, _>(ids::typed_uuid_part_expect_internal(BACKUP))
@@ -426,6 +462,29 @@ impl Fixture {
             .bind::<Text,_>(SESSION).bind::<sql_types::Uuid,_>(ids::typed_uuid_part_expect_internal(SESSION))
             .get_result::<JsonPayloadRow>(&mut conn).await.unwrap().payload
     }
+}
+
+#[tokio::test]
+async fn recovery_unlock_rejects_another_original_writer_without_charging() {
+    let fixture = Fixture::new().await;
+    let before = fixture.ledger().await;
+    let mut conn = pg_conn(&fixture.store.pool).await.unwrap();
+    let other = SigningKey::from_bytes(&[54; 32]);
+    let other_did = format!(
+        "did:key:{}",
+        arkret_canonical::ed25519_pubkey_to_did_key_multibase(other.verifying_key().as_bytes())
+    );
+    sql_query("UPDATE key_backup_identities SET writer_admission=jsonb_set(writer_admission,'{public_key_did}',to_jsonb($2::text)) WHERE id=$1")
+        .bind::<sql_types::Uuid,_>(ids::typed_uuid_part_expect_internal(BACKUP))
+        .bind::<Text,_>(other_did)
+        .execute(&mut *conn).await.unwrap();
+    drop(conn);
+    let error = fixture.consume(Utc::now()).await.unwrap_err();
+    assert_eq!(
+        error.conflict_code(),
+        Some(coland_storage::ConflictCode::SignatureInvalid)
+    );
+    assert_eq!(fixture.ledger().await, before);
 }
 
 #[tokio::test]

@@ -64,7 +64,8 @@ pub(crate) async fn scan_stream_for_actor(
         sql_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
             .execute(&mut *conn)
             .await?;
-        scan_stream_for_actor_in_connection(conn, request, actor, issuer).await
+        crate::boxed_future(|| scan_stream_for_actor_in_connection(conn, request, actor, issuer))
+            .await
     })
     .await
     .map_err(PgTransactionError::into_persistence)
@@ -96,8 +97,8 @@ pub(crate) async fn scan_stream_for_account_in_connection(
     account: &AccountId,
     issuer: &DidCoreId,
 ) -> Result<AccountStreamScan, PgTransactionError> {
-    scan_stream_for_actor_in_connection(conn, request, &ActorId::account(account.clone()), issuer)
-        .await
+    let actor = ActorId::account(account.clone());
+    crate::boxed_future(|| scan_stream_for_actor_in_connection(conn, request, &actor, issuer)).await
 }
 
 pub(crate) async fn scan_stream_for_actor_in_connection(
@@ -204,13 +205,15 @@ pub(crate) async fn scan_stream_for_actor_in_connection(
             "the caller's join or history floor is not proved at this cut",
         ));
     };
-    let page =
+    let page = crate::boxed_future(|| {
         crate::authority_commit::stream_page_above_floor_in_connection(conn, request, Some(floor))
-            .await?;
+    })
+    .await?;
     // Per-Event disclosure applies on top of the interval: a withheld row
     // keeps its Commit so the page stays one verifiable chain.
     let committed_events =
-        disclose_page_to_member(conn, page.committed_events.clone(), &caller_actor).await?;
+        crate::boxed_future(|| disclose_page_to_member(conn, page.committed_events, &caller_actor))
+            .await?;
     Ok(AccountStreamScan::Page(StreamScanResponseBody {
         committed_events,
         ..page
@@ -1507,7 +1510,10 @@ pub(crate) async fn committed_event_for_member(
         sql_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
             .execute(&mut *conn)
             .await?;
-        committed_event_for_member_in_connection(conn, event_id, caller, issuer).await
+        crate::boxed_future(|| {
+            committed_event_for_member_in_connection(conn, event_id, caller, issuer)
+        })
+        .await
     })
     .await
     .map_err(PgTransactionError::into_persistence)

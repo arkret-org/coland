@@ -182,11 +182,13 @@ pub(crate) async fn full_event_for_member_in_connection(
         }
         // Membership-derived visibility is intersected on the same bytes,
         // not replaced with an explicit event.read capability requirement.
-        if !member_event_visible_in_connection(conn, row, &controller, at).await? {
+        if !crate::boxed_future(|| member_event_visible_in_connection(conn, row, &controller, at))
+            .await?
+        {
             return Ok(false);
         }
     }
-    member_event_visible_in_connection(conn, row, caller, at).await
+    crate::boxed_future(|| member_event_visible_in_connection(conn, row, caller, at)).await
 }
 
 pub(crate) fn ordinary_agent_read_ceiling(
@@ -369,8 +371,10 @@ pub(crate) async fn disclose_to_member_in_connection(
             disclosed.push(item);
             continue;
         };
-        let full =
-            full_event_for_member_in_connection(conn, &row, caller, chrono::Utc::now()).await?;
+        let full = crate::boxed_future(|| {
+            full_event_for_member_in_connection(conn, &row, caller, chrono::Utc::now())
+        })
+        .await?;
         disclosed.push(if full {
             CommittedEventView::Full(row)
         } else {

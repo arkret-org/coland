@@ -250,15 +250,10 @@ fn introspection_cache_key_for(state: &AppState, grant_secret: &str) -> String {
 }
 
 fn cache_lookup(key: &str) -> Option<(SessionGrantValidationMetadata, IntrospectionReadLease)> {
-    cache_lookup_at(key, Instant::now())
-}
-
-fn cache_lookup_at(
-    key: &str,
-    now: Instant,
-) -> Option<(SessionGrantValidationMetadata, IntrospectionReadLease)> {
     let mut cache = INTROSPECTION_CACHE.lock();
-    cache_lookup_locked(&mut cache, key, now)
+    // Sample after locking, so pruning cannot see a slot created by a later
+    // clock sample while this reader was waiting for the lock.
+    cache_lookup_locked(&mut cache, key, Instant::now())
 }
 
 fn cache_lookup_locked(

@@ -23,10 +23,16 @@ repository = "https://github.com/arkret-org/coland"
 homepage = "https://github.com/arkret-org/coland"
 authors = ["Arkret contributors"]
 
-# Full type debug information can push this crate's COFF archive past the
-# 32-bit member-offset limit. Keep source locations for development backtraces.
+# The HTTP and PostgreSQL request futures are polled on the same Tokio stack.
+# Optimize temporary moves in their debug builds while keeping debug assertions.
+[profile.dev.package.coland-http]
+opt-level = 1
+
 [profile.dev.package.coland-storage-postgres]
+# Full type debug information can push the COFF archive past its 32-bit
+# member-offset limit. Keep source locations for development backtraces.
 debug = "line-tables-only"
+opt-level = 1
 
 # The development Station verifies producer proofs and signs every RealmCommit.
 # Optimize the arithmetic used by the SDK's Ed25519 implementation.

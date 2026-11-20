@@ -2820,6 +2820,7 @@ async fn realm_list_snapshot_identity_is_stable_and_never_renews_its_deadline() 
     let session = roster_session(&state, "ak:did_core:web:alice.example");
     let (watermark, global_watermark) = state.sync().account_sync_watermarks().await.unwrap();
     let mut position = RealmListPosition {
+        visible_revision: None,
         watermark,
         global_watermark,
         expires_at_ms: chrono::Utc::now().timestamp_millis() + 3_600_000,

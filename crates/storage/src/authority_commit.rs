@@ -1624,6 +1624,8 @@ pub enum HumanPcrHistoryRead<T> {
 /// This is not a wire object or a reusable authorization assertion.
 #[derive(Clone, Debug, Default)]
 pub struct AccountContentDeliveryInput {
+    /// Exact minimal membership rows for an Agent account-stream handoff.
+    pub agent_membership_list: Option<Vec<arkret_models_collaboration::sync_frames::demand_sync::AccountRealmView>>,
     /// New Blob bytes at an exact Realm upload boundary; never a read grant.
     pub native_blob_upload: Option<arkret_wire::RealmId>,
     pub realms: Vec<arkret_wire::RealmId>,

@@ -3895,6 +3895,9 @@ CREATE TABLE account_summary_current (
     title TEXT,
     default_strand_id TEXT,
     available BOOLEAN NOT NULL,
+    agent_membership_only BOOLEAN NOT NULL DEFAULT FALSE,
+    CHECK (NOT agent_membership_only OR
+           ((membership IS NULL OR membership='join') AND title IS NULL AND default_strand_id IS NULL)),
     PRIMARY KEY (actor_key, realm_id)
 );
 CREATE INDEX account_summary_current_realm ON account_summary_current (realm_id, actor_key);
@@ -4084,6 +4087,7 @@ $$;
 CREATE TRIGGER notification_source_state AFTER UPDATE OF state ON canonical_events FOR EACH ROW EXECUTE FUNCTION project_notification_source_state();
 CREATE FUNCTION project_notification_membership_visibility() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
+    IF NEW.agent_membership_only THEN RETURN NEW; END IF;
     IF NEW.membership IS DISTINCT FROM 'join' OR NOT NEW.available THEN
         UPDATE notifications SET
             projection_action='remove',
@@ -4113,6 +4117,7 @@ CREATE FUNCTION account_device_interest_visible(recipient TEXT, owner TEXT) RETU
     AND (recipient=owner OR EXISTS (
         SELECT 1 FROM account_summary_current a JOIN account_summary_current b USING(realm_id)
         WHERE a.actor_key=recipient AND b.actor_key=owner
+          AND NOT a.agent_membership_only AND NOT b.agent_membership_only
           AND a.membership='join' AND b.membership='join' AND a.available AND b.available
     ))
 $$;
@@ -4129,7 +4134,7 @@ CREATE PROCEDURE publish_pcr_device_list_change(owner TEXT) LANGUAGE plpgsql AS 
 DECLARE recipient TEXT;
 BEGIN
     PERFORM refresh_account_device_interest(owner,owner);
-    FOR recipient IN SELECT DISTINCT a.actor_key FROM account_summary_current a JOIN account_summary_current b USING(realm_id) WHERE b.actor_key=owner LOOP
+    FOR recipient IN SELECT DISTINCT a.actor_key FROM account_summary_current a JOIN account_summary_current b USING(realm_id) WHERE b.actor_key=owner AND NOT a.agent_membership_only AND NOT b.agent_membership_only LOOP
         IF recipient<>owner THEN PERFORM refresh_account_device_interest(recipient,owner); END IF;
     END LOOP;
 END;
@@ -4152,12 +4157,13 @@ $$;
 CREATE FUNCTION project_account_global_membership() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE peer TEXT;
 BEGIN
+    IF NEW.agent_membership_only THEN RETURN NEW; END IF;
     -- Title and default Strand changes do not move device interest.
     IF TG_OP='UPDATE' AND OLD.membership IS NOT DISTINCT FROM NEW.membership
         AND OLD.available=NEW.available THEN
         RETURN NEW;
     END IF;
-    FOR peer IN SELECT actor_key FROM account_summary_current WHERE realm_id=NEW.realm_id AND actor_key<>NEW.actor_key LOOP
+    FOR peer IN SELECT actor_key FROM account_summary_current WHERE realm_id=NEW.realm_id AND actor_key<>NEW.actor_key AND NOT agent_membership_only LOOP
         PERFORM reconcile_account_device_interest(NEW.actor_key,peer);
         PERFORM reconcile_account_device_interest(peer,NEW.actor_key);
     END LOOP;

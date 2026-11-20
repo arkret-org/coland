@@ -558,6 +558,29 @@ async fn current_delivery(
             ..
         } => {
             let account = actor.as_account_id().ok_or(ErrorCode::CapabilityDenied)?;
+            if credential.session.agent_session().is_some() {
+                let WebSocketOpenParameters::Account(p) = parameters else {
+                    return Err(ErrorCode::SchemaViolation);
+                };
+                let cursor = account_frame
+                    .cursor
+                    .as_deref()
+                    .ok_or(ErrorCode::SchemaViolation)?;
+                let filter = super::subscribe::sync_filter_value(p.filter.as_ref());
+                super::cursor::parse_account_cursor(
+                    cursor,
+                    state,
+                    Some(&credential.session),
+                    filter.as_ref(),
+                    chrono::Utc::now().timestamp_millis(),
+                    false,
+                )
+                .await
+                .map_err(|error| {
+                    ErrorCode::from_wire(super::cursor::cursor_revoke_error(error).wire_code())
+                        .unwrap_or(ErrorCode::TemporarilyUnavailable)
+                })?;
+            }
             if let Some(realms) = &account_frame.realms {
                 for (id, detail) in &realms.entries {
                     if detail.unavailable.is_some() {
@@ -609,7 +632,7 @@ async fn current_delivery(
             payload: WebSocketDataPayload::Account(frame),
             ..
         } => Some(
-            coland_storage::AccountContentDeliveryInput::account_frame(frame)
+            super::account_frame_input(&credential.session, frame)
                 .map_err(|_| ErrorCode::SchemaViolation)?,
         ),
         _ => None,

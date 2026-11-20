@@ -478,7 +478,8 @@ fn agent_recipient_operation(method: &str, path: &str) -> Option<&'static str> {
     // also fits the Event resource template. This closed addition changes no
     // holder/current authority or exact grant-scope requirement.
     if let Some(
-        operation @ (ServiceOperationId::SelfCommittedEventResourceGetV1
+        operation @ (ServiceOperationId::SelfAccountStreamSubscribeV1
+        | ServiceOperationId::SelfCommittedEventResourceGetV1
         | ServiceOperationId::SelfCommittedEventStreamSubscribeV1
         | ServiceOperationId::SelfBlobResourceGetV1
         | ServiceOperationId::SelfBlobResourceHeadV1),
@@ -1234,7 +1235,7 @@ mod tests {
             ("PUT", "/_arkret/self/device-messages"),
             ("GET", "/_arkret/self/device-messages/ack"),
             ("GET", "/_arkret/self/account/stream"),
-            ("GET", "/_arkret/self/account/subscribe"),
+            ("POST", "/_arkret/self/account/subscribe"),
             ("GET", "/_arkret/self/keys/backups"),
             ("POST", "/_arkret/self/realms/ak:realm:example/streams"),
             ("GET", "/_arkret/self/realms/ak:realm:example/streams/extra"),
@@ -1258,6 +1259,11 @@ mod tests {
         let event =
             arkret_wire::EventId::from_digest(arkret_canonical::DigestSuite::Sha256, [71; 32]);
         vec![
+            (
+                "GET",
+                "/_arkret/self/account/subscribe".into(),
+                Operation::SELF_ACCOUNT_STREAM_SUBSCRIBE_V1,
+            ),
             (
                 "GET",
                 format!("/_arkret/self/committed-events/{event}"),

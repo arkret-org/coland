@@ -15,6 +15,54 @@ pub(crate) async fn build_sync_snapshot(
     arkret_models_collaboration::sync_frames::account_subscribe::AccountSubscribeFrame,
     Box<arkret_wire::Problem>,
 > {
+    if let Some(session) = session.filter(|s| s.agent_session().is_some()) {
+        crate::routing::events::require_agent_session_scope(
+            session,
+            arkret_wire::ServiceOperationId::SELF_ACCOUNT_STREAM_SUBSCRIBE_V1,
+        )
+        .map_err(|_| {
+            Box::new(arkret_wire::Problem::from_code(
+                "capability_denied",
+                "Agent account subscription is unavailable",
+            ))
+        })?;
+        let delta = match demand_list::read(state, session, body, after_cursor).await {
+            Ok(delta) => delta,
+            Err(global_channels::GlobalReadError::Cursor(error)) => {
+                return Err(cursor::issuance_problem(error));
+            }
+            Err(global_channels::GlobalReadError::ResyncRequired) => {
+                return Ok(serde_json::from_value(json!({"kind":"resync_required"}))
+                    .expect("resync frame"));
+            }
+            Err(global_channels::GlobalReadError::Unavailable(_)) => {
+                return Err(account_unavailable());
+            }
+        };
+        let filter = sync_filter_value(body.filter.as_ref());
+        let token = cursor::sync_token_for_account_positions(
+            state,
+            Some(session),
+            filter.as_ref(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            0,
+            delta.position,
+            0,
+            Some(json!({"agent_memberships":delta.agent_disclosures})),
+            BTreeMap::new(),
+            false,
+            None,
+            &after_cursor.input_authorities,
+        )
+        .await
+        .map_err(cursor::issuance_problem)?;
+        let mut frame = account_checkpoint_frame(Some(token));
+        frame.kind = arkret_models_collaboration::sync_frames::account_subscribe::AccountSubscribeFrameKind::Delta;
+        frame.realm_list = delta.page;
+        frame.realm_list_changes = delta.changes;
+        return Ok(frame);
+    }
     if let Some(frame) = current_details::frame(state, session, body, after_cursor).await? {
         return Ok(frame);
     }

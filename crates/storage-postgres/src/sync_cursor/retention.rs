@@ -124,6 +124,9 @@ pub(super) fn cursor_floors(record: &SyncCursorRecord) -> PersistenceResult<Opti
                 // revision zero rejects valid cursors after global GC moves.
                 return Ok(Some((summary, i64::MAX)));
             };
+            if progress.get("agent_memberships").is_some() {
+                return Ok(Some((summary, i64::MAX)));
+            }
             let snapshot = integer(progress.get("snapshot_watermark"))?;
             let completed = progress
                 .get("completed")

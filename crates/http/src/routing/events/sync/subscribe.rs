@@ -104,6 +104,19 @@ pub(super) async fn account_response(
     body: AccountSubscribeParameters,
     grant: Option<String>,
 ) {
+    if crate::routing::events::require_agent_session_scope(
+        &session,
+        arkret_wire::ServiceOperationId::SELF_ACCOUNT_STREAM_SUBSCRIBE_V1,
+    )
+    .is_err()
+    {
+        coland_http::error::render_error_code(
+            coland_http::error::ErrorCode::CapabilityDenied,
+            res,
+            "Agent account subscription is unavailable",
+        );
+        return;
+    }
     if let Some(token) = body
         .realm_list_parameters
         .as_ref()
@@ -200,7 +213,7 @@ pub(super) async fn account_response(
     } else {
         SyncCursor::default()
     };
-    if body.after.is_some() {
+    if body.after.is_some() && session.agent_session().is_none() {
         let actor = match crate::routing::identity::session_actor::session_actor_from_credential(
             &state, &session,
         ) {

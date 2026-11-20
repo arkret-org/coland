@@ -151,6 +151,11 @@ fn validate_sync_binding(
         arkret_hlc::CursorPurpose::Stream
     };
     let stored_scope = match operation {
+        ACCOUNT_STREAM_CURSOR_PURPOSE | "realm_list" => stored
+            .target
+            .as_ref()
+            .and_then(|v| v.get("agent_holder"))
+            .cloned(),
         COMMITTED_STREAM_CURSOR_PURPOSE => stored.target.clone(),
         DEVICE_MESSAGES_CURSOR_PURPOSE => stored
             .target
@@ -206,18 +211,29 @@ pub(crate) const BARRIER_CURSOR_PURPOSE: &str = "barrier";
 fn cursor_account_device(
     state: &AppState,
     session: Option<&SessionIdentityState>,
-) -> (Option<arkret_wire::AccountId>, String) {
+) -> (Option<arkret_wire::AccountId>, Option<String>) {
     let account_id = session.map(|session| {
+        if let Some(agent) = session.agent_session() {
+            return agent.metadata.account_id.clone();
+        }
         arkret_wire::AccountId::new(
             arkret_wire::DidCoreId::new(session.actor.clone())
                 .expect("authenticated actor must be a DID core id"),
             state.service_core_id(),
         )
     });
-    let device_id = session
-        .map(|session| session.require_human_device_id().clone())
-        .unwrap_or_else(|| "anonymous".to_owned());
+    let device_id = session.map_or_else(
+        || Some("anonymous".to_owned()),
+        |session| session.human_device_id().cloned(),
+    );
     (account_id, device_id)
+}
+
+// The Agent holder has no Human device. An opaque continuation is bound
+// to its accepted key and its issuer-materialized disclosure ceiling.
+fn agent_cursor_holder(session: Option<&SessionIdentityState>) -> Option<Value> {
+    let metadata = &session?.agent_session()?.metadata;
+    Some(json!({"holder":metadata.holder_binding,"scope":metadata.scope_details}))
 }
 
 fn cursor_binding_subject(account_id: Option<&arkret_wire::AccountId>) -> String {
@@ -293,6 +309,7 @@ pub(crate) async fn sync_token_for_account_positions(
         "detail_filter": filter.cloned().unwrap_or_else(|| json!({}))
     });
     let global_deadline = match global_baseline.as_ref() {
+        Some(_) if session.is_some_and(|s| s.agent_session().is_some()) => None,
         Some(progress) => {
             let completed = progress.get("completed").ok_or(SyncCursorError::Integrity(
                 "account baseline completion absent",
@@ -345,14 +362,14 @@ pub(crate) async fn sync_token_for_account_positions(
             &CursorState {
                 handle: handle.clone(),
                 binding_subject: Some(binding_subject),
-                device_id: Some(device_id),
+                device_id,
                 session_id: session.map(|session| session.token_hash.clone()),
                 service_id: DidCoreId::new(state.service_id().clone())
                     .expect("AppState service_id must be a validated DID core id"),
                 filter_digest: Some(filter_digest),
                 purpose: ACCOUNT_STREAM_CURSOR_PURPOSE.to_owned(),
                 positions: Some(positions),
-                target: None,
+                target: agent_cursor_holder(session).map(|holder| json!({"agent_holder":holder})),
                 issued_at_ms,
                 expires_at_ms,
             },
@@ -386,7 +403,7 @@ pub(crate) async fn sync_token_for_events_query(
         CursorState {
             handle: handle.clone(),
             binding_subject: Some(binding_subject),
-            device_id: Some(device_id),
+            device_id,
             session_id: session.map(|session| session.token_hash.clone()),
             service_id: DidCoreId::new(state.service_id().clone())
                 .expect("AppState service_id must be a validated DID core id"),
@@ -562,11 +579,11 @@ pub(crate) async fn parse_account_cursor(
         &cursor,
         &record,
         &cursor_binding_subject(account.as_ref()),
-        Some(device),
+        device,
         state.service_core_id(),
         ACCOUNT_STREAM_CURSOR_PURPOSE,
         Some(binding_filter),
-        None,
+        agent_cursor_holder(session),
         now_ms,
     )?;
     if cursor_authority_revoked(state, &cursor, &record, now_ms).await? {
@@ -725,7 +742,7 @@ pub(crate) async fn parse_and_validate_events_query_cursor(
         &cursor,
         &record,
         &cursor_binding_subject(account.as_ref()),
-        Some(device),
+        device,
         state.service_core_id(),
         STREAM_CURSOR_PURPOSE,
         Some(filter_digest),
@@ -771,7 +788,7 @@ pub(crate) async fn parse_and_validate_barrier_cursor(
         &cursor,
         &record,
         &cursor_binding_subject(account.as_ref()),
-        Some(device),
+        device,
         state.service_core_id(),
         BARRIER_CURSOR_PURPOSE,
         None,
@@ -1004,7 +1021,7 @@ pub(super) async fn account_cursor_revoke(
         &cursor,
         &record,
         &cursor_binding_subject(account.as_ref()),
-        Some(device),
+        device,
         state.service_core_id(),
         &record.purpose,
         record.filter_digest.as_deref(),
@@ -1201,6 +1218,8 @@ pub(crate) async fn cursor_authority_revoked(
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct RealmListPosition {
     pub watermark: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible_revision: Option<u64>,
     pub global_watermark: i64,
     pub expires_at_ms: i64,
     pub after: Option<coland_storage::AccountSummaryKey>,
@@ -1215,9 +1234,12 @@ pub(crate) async fn realm_list_token(
 ) -> Result<arkret_wire::Cursor, SyncCursorError> {
     let (account, device) = cursor_account_device(state, Some(session));
     let subject = cursor_binding_subject(account.as_ref());
-    let target = serde_json::to_value(position)
+    let mut target = serde_json::to_value(position)
         .map_err(|_| SyncCursorError::Integrity("invalid list position"))?;
     let now = chrono::Utc::now();
+    if let Some(holder) = agent_cursor_holder(Some(session)) {
+        target["agent_holder"] = holder;
+    }
     let ttl = position.expires_at_ms - now.timestamp_millis();
     if ttl <= 0 {
         return Err(SyncCursorError::Expired);
@@ -1225,6 +1247,7 @@ pub(crate) async fn realm_list_token(
     if let Some(snapshot_token) = position.snapshot_cursor.as_ref() {
         let snapshot = parse_realm_list_cursor(state, session, snapshot_token.as_str()).await?;
         if snapshot.after.is_some()
+            || snapshot.visible_revision != position.visible_revision
             || snapshot.watermark != position.watermark
             || snapshot.global_watermark != position.global_watermark
             || snapshot.expires_at_ms != position.expires_at_ms
@@ -1254,7 +1277,7 @@ pub(crate) async fn realm_list_token(
             &CursorState {
                 handle,
                 binding_subject: Some(subject),
-                device_id: Some(device),
+                device_id: device,
                 session_id: Some(session.token_hash.clone()),
                 service_id: state.service_core_id(),
                 filter_digest: None,
@@ -1289,11 +1312,11 @@ pub(crate) async fn parse_realm_list_cursor(
         &cursor,
         &stored,
         &cursor_binding_subject(account.as_ref()),
-        Some(device),
+        device,
         state.service_core_id(),
         "realm_list",
         None,
-        None,
+        agent_cursor_holder(Some(session)),
         now,
     )?;
     if cursor_authority_revoked(state, &cursor, &stored, now).await? {

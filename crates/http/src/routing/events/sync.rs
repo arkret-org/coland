@@ -414,11 +414,48 @@ async fn account_frame_delivery_guard(
     session: &SessionIdentityState,
     frame: &arkret_models_collaboration::sync_frames::account_subscribe::AccountSubscribeFrame,
 ) -> Result<Option<Box<dyn coland_storage::AccountContentDeliveryGuard>>, crate::error::AppError> {
-    let input =
+    let input = account_frame_input(session, frame)?;
+    content_delivery_guard(state, session, &input).await
+}
+
+pub(super) fn account_frame_input(
+    session: &SessionIdentityState,
+    frame: &arkret_models_collaboration::sync_frames::account_subscribe::AccountSubscribeFrame,
+) -> Result<coland_storage::AccountContentDeliveryInput, crate::error::AppError> {
+    let mut input =
         coland_storage::AccountContentDeliveryInput::account_frame(frame).map_err(|_| {
             crate::error::AppError::capability_denied("current content delivery is unavailable")
         })?;
-    content_delivery_guard(state, session, &input).await
+    if session.agent_session().is_some() {
+        if frame.realms.is_some()
+            || frame.realm_invalidations.is_some()
+            || frame.baseline.is_some()
+            || frame.notifications.is_some()
+            || frame.agent_draft_pending_intents.is_some()
+            || frame.account_data.is_some()
+            || frame.device_lists.is_some()
+            || frame.to_device.is_some()
+        {
+            return Err(crate::error::AppError::capability_denied(
+                "unexpected Agent subscription channel",
+            ));
+        }
+        input.agent_membership_list = Some(
+            frame
+                .realm_list
+                .iter()
+                .flat_map(|p| &p.items)
+                .chain(
+                    frame
+                        .realm_list_changes
+                        .iter()
+                        .flat_map(|changes| &changes.upserts),
+                )
+                .cloned()
+                .collect(),
+        );
+    }
+    Ok(input)
 }
 
 mod subscribe;

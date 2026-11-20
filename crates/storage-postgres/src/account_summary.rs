@@ -167,13 +167,18 @@ pub(crate) async fn publish_realm_account_summary_in_connection(
     // row is locked. A terminal recipient is suppressed; it cannot veto a
     // different member's legitimate Realm authority transaction.
     let mut active_members = Vec::new();
+    let mut agent_keys = std::collections::BTreeSet::new();
     for member in members {
         let actor: arkret_wire::ActorId =
             serde_json::from_str(&member.member_id).map_err(PersistenceError::database)?;
-        if let Some(account) = actor.as_account_id()
-            && !crate::pcr_private_authority::is_active_human_account(conn, account).await?
-        {
-            continue;
+        if let Some(account) = actor.as_account_id() {
+            if crate::realm_authorization_cut::is_owned_agent_in_connection(conn, realm_id, account)
+                .await?
+            {
+                agent_keys.insert(member.member_id.clone());
+            } else if !crate::pcr_private_authority::is_active_human_account(conn, account).await? {
+                continue;
+            }
         }
         active_members.push(member);
     }
@@ -210,11 +215,21 @@ pub(crate) async fn publish_realm_account_summary_in_connection(
     .collect::<std::collections::BTreeMap<_, _>>();
     let mut changed = Vec::new();
     for member in active_members {
-        let summary = derive(
-            &member.membership,
-            title.as_deref(),
-            default_strand_id.as_deref(),
-        )?;
+        let agent = agent_keys.contains(&member.member_id);
+        let summary = if agent {
+            Summary {
+                membership: visible_membership(&member.membership)?
+                    .filter(|value| *value == "join"),
+                title: None,
+                default_strand_id: None,
+            }
+        } else {
+            derive(
+                &member.membership,
+                title.as_deref(),
+                default_strand_id.as_deref(),
+            )?
+        };
         let unchanged = match existing.get(&member.member_id) {
             Some((membership, title, default_strand_id, available)) => {
                 *available
@@ -227,7 +242,7 @@ pub(crate) async fn publish_realm_account_summary_in_connection(
             None => summary.membership.is_none(),
         };
         if !unchanged {
-            changed.push((member.member_id, summary));
+            changed.push((member.member_id, summary, agent));
         }
     }
     if changed.is_empty() {
@@ -240,7 +255,16 @@ pub(crate) async fn publish_realm_account_summary_in_connection(
     .await
     .map_err(PersistenceError::database)?
     .revision;
-    for (actor_key, summary) in changed {
+    for (actor_key, summary, agent) in changed {
+        // Keep this coordinate independent of the Station-wide revision count.
+        // A restricted reader cannot count activity in other Realms from gaps.
+        let activity = if agent {
+            diesel::sql_query("SELECT GREATEST((extract(epoch FROM clock_timestamp())*1000000)::bigint, COALESCE(MAX(activity_position),0)+1) AS revision FROM account_summary_versions WHERE actor_key=$1")
+                .bind::<Text,_>(&actor_key)
+                .get_result::<RevisionRow>(&mut *conn).await.map_err(PersistenceError::database)?.revision
+        } else {
+            revision
+        };
         diesel::sql_query(
             "UPDATE account_summary_versions SET valid_until=$3 \
              WHERE actor_key=$1 AND realm_id=$2 AND valid_until IS NULL",
@@ -254,7 +278,7 @@ pub(crate) async fn publish_realm_account_summary_in_connection(
         diesel::sql_query(
             "INSERT INTO account_summary_versions \
              (actor_key,realm_id,revision,activity_position,membership,title,default_strand_id,invalidated) \
-             VALUES($1,$2,$3,$3,$4,$5,$6,FALSE)",
+             VALUES($1,$2,$3,$7,$4,$5,$6,FALSE)",
         )
         .bind::<Text, _>(&actor_key)
         .bind::<Text, _>(realm_id.as_str())
@@ -262,16 +286,17 @@ pub(crate) async fn publish_realm_account_summary_in_connection(
         .bind::<Nullable<Text>, _>(summary.membership)
         .bind::<Nullable<Text>, _>(summary.title.as_deref())
         .bind::<Nullable<Text>, _>(summary.default_strand_id.as_deref())
+        .bind::<BigInt,_>(activity)
         .execute(&mut *conn)
         .await
         .map_err(PersistenceError::database)?;
         diesel::sql_query(
             "INSERT INTO account_summary_current \
-             (actor_key,realm_id,revision,membership,title,default_strand_id,available) \
-             VALUES($1,$2,$3,$4,$5,$6,TRUE) \
+             (actor_key,realm_id,revision,membership,title,default_strand_id,available,agent_membership_only) \
+             VALUES($1,$2,$3,$4,$5,$6,TRUE,$7) \
              ON CONFLICT(actor_key,realm_id) DO UPDATE SET revision=EXCLUDED.revision, \
              membership=EXCLUDED.membership,title=EXCLUDED.title, \
-             default_strand_id=EXCLUDED.default_strand_id,available=TRUE",
+             default_strand_id=EXCLUDED.default_strand_id,available=TRUE,agent_membership_only=EXCLUDED.agent_membership_only",
         )
         .bind::<Text, _>(&actor_key)
         .bind::<Text, _>(realm_id.as_str())
@@ -279,6 +304,7 @@ pub(crate) async fn publish_realm_account_summary_in_connection(
         .bind::<Nullable<Text>, _>(summary.membership)
         .bind::<Nullable<Text>, _>(summary.title.as_deref())
         .bind::<Nullable<Text>, _>(summary.default_strand_id.as_deref())
+        .bind::<Bool,_>(agent)
         .execute(&mut *conn)
         .await
         .map_err(crate::persistence_query_error)?;

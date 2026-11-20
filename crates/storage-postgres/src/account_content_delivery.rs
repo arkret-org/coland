@@ -3205,6 +3205,8 @@ async fn revalidate_content_inputs_in_connection(
     Ok(())
 }
 
+mod agent_membership;
+
 async fn acquire_with_native_reply(
     pool: &crate::PgPool,
     account: &AccountId,
@@ -3223,6 +3225,12 @@ async fn acquire_with_native_reply(
         .await
         .map_err(PersistenceError::database)?;
     lock_scope_evidence_owner(guard.connection(), &input).await?;
+    if let Some(items) = input.agent_membership_list.as_deref() {
+        return Box::pin(agent_membership::acquire(
+            guard, account, station, &input, items,
+        ))
+        .await;
+    }
     let mut realms = std::collections::BTreeSet::new();
     let candidates = input
         .realms

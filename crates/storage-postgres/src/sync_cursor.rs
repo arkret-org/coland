@@ -600,6 +600,76 @@ mod account_summary_query_tests {
     }
 }
 
+async fn lock_cursor_owner(
+    conn: &mut super::AsyncPgConnection,
+    record: &SyncCursorRecord,
+    account: &arkret_wire::AccountId,
+) -> Result<(), crate::PgTransactionError> {
+    use arkret_models_identity::session_credential::SessionGrantHolderBinding;
+    let Some(binding) = record
+        .target
+        .as_ref()
+        .and_then(|target| target.get("agent_holder"))
+    else {
+        return Ok(
+            crate::pcr_private_authority::require_active_account_owner(conn, account).await?,
+        );
+    };
+    let denied =
+        || PersistenceError::Conflict("Agent membership cursor authority unavailable".into());
+    let Some(holder) = binding.get("holder") else {
+        return Err(denied().into());
+    };
+    let SessionGrantHolderBinding::AgentRuntime {
+        agent_id,
+        agent_key_authorization_ref,
+        verification_method,
+    } = serde_json::from_value(holder.clone()).map_err(|_| denied())?
+    else {
+        return Err(denied().into());
+    };
+    if account.principal_id != agent_id
+        || account.station_id != record.service_id
+        || record.device_id.is_some()
+        || !matches!(
+            record.purpose.as_str(),
+            "realm_list" | arkret_wire::ServiceOperationId::SELF_ACCOUNT_STREAM_SUBSCRIBE_V1
+        )
+    {
+        return Err(denied().into());
+    }
+    let accepted = crate::committed_disclosure::accepted_full_event_in_connection(
+        conn,
+        &agent_key_authorization_ref,
+    )
+    .await?
+    .ok_or_else(denied)?;
+    let realm = &accepted.event.realm_id;
+    if !matches!(crate::pcr_private_authority::accepted_governance(conn, realm).await?,
+        arkret_wire::GenesisGovernance::Agent(owner) if &owner == account)
+    {
+        return Err(denied().into());
+    }
+    let authorization = arkret_wire::CommittedEventRef {
+        event_id: agent_key_authorization_ref,
+        commit_id: accepted.commit.commit_id,
+        stream_ref: accepted.commit.stream_ref,
+        stream_position: accepted.commit.stream_position,
+    };
+    Box::pin(
+        crate::authority_commit::check_agent_endpoint_current_in_connection(
+            conn,
+            realm,
+            &agent_id,
+            &authorization,
+            &verification_method,
+            Utc::now(),
+        ),
+    )
+    .await?;
+    Ok(())
+}
+
 pub(crate) async fn upsert_in_connection(
     conn: &mut super::AsyncPgConnection,
     record: &SyncCursorRecord,
@@ -610,7 +680,7 @@ pub(crate) async fn upsert_in_connection(
     if let Some(subject) = record.binding_subject.as_deref()
         && let Ok(account) = serde_json::from_str::<arkret_wire::AccountId>(subject)
     {
-        crate::pcr_private_authority::require_active_account_owner(conn, &account).await?;
+        Box::pin(lock_cursor_owner(conn, record, &account)).await?;
     }
     let floors = retention::cursor_floors(record)?;
     if let Some((summary, global)) = floors {

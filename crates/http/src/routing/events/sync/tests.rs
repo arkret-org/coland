@@ -853,6 +853,28 @@ const ROSTER_ACTOR_DID: &str = "did:web:alice.example";
 pub(crate) const ROSTER_ACTOR: &str = "ak:did_core:web:alice.example";
 pub(crate) const ROSTER_CALLER: &str = "ak:did_core:web:bob.example";
 
+async fn active_cursor_owner(state: &AppState) -> SessionIdentityState {
+    let account = arkret_wire::AccountId::new(
+        arkret_wire::DidCoreId::new(ROSTER_ACTOR).unwrap(),
+        state.service_core_id(),
+    );
+    state
+        .identities()
+        .save_account(coland_services::identity::AccountProfileState {
+            pk: coland_storage::AccountPk(0),
+            principal_id: account.principal_id.clone(),
+            account_id: account.clone(),
+            localpart: "cursor-owner".into(),
+            display_name: None,
+            biography: None,
+            avatar_blob_ref: None,
+            created_at: now(),
+        })
+        .await
+        .unwrap();
+    roster_session(state, account.principal_id.as_str())
+}
+
 fn roster_body(_audience: &str) -> AccountSubscribeParameters {
     AccountSubscribeParameters::default()
 }
@@ -2004,7 +2026,7 @@ async fn account_cursor_roundtrips_station_cas_replay_position() {
 #[tokio::test]
 async fn account_cursor_is_bound_to_its_account_and_filter() {
     let state = test_state();
-    let alice = roster_session(&state, "ak:did_core:web:alice.example");
+    let alice = active_cursor_owner(&state).await;
     let bob = roster_session(&state, "ak:did_core:web:bob.example");
     let filter_a = json!({"realm_ids": [ROSTER_REALM]});
     let filter_b = json!({"realm_ids": [ROSTER_REALM], "max_window_event_count": 5});
@@ -2817,7 +2839,7 @@ async fn account_and_device_queue_cursors_reject_cross_operation_resume() {
 #[tokio::test]
 async fn realm_list_snapshot_identity_is_stable_and_never_renews_its_deadline() {
     let state = test_state();
-    let session = roster_session(&state, "ak:did_core:web:alice.example");
+    let session = active_cursor_owner(&state).await;
     let (watermark, global_watermark) = state.sync().account_sync_watermarks().await.unwrap();
     let mut position = RealmListPosition {
         visible_revision: None,

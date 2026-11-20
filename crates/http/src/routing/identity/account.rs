@@ -633,7 +633,7 @@ async fn enforce_account_registration_policy(
 
 async fn agent_direct_authorization_basis(
     state: &AppState,
-    controller: &str,
+    controller: &arkret_wire::AccountId,
     agent_id: &str,
 ) -> Result<Option<arkret_models_collaboration::objects::direct_conversation::DirectConversationAuthorizationBasis>, AppError>{
     let Some(record) = state
@@ -644,7 +644,7 @@ async fn agent_direct_authorization_basis(
     else {
         return Ok(None);
     };
-    if record.controller_principal_id != controller {
+    if record.controller_principal_id != controller.principal_id.as_str() {
         return Ok(None);
     }
     let unavailable = |detail| {
@@ -654,6 +654,14 @@ async fn agent_direct_authorization_basis(
         )
         .with_private_detail(detail)
     };
+    let accepted_controller = super::agent_pcr::agent_controller_account(state, &record)
+        .await
+        .map_err(|_| {
+            unavailable("owned-Agent controller Account binding is unavailable".to_owned())
+        })?;
+    if &accepted_controller != controller {
+        return Ok(None);
+    }
     if record.state != AgentLifecycleState::Active {
         return Err(unavailable(format!(
             "owned Agent is not active: agent_id={agent_id}, state={}",
@@ -668,13 +676,15 @@ async fn agent_direct_authorization_basis(
     .await
     {
         return Err(unavailable(format!(
-            "owned-Agent controller binding validation failed: agent_id={agent_id}, controller={controller}, error={error}"
+            "owned-Agent controller binding validation failed: agent_id={agent_id}, controller={}, error={error}",
+            controller.principal_id
         )));
     }
     agent_direct_authorization_basis_from_record(&record)
         .ok_or_else(|| {
             unavailable(format!(
-                "owned-Agent authorization basis is incomplete: agent_id={agent_id}, controller={controller}"
+                "owned-Agent authorization basis is incomplete: agent_id={agent_id}, controller={}",
+                controller.principal_id
             ))
         })
         .map(Some)
@@ -1666,12 +1676,24 @@ async fn resolve_direct_peer(
     // coordinates exist, a scope/lifecycle change suspends sending but must
     // not make those coordinates disappear.
     let scope = "direct_message";
-    let agent_basis = agent_direct_authorization_basis(
-        state,
-        &session.actor,
-        peer.signing_principal_id().as_str(),
-    )
-    .await?;
+    // Both participants can resolve this pair. Keep the controller and runtime
+    // roles fixed regardless of which participant made the authenticated read.
+    let owned_roles = match (session.agent_session().is_some(), peer_descriptor) {
+        (false, ContactPeer::Agent { controller_account_id, .. })
+            if actor.as_account_id() == Some(controller_account_id) => Some((&actor, &peer)),
+        (true, ContactPeer::Human { .. }) => Some((&peer, &actor)),
+        _ => None,
+    };
+    let agent_basis = match owned_roles {
+        Some((controller, agent)) => match (controller.as_account_id(), agent.as_account_id()) {
+            (Some(controller), Some(agent)) if agent.station_id == state.service_core_id() => {
+                agent_direct_authorization_basis(state, controller, agent.principal_id.as_str()).await?
+            }
+            _ => None,
+        },
+        None => None,
+    };
+    let owned_roles = owned_roles.filter(|_| agent_basis.is_some());
     let contact = if agent_basis.is_some() {
         None
     } else {
@@ -1889,10 +1911,10 @@ async fn resolve_direct_peer(
                 send_blockers.push(DirectConversationSendBlocker::ContactScopeStale);
             }
         }
-        if agent_basis.is_some() {
+        if let Some((_, agent)) = owned_roles {
             let agent_active = state
                 .agent_pairings()
-                .agent(peer.signing_principal_id().as_str())
+                .agent(agent.signing_principal_id().as_str())
                 .await
                 .map_err(|error| AppError::internal(format!("Agent lookup failed: {error}")))?
                 .is_some_and(|agent| agent.state == AgentLifecycleState::Active);
@@ -1942,13 +1964,11 @@ async fn resolve_direct_peer(
     // No accepted binding yet. Creation is founder-only: this endpoint never creates, and waiting
     // never grants create authority to the non-founder — there is no timeout fallback or takeover.
     let founder = direct_founder_for_pair(
-        state,
         &actor,
         &peer,
         contact.as_deref(),
-        agent_basis.is_some(),
-    )
-    .await?;
+        owned_roles.map(|(controller, _)| controller),
+    );
     if agent_basis.is_none() && !has_accepted_contact {
         tracing::warn!(
             diagnostic = "accepted_contact",
@@ -2465,6 +2485,27 @@ mod tests {
             serde_json::from_value::<AccountProjectionRequestBody>(did_url).is_err(),
             "did must not contain DID URL path, query, or fragment components"
         );
+    }
+
+    #[test]
+    fn agent_direct_founder_is_the_verified_controller_in_both_directions() {
+        let account = |id: &str| {
+            arkret_wire::ActorId::account(arkret_wire::AccountId::new(
+                arkret_wire::DidCoreId::new(id.to_owned()).unwrap(),
+                crate::test_event::station_id(),
+            ))
+        };
+        let controller = account("ak:did_core:web:controller.example");
+        let agent = account("ak:did_core:web:agent.example");
+        let unrelated = account("ak:did_core:web:other.example");
+        for (actor, peer) in [(&controller, &agent), (&agent, &controller)] {
+            assert_eq!(
+                direct_founder_for_pair(actor, peer, None, Some(&controller)),
+                Some(controller.to_string())
+            );
+            assert_eq!(direct_founder_for_pair(actor, peer, None, None), None);
+            assert_eq!(direct_founder_for_pair(actor, peer, None, Some(&unrelated)), None);
+        }
     }
 
     #[test]

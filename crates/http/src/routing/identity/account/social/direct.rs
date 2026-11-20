@@ -230,47 +230,25 @@ pub(crate) fn direct_founding_authority_from_contact(
 ///
 /// Returns `None` when the authority cannot be verified, so the caller reports
 /// `temporarily_unavailable` rather than inventing an answer.
-pub(crate) async fn direct_founder_for_pair(
-    state: &AppState,
+pub(crate) fn direct_founder_for_pair(
     actor: &arkret_wire::ActorId,
     peer: &arkret_wire::ActorId,
     contact: Option<&ContactRecord>,
-    agent: bool,
-) -> Result<Option<String>, AppError> {
+    owned_controller: Option<&arkret_wire::ActorId>,
+) -> Option<String> {
     use arkret_models_collaboration::objects::direct_conversation::{
         DirectConversationFoundingAuthority, direct_conversation_founder,
     };
 
-    let authority = if agent {
-        // controller-to-own-Agent has no Contact round; the founder is fixed to the controller so
-        // an Agent runtime key never needs Direct Conversation founding scope.
-        let controller = if state
-            .agent_pairings()
-            .agent(peer.signing_principal_id().as_str())
-            .await
-            .map_err(|error| AppError::internal(format!("Agent lookup failed: {error}")))?
-            .is_some()
-        {
-            actor
-        } else {
-            peer
-        };
+    let authority = if let Some(controller) = owned_controller {
         DirectConversationFoundingAuthority::ControllerOwnedAgent {
             controller_actor_id: controller.clone(),
         }
     } else {
-        let Some(record) = contact else {
-            return Ok(None);
-        };
-        match direct_founding_authority_from_contact(record) {
-            Ok(authority) => authority,
-            Err(_) => return Ok(None),
-        }
+        direct_founding_authority_from_contact(contact?).ok()?
     };
 
-    Ok(
-        direct_conversation_founder([actor.clone(), peer.clone()], &authority)
-            .ok()
-            .map(|founder| founder.to_string()),
-    )
+    direct_conversation_founder([actor.clone(), peer.clone()], &authority)
+        .ok()
+        .map(|founder| founder.to_string())
 }

@@ -2041,8 +2041,13 @@ mod held_mls_current_tests {
             .await
             .unwrap();
         drop(conn);
-        assert!(
-            groups.held_current_value(&scope).await.is_err(),
+        assert_eq!(
+            groups
+                .held_current_value(&scope)
+                .await
+                .unwrap_err()
+                .conflict_code(),
+            Some(coland_storage::ConflictCode::TemporarilyUnavailable),
             "a stored projection without its verified current cut is unavailable"
         );
     }

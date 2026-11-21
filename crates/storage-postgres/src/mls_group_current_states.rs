@@ -1776,8 +1776,9 @@ impl MlsGroupCurrentStore for PgMlsGroupCurrentStore {
                     .bind::<Jsonb, _>(serde_json::to_value(selector).map_err(PersistenceError::database)?)
                     .get_result::<KnownGroup>(&mut *conn).await?;
                 if known.known {
-                    return Err(PersistenceError::Conflict(
-                        "revision_unavailable: held MLS current lacks an exact verified cut".into(),
+                    return Err(refused(
+                        ConflictCode::TemporarilyUnavailable,
+                        "held MLS current lacks an exact verified cut",
                     ).into());
                 }
             }

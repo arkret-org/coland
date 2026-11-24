@@ -485,6 +485,209 @@ async fn scope_member_readable(
     })
 }
 
+/// Decide the registered content query at one governing snapshot. Source
+/// authentication is done by the peer handler. No local Agent PCR is needed.
+pub(crate) async fn governed_content_intent(
+    conn: &mut AsyncPgConnection,
+    request: &arkret_models_collaboration::governance::realm_join_intake::PeerRealmJoinBootstrapRequestBody,
+    governor: &arkret_wire::DidCoreId,
+) -> PersistenceResult<
+    arkret_models_collaboration::governance::realm_join_intake::OwnedAgentContentResponse,
+> {
+    use arkret_models_collaboration::governance::operation_wire::AgentPolicyOperation;
+    use arkret_models_collaboration::governance::realm_join_intake::OwnedAgentContentResponse;
+    use arkret_models_identity::{
+        SessionGrantScope, SessionGrantScopeConstraints, SessionGrantScopeResources,
+    };
+    let denied = || capability_denied("owned Agent content intent is not currently permitted");
+    request.validate_selectors().map_err(|_| denied())?;
+    let intent = request.content_intent.as_ref().ok_or_else(denied)?;
+    let realm = &request.realm_id;
+    let at = chrono::Utc::now();
+    let governed = sql_query("SELECT EXISTS(SELECT 1 FROM realm_authorities WHERE realm_id=$1 AND service_id=$2) AS present")
+        .bind::<Text,_>(realm.as_str()).bind::<Text,_>(governor.as_str())
+        .get_result::<crate::query_rows::ExistsRow>(&mut *conn).await.map_err(PersistenceError::database)?;
+    if !governed.present
+        || intent.backup_root_context.is_some()
+        || crate::account_stream_scan::realm_purpose(conn, realm).await?
+            != Some(
+                arkret_models_collaboration::events_payloads::realm::RealmPurpose::Collaboration,
+            )
+    {
+        return Err(denied());
+    }
+    let pair = crate::agent_interaction_current_states::governed_join_pair(
+        conn,
+        realm,
+        &request.member_account_id,
+        at,
+        false,
+        None,
+    )
+    .await?
+    .ok_or_else(denied)?;
+    if pair.controller != intent.controller_account_id
+        || pair.agent_commit.commit_id != request.membership_commit_id
+        || pair.controller_commit.commit_id != intent.controller_membership_commit_id
+    {
+        return Err(denied());
+    }
+    let resource = match (&intent.effective_scope, &intent.strand_id) {
+        (_, Some(strand)) => WireResourceSelector::strand(realm.clone(), strand.clone()),
+        (arkret_wire::ScopeRef::Realm { .. }, None) => WireResourceSelector::realm(realm.clone()),
+        // A Circle alone cannot be represented by the flat issuer resource ceiling.
+        _ => return Err(denied()),
+    };
+    let agent = ActorId::account(request.member_account_id.clone());
+    let controller = ActorId::account(pair.controller.clone());
+    if confirmed_resource_scope(conn, realm, &resource)
+        .await?
+        .as_ref()
+        != Some(&intent.effective_scope)
+    {
+        return Err(denied());
+    }
+    // The signed source binds the controller to this Agent. Read both
+    // members' governing floors directly without requiring a private PCR here.
+    for actor in [&agent, &controller] {
+        let floor = match &intent.effective_scope {
+            arkret_wire::ScopeRef::Realm { .. } => {
+                crate::account_stream_scan::member_realm_floor_in_connection(conn, realm, actor)
+                    .await?
+            }
+            arkret_wire::ScopeRef::Circle { circle_id, .. } => {
+                crate::account_stream_scan::member_circle_floor_in_connection(
+                    conn, realm, circle_id, actor,
+                )
+                .await?
+            }
+            _ => return Err(denied()),
+        };
+        if floor.is_none() {
+            return Err(denied());
+        }
+    }
+    let cut = RealmAuthorizationCut::read(conn, realm, &agent).await?;
+    let controller_cut = RealmAuthorizationCut::read(conn, realm, &controller).await?;
+    let source = IssuerAuthorityRef::OwnedAgent {
+        realm_id: realm.clone(),
+        controller_account_id: pair.controller.clone(),
+        controller_join_event_id: pair.controller_commit.event_ref,
+        agent_join_event_id: pair.agent_commit.event_ref,
+    };
+    let mut auth = cut.controller_source_authorization(&controller_cut, at, Some(source))?;
+    let policies =
+        crate::policy_current_states::read_scoped_agent_management_policy_snapshot_in_connection(
+            conn,
+            realm,
+            intent.effective_scope.circle_id(),
+        )
+        .await?;
+    auth.agent_ceiling
+        .as_mut()
+        .ok_or_else(denied)?
+        .management_policies = policies.clone();
+    let action: CapabilityActionId = serde_json::from_value(
+        serde_json::to_value(intent.action).map_err(PersistenceError::database)?,
+    )
+    .map_err(PersistenceError::database)?;
+    let read = crate::agent_session_authority::membership_read(action.as_str());
+    if !read {
+        cut.require_open_business_mutation()?;
+    }
+    let resources =
+        crate::agent_management_admission::selector_content_resources(realm, &resource)?;
+    let effect = arkret_policy::agent_management::evaluate_agent_management(
+        Some(&policies),
+        &arkret_policy::agent_management::AgentManagementContext {
+            realm_id: realm,
+            ownership: Some((&pair.controller, &request.member_account_id)),
+            operation: if read {
+                AgentPolicyOperation::Read
+            } else {
+                AgentPolicyOperation::Execute
+            },
+            content_action: Some(action),
+            resources: Some(&resources),
+            at,
+        },
+    )
+    .map_err(PersistenceError::database)?;
+    if effect != arkret_wire::PolicyEffect::Allow {
+        return Err(denied());
+    }
+    let facts = OperationFacts {
+        strand_id: intent.strand_id.as_ref().map(ToString::to_string),
+        circle_id: intent.effective_scope.circle_id().map(ToString::to_string),
+        object_kind: (action == CapabilityActionId::MessageCreate).then(|| "message".to_owned()),
+        ..Default::default()
+    };
+    let actions = [action.as_str()];
+    let verdict = auth.evaluate_with_approvals_checked(&actions, &resource, &facts, &[])?;
+    if verdict.is_refusal() || (!read && verdict.unreserved().is_empty()) {
+        return Err(denied());
+    }
+    let mut scopes = vec![format!("realm:{realm}")];
+    if let Some(circle) = intent.effective_scope.circle_id() {
+        scopes.push(format!("circle:{realm}:{circle}"));
+    }
+    if let Some(strand) = &intent.strand_id {
+        scopes.push(format!("strand:{realm}:{strand}"));
+    }
+    for scope in scopes {
+        if let Some(bits) = crate::agent_participation_admission::governance_component_snapshot(
+            conn,
+            realm.as_str(),
+            &scope,
+        )
+        .await?
+        {
+            if (action == CapabilityActionId::MessageCreate && !bits.message_creation_allowed)
+                || (action == CapabilityActionId::ReactionAdd && !bits.reaction_addition_allowed)
+                || (action == CapabilityActionId::ReactionRemove && !bits.reaction_removal_allowed)
+            {
+                return Err(denied());
+            }
+        }
+    }
+    let strand_ids: Vec<_> = intent.strand_id.clone().into_iter().collect();
+    let realm_ids: Vec<_> = if strand_ids.is_empty() {
+        vec![realm.clone()]
+    } else {
+        vec![]
+    };
+    let details = SessionGrantScope {
+        controller_principal_id: pair.controller.principal_id,
+        agent_key_authorization_ref: intent.agent_key_authorization_ref.clone(),
+        realm_ids: realm_ids.clone(),
+        strand_ids: strand_ids.clone(),
+        resources: SessionGrantScopeResources {
+            realm_ids,
+            strand_ids: strand_ids.clone(),
+        },
+        constraints: SessionGrantScopeConstraints {
+            allowed_tracks: vec![],
+            allowed_data_labels: vec![],
+            allowed_endpoints: vec![],
+            allowed_strand_ids: (!strand_ids.is_empty()).then_some(strand_ids),
+        },
+        capability_grant_refs: verdict
+            .unreserved()
+            .into_iter()
+            .take(1)
+            .map(|grant| grant.id.to_string())
+            .collect(),
+        policy_refs: policies.iter().map(|p| p.id.to_string()).collect(),
+        participations: None,
+    };
+    Ok(OwnedAgentContentResponse {
+        request_id: request.request_id.clone(),
+        content_intent: intent.clone(),
+        membership_commit_id: request.membership_commit_id.clone(),
+        scope_details: details,
+    })
+}
+
 /// Read-only native capability/Policy preflight. Actual admission still proves
 /// the signed operation, key/session ceiling, fields, approvals and quota.
 pub(crate) async fn owned_agent_authorization_check_in_connection(
@@ -658,6 +861,7 @@ pub(crate) struct RealmAuthorizationCut {
     direct_conversation: Option<ProfileAuthority>,
     /// Narrow delegated Service admission to the signed authorization_ref.
     selected_grant: Option<GrantId>,
+    forwarded_message_source: Option<IssuerAuthorityRef>,
     native_operation: Option<(CapabilityActionId, WireResourceSelector)>,
 }
 
@@ -821,6 +1025,7 @@ impl RealmAuthorizationCut {
             direct_conversation: None,
             selected_grant: None,
             native_operation: None,
+            forwarded_message_source: None,
         })
     }
 
@@ -1276,11 +1481,30 @@ impl RealmAuthorizationCut {
         .await
     }
 
+    async fn actor_owned_source(
+        &self,
+        conn: &mut AsyncPgConnection,
+        at: chrono::DateTime<chrono::Utc>,
+        lock: bool,
+    ) -> PersistenceResult<Option<IssuerAuthorityRef>> {
+        if let Some(source) = &self.forwarded_message_source {
+            return Ok(Some(source.clone()));
+        }
+        owned_source_in_connection(conn, &self.realm_id, &self.actor, at, lock).await
+    }
+
     pub(crate) async fn owned_controller_in_connection(
         &self,
         conn: &mut AsyncPgConnection,
         at: chrono::DateTime<chrono::Utc>,
     ) -> PersistenceResult<Option<ActorId>> {
+        if let Some(IssuerAuthorityRef::OwnedAgent {
+            controller_account_id,
+            ..
+        }) = &self.forwarded_message_source
+        {
+            return Ok(Some(ActorId::account(controller_account_id.clone())));
+        }
         Box::pin(owned_controller_in_connection(
             conn,
             &self.realm_id,
@@ -1464,14 +1688,7 @@ impl RealmAuthorizationCut {
         };
         let evaluation = if let Some(controller_cut) = &controller_cut {
             controller_cut.require_governed_member(&EventKind::CapabilityGrant)?;
-            let owned_source = Box::pin(owned_source_in_connection(
-                conn,
-                &self.realm_id,
-                &self.actor,
-                operation.at,
-                true,
-            ))
-            .await?;
+            let owned_source = Box::pin(self.actor_owned_source(conn, operation.at, true)).await?;
             let authorization =
                 self.controller_source_authorization(controller_cut, operation.at, owned_source)?;
             // Filtering a forbidden allow path must not discard an existing
@@ -1681,13 +1898,38 @@ impl RealmAuthorizationCut {
         let CapabilitySubject::Actor(subject) = &body.subject else {
             return Err(capability_denied("owned grant requires an Agent Account"));
         };
+        let current_source = if let Some(home) =
+            crate::capability_grant_current_states::home_verified_grant_controller(
+                conn, event, body,
+            )
+            .await?
+        {
+            let agent = subject
+                .as_account_id()
+                .ok_or_else(|| capability_denied("owned grant requires an Agent Account"))?;
+            crate::agent_interaction_current_states::governed_join_pair(
+                conn,
+                &event.realm_id,
+                agent,
+                at,
+                true,
+                None,
+            )
+            .await?
+            .filter(|pair| &pair.controller == home)
+            .map(|pair| IssuerAuthorityRef::OwnedAgent {
+                realm_id: event.realm_id.clone(),
+                controller_account_id: pair.controller,
+                controller_join_event_id: pair.controller_commit.event_ref,
+                agent_join_event_id: pair.agent_commit.event_ref,
+            })
+        } else {
+            owned_source_in_connection(conn, &event.realm_id, subject, at, true).await?
+        };
         if event.executed_by.is_some()
             || event.actor_id != body.issuer_id
             || event.actor_id.as_account_id() != Some(controller_account_id)
-            || owned_source_in_connection(conn, &event.realm_id, subject, at, true)
-                .await?
-                .as_ref()
-                != Some(reference)
+            || current_source.as_ref() != Some(reference)
         {
             return Err(capability_denied(
                 "owned grant exact current source differs",
@@ -1800,8 +2042,7 @@ impl RealmAuthorizationCut {
         event: &arkret_wire::Event,
         at: chrono::DateTime<chrono::Utc>,
     ) -> PersistenceResult<()> {
-        let source =
-            owned_source_in_connection(conn, &self.realm_id, &self.actor, at, false).await?;
+        let source = self.actor_owned_source(conn, at, false).await?;
         self.require_membership_read_constraints(event, at, source)
     }
 
@@ -2312,8 +2553,7 @@ impl RealmAuthorizationCut {
         };
         controller_cut.require_governed_member(&EventKind::CapabilityGrant)?;
         self.require_same_grant_cut(&controller_cut)?;
-        let owned_source =
-            owned_source_in_connection(conn, &self.realm_id, &self.actor, at, lock).await?;
+        let owned_source = self.actor_owned_source(conn, at, lock).await?;
         let source_cut = std::sync::Arc::clone(authorization.source_cut());
         authorization = self.actor_authorization_on_source_cut(
             at,
@@ -2669,10 +2909,7 @@ impl RealmAuthorizationCut {
                 (Vec::new(), Vec::new(), false, Vec::new())
             };
         let owned_source = if self.has_owned_actor_grants() {
-            crate::boxed_future(|| {
-                owned_source_in_connection(conn, &self.realm_id, &self.actor, at, true)
-            })
-            .await?
+            crate::boxed_future(|| self.actor_owned_source(conn, at, true)).await?
         } else {
             None
         };
@@ -2777,16 +3014,7 @@ impl RealmAuthorizationCut {
         let mut accepted = Vec::new();
         let mut missing = false;
         let owned_source = if self.has_owned_actor_grants() {
-            crate::boxed_future(|| {
-                owned_source_in_connection(
-                    conn,
-                    &self.realm_id,
-                    &self.actor,
-                    commit.committed_at,
-                    true,
-                )
-            })
-            .await?
+            crate::boxed_future(|| self.actor_owned_source(conn, commit.committed_at, true)).await?
         } else {
             None
         };
@@ -3472,16 +3700,7 @@ impl RealmAuthorizationCut {
             })
             .await?;
         let owned_source = if self.has_owned_actor_grants() {
-            crate::boxed_future(|| {
-                owned_source_in_connection(
-                    conn,
-                    &self.realm_id,
-                    &self.actor,
-                    commit.committed_at,
-                    true,
-                )
-            })
-            .await?
+            crate::boxed_future(|| self.actor_owned_source(conn, commit.committed_at, true)).await?
         } else {
             None
         };
@@ -4405,10 +4624,46 @@ pub(crate) fn authorize_message_create_in_connection<'a>(
     attributed: &'a arkret_wire::Event,
     commit: &'a arkret_wire::RealmCommit,
     prepared: Option<&'a coland_storage::EventApprovalCommit>,
+    forwarded: Option<&'a arkret_identity::agent_authority_evidence::VerifiedAgentProducer>,
 ) -> MessageCreateAuthorizationFuture<'a> {
     Box::pin(async move {
         lock_realm_authorization_cut(conn, &event.realm_id).await?;
-        let cut = RealmAuthorizationCut::read_for_event(conn, attributed).await?;
+        let mut cut = RealmAuthorizationCut::read_for_event(conn, attributed).await?;
+        if let Some(home) =
+            forwarded.filter(|_| event.executed_by.is_none() && !cut.is_direct_conversation())
+        {
+            if event.actor_id.as_account_id() != Some(home.account()) || event.actor_id != cut.actor
+            {
+                return Err(capability_denied(
+                    "forwarded Agent differs from the message author",
+                ));
+            }
+            let pair = crate::agent_interaction_current_states::governed_join_pair(
+                conn,
+                &event.realm_id,
+                home.account(),
+                commit.committed_at,
+                true,
+                None,
+            )
+            .await?
+            .filter(|pair| {
+                pair.controller.principal_id
+                    == home
+                        .evidence()
+                        .controller_account_gate_attestation
+                        .principal_id
+            })
+            .ok_or_else(|| {
+                capability_denied("forwarded Agent has no current controller binding")
+            })?;
+            cut.forwarded_message_source = Some(IssuerAuthorityRef::OwnedAgent {
+                realm_id: event.realm_id.clone(),
+                controller_account_id: pair.controller,
+                controller_join_event_id: pair.controller_commit.event_ref,
+                agent_join_event_id: pair.agent_commit.event_ref,
+            });
+        }
         let approved = Box::pin(
             cut.require_message_create_with_approvals(conn, event, attributed, commit, prepared),
         )
@@ -4736,6 +4991,7 @@ mod operation_fact_tests {
             direct_conversation: None,
             selected_grant: None,
             native_operation: None,
+            forwarded_message_source: None,
         };
         let before = "2026-09-21T01:00:00Z".parse().unwrap();
         complete_current_revisions(&mut cut);
@@ -4796,6 +5052,7 @@ mod operation_fact_tests {
             direct_conversation: None,
             selected_grant: None,
             native_operation: None,
+            forwarded_message_source: None,
         };
         assert_eq!(
             cut.audit_grant_dependencies(&target),
@@ -4886,6 +5143,7 @@ mod operation_fact_tests {
             direct_conversation: None,
             selected_grant: None,
             native_operation: None,
+            forwarded_message_source: None,
         };
         let (target, facts) = cut.event_operation(&event);
         assert_eq!(
@@ -4956,6 +5214,7 @@ mod operation_fact_tests {
             direct_conversation: None,
             selected_grant: None,
             native_operation: None,
+            forwarded_message_source: None,
         };
         let (target, facts) = cut.event_operation(&event);
         assert_eq!(target, WireResourceSelector::realm(realm_id));

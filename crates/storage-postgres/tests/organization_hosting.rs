@@ -643,6 +643,7 @@ impl DeviceFixture {
             PgPersistenceStore::new(self.base.h.pool.clone()).account_device_signer_evidence().prepare_forward_request(
                 &arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequestBody::AuthorityForwardEvent(self.base.native.write.request.clone()),
                 &project_did_to_core_id(&self.base.native.governor.did.parse().unwrap()).unwrap(),
+                None,
             ).await.unwrap().unwrap()
         };
         let evidence = arkret_models_identity::ForwardAccountDeviceSignerEvidence {

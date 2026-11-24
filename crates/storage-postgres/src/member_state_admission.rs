@@ -483,74 +483,14 @@ async fn supported_join_gates(
     Ok(gates)
 }
 
-/// The ordinary-Realm controller carve-out is a caller-signed Agent join.
-/// Every input that authorizes it is read under this RealmCommit transaction.
-async fn check_agent_controller_join(
+pub(crate) async fn native_join_authority(
     conn: &mut AsyncPgConnection,
-    event: &arkret_wire::Event,
-    commit: &arkret_wire::RealmCommit,
-    payload: &MembershipPayload,
-    review: Option<&crate::agent_management_review::ReviewAdmission>,
-) -> PersistenceResult<()> {
+    agent: &arkret_wire::AccountId,
+    controller: &arkret_wire::AccountId,
+    at: chrono::DateTime<chrono::Utc>,
+) -> PersistenceResult<arkret_wire::RealmId> {
     use arkret_models_collaboration::events_payloads::agent::AgentProvisioningValue;
     use arkret_models_collaboration::governance::accountability::AccountabilityProjection;
-
-    let binding = payload
-        .agent_controller_binding
-        .as_ref()
-        .ok_or_else(|| failed_precondition("Agent join lacks its controller binding"))?;
-    let controller = event
-        .actor_id
-        .as_account_id()
-        .ok_or_else(|| capability_denied("Agent controller must be an Account"))?;
-    let agent = payload
-        .member_id
-        .as_account_id()
-        .ok_or_else(|| capability_denied("Agent target must be an Account"))?;
-    if controller != &binding.controller_account_id
-        || controller == agent
-        || controller.station_id != agent.station_id
-        || binding.controller_terminal_event_ref.is_some()
-        || payload.membership_cause.is_some()
-    {
-        return Err(capability_denied(
-            "Agent controller binding is not the exact writer/target pair",
-        ));
-    }
-    if crate::realm_authorization_cut::is_owned_agent_in_connection(
-        conn,
-        &event.realm_id,
-        controller,
-    )
-    .await?
-    {
-        return Err(capability_denied(
-            "an Agent cannot supply another Agent's controller authority",
-        ));
-    }
-    let current = sql_query(
-        "SELECT m.membership, e.envelope->>'event_id' AS event_id FROM member_state_current_states m \
-         JOIN realm_commits c ON c.commit_id=m.current_commit_id \
-         JOIN canonical_events e ON e.pk=c.event_pk \
-         WHERE m.realm_id=$1 AND m.member_id=$2 \
-           AND c.realm_id=m.realm_id AND c.stream_position=m.current_stream_position \
-           AND c.stream_ref->>'kind'='realm' AND c.stream_ref->>'realm_id'=m.realm_id \
-         FOR SHARE OF m",
-    )
-    .bind::<Text, _>(event.realm_id.as_str())
-    .bind::<Text, _>(event.actor_id.to_string())
-    .get_result::<ControllerJoinRow>(&mut *conn)
-    .await
-    .optional()
-    .map_err(PersistenceError::database)?;
-    if !current.is_some_and(|row| {
-        row.membership == "join"
-            && row.event_id == binding.controller_membership_generation_ref.as_str()
-    }) {
-        return Err(failed_precondition(
-            "controller is not in its bound joined generation",
-        ));
-    }
 
     let provisioning = sql_query(
         "SELECT p.value FROM agent_provisioning_current_states p \
@@ -607,7 +547,7 @@ async fn check_agent_controller_join(
             serde_json::from_value(row.value).map_err(|error| {
                 PersistenceError::Internal(format!("Agent accountability current invalid: {error}"))
             })?;
-        accountable |= value.verifies_at(commit.committed_at);
+        accountable |= value.verifies_at(at);
     }
     if !accountable {
         return Err(failed_precondition(
@@ -618,16 +558,166 @@ async fn check_agent_controller_join(
     // verified ownership reader is used by first join, review and later current
     // reads, so default-allow policy cannot bypass the independent bootstrap.
     crate::agent_interaction_current_states::owned_provenance_in_connection(
-        conn,
-        agent,
-        controller,
-        commit.committed_at,
-        true,
+        conn, agent, controller, at, true,
     )
     .await?
     .ok_or_else(|| {
         failed_precondition("Agent complete accepted ownership and DID binding are unavailable")
     })?;
+    Ok(provisioning.principal_control_realm_id)
+}
+
+async fn verify_controller_generation(
+    conn: &mut AsyncPgConnection,
+    event: &arkret_wire::Event,
+    generation: &arkret_wire::EventId,
+) -> PersistenceResult<()> {
+    let current = sql_query(
+        "SELECT m.membership, e.envelope->>'event_id' AS event_id FROM member_state_current_states m \
+         JOIN realm_commits c ON c.commit_id=m.current_commit_id \
+         JOIN canonical_events e ON e.pk=c.event_pk \
+         WHERE m.realm_id=$1 AND m.member_id=$2 \
+           AND c.realm_id=m.realm_id AND c.stream_position=m.current_stream_position \
+           AND c.stream_ref->>'kind'='realm' AND c.stream_ref->>'realm_id'=m.realm_id \
+         FOR SHARE OF m",
+    )
+    .bind::<Text, _>(event.realm_id.as_str())
+    .bind::<Text, _>(event.actor_id.to_string())
+    .get_result::<ControllerJoinRow>(&mut *conn)
+    .await
+    .optional()
+    .map_err(PersistenceError::database)?;
+    if !current.is_some_and(|row| row.membership == "join" && row.event_id == generation.as_str()) {
+        return Err(failed_precondition(
+            "controller is not in its bound joined generation",
+        ));
+    }
+    Ok(())
+}
+
+/// Check native target facts for the exact controller-signed join or public-mode forward.
+pub(crate) async fn verify_forwarded_controller_target(
+    conn: &mut AsyncPgConnection,
+    event: &arkret_wire::Event,
+    author: &arkret_wire::AccountId,
+    at: chrono::DateTime<chrono::Utc>,
+) -> PersistenceResult<()> {
+    if event.kind == arkret_wire::EventKind::AgentInteractionSet {
+        use arkret_models_collaboration::agent_interaction::{
+            AgentInteractionMode, AgentInteractionSetPayload,
+        };
+        let mode: AgentInteractionSetPayload = serde_json::from_value(
+            serde_json::to_value(&event.payload).map_err(PersistenceError::database)?,
+        )
+        .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
+        if mode.interaction_mode == AgentInteractionMode::Public {
+            if mode.controller_account_id != *author
+                || mode.agent_account_id == *author
+                || mode.agent_account_id.station_id != author.station_id
+                || event.actor_id.as_account_id() != Some(author)
+                || event.executed_by.is_some()
+                || event.applet_id.is_some()
+                || event.scope_ref
+                    != (arkret_wire::ScopeRef::Realm {
+                        realm_id: event.realm_id.clone(),
+                    })
+            {
+                return Err(capability_denied(
+                    "public Agent mode requires the exact home controller",
+                ));
+            }
+            native_join_authority(conn, &mode.agent_account_id, author, at).await?;
+        }
+        return Ok(());
+    }
+    if event.kind != arkret_wire::EventKind::MemberState {
+        return Ok(());
+    }
+    let payload: MembershipPayload = serde_json::from_value(
+        serde_json::to_value(&event.payload).map_err(PersistenceError::database)?,
+    )
+    .map_err(|e| PersistenceError::SchemaViolation(e.to_string()))?;
+    let Some(binding) = &payload.agent_controller_binding else {
+        return Ok(());
+    };
+    let agent = payload
+        .member_id
+        .as_account_id()
+        .ok_or_else(|| capability_denied("Agent target must be an Account"))?;
+    if payload.membership != MembershipPayloadState::Join
+        || &binding.controller_account_id != author
+        || event.actor_id.as_account_id() != Some(author)
+        || event.executed_by.is_some()
+        || author == agent
+        || agent.station_id != author.station_id
+        || binding.controller_terminal_event_ref.is_some()
+        || payload.membership_cause.is_some()
+        || crate::realm_authorization_cut::is_owned_agent_in_connection(
+            conn,
+            &event.realm_id,
+            author,
+        )
+        .await?
+    {
+        return Err(capability_denied("invalid originating controller join"));
+    }
+    let join =
+        crate::replica_authorization::current_join_commit(conn, &event.realm_id, author).await?;
+    if join.is_none_or(|commit| commit.event_ref != binding.controller_membership_generation_ref) {
+        return Err(failed_precondition(
+            "home Station lacks the controller's bound join",
+        ));
+    }
+    native_join_authority(conn, agent, author, at).await?;
+    Ok(())
+}
+
+/// The ordinary-Realm controller carve-out is a caller-signed Agent join.
+/// Every input that authorizes it is read under this RealmCommit transaction.
+async fn check_agent_controller_join(
+    conn: &mut AsyncPgConnection,
+    event: &arkret_wire::Event,
+    commit: &arkret_wire::RealmCommit,
+    payload: &MembershipPayload,
+    forwarded_controller: Option<&arkret_wire::AccountId>,
+    review: Option<&crate::agent_management_review::ReviewAdmission>,
+) -> PersistenceResult<()> {
+    let binding = payload
+        .agent_controller_binding
+        .as_ref()
+        .ok_or_else(|| failed_precondition("Agent join lacks its controller binding"))?;
+    let controller = event
+        .actor_id
+        .as_account_id()
+        .ok_or_else(|| capability_denied("Agent controller must be an Account"))?;
+    let agent = payload
+        .member_id
+        .as_account_id()
+        .ok_or_else(|| capability_denied("Agent target must be an Account"))?;
+    if controller != &binding.controller_account_id
+        || controller == agent
+        || controller.station_id != agent.station_id
+        || binding.controller_terminal_event_ref.is_some()
+        || payload.membership_cause.is_some()
+    {
+        return Err(capability_denied(
+            "Agent controller binding is not the exact writer/target pair",
+        ));
+    }
+    if crate::realm_authorization_cut::is_owned_agent_in_connection(
+        conn,
+        &event.realm_id,
+        controller,
+    )
+    .await?
+    {
+        return Err(capability_denied(
+            "an Agent cannot supply another Agent's controller authority",
+        ));
+    }
+    verify_controller_generation(conn, event, &binding.controller_membership_generation_ref)
+        .await?;
+
     crate::agent_management_admission::require_join_in_connection(
         conn,
         &event.realm_id,
@@ -648,16 +738,21 @@ async fn check_agent_controller_join(
     .get_result::<PresentRow>(&mut *conn)
     .await
     .map_err(PersistenceError::database)?;
-    if mls_active.present {
-        require_agent_membership_keypackage(
-            conn,
-            &event.realm_id,
-            &provisioning.principal_control_realm_id,
-            agent,
-            controller,
-            commit.committed_at,
-        )
-        .await?;
+    // The verified Human forward asserts home-Station facts for this exact original.
+    // A separate MLS KeyPackage gate still requires its own admitted source.
+    if forwarded_controller != Some(controller) || mls_active.present {
+        let pcr = native_join_authority(conn, agent, controller, commit.committed_at).await?;
+        if mls_active.present {
+            require_agent_membership_keypackage(
+                conn,
+                &event.realm_id,
+                &pcr,
+                agent,
+                controller,
+                commit.committed_at,
+            )
+            .await?;
+        }
     }
     check_join_policy(conn, &event.realm_id, !payload.gate_proofs.is_empty()).await
 }
@@ -667,6 +762,7 @@ async fn admit_member_state(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
+    forwarded_controller: Option<&arkret_wire::AccountId>,
     review: Option<&crate::agent_management_review::ReviewAdmission>,
     prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<()> {
@@ -731,7 +827,15 @@ async fn admit_member_state(
                 "Agent controller join requires the leave state",
             ));
         }
-        return check_agent_controller_join(conn, event, commit, &payload, review).await;
+        return check_agent_controller_join(
+            conn,
+            event,
+            commit,
+            &payload,
+            forwarded_controller,
+            review,
+        )
+        .await;
     }
     // Agent entry still requires its exact controller binding. An
     // administrator's terminal transition uses the ordinary FSM instead:
@@ -783,6 +887,7 @@ pub(crate) async fn admit_member_state_in_connection(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
+    forwarded_controller: Option<&arkret_wire::AccountId>,
     review: Option<&crate::agent_management_review::ReviewAdmission>,
     prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<()> {
@@ -804,7 +909,7 @@ pub(crate) async fn admit_member_state_in_connection(
             .require_managed_self_action_in_connection(conn, event, commit, prepared)
             .await?;
     }
-    admit_member_state(conn, event, commit, review, prepared).await
+    admit_member_state(conn, event, commit, forwarded_controller, review, prepared).await
 }
 
 #[cfg(test)]

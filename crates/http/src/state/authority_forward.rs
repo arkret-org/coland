@@ -632,9 +632,12 @@ async fn fresh_device_request_inner(
             "only the producer's Account Station may issue its forward source".into(),
         ));
     }
+    let grant_scope =
+        super::authority_agent_grant::prepare_owned_forward_scope(state, event, crate::wire::now())
+            .await?;
     let prepared = state
         .persistence()
-        .prepare_forward_request(request, destination)
+        .prepare_forward_request(request, destination, grant_scope.as_ref())
         .await?
         .ok_or_else(|| temporarily_unavailable("locked origin source is unavailable"))?;
     let service_resolution =
@@ -1574,6 +1577,12 @@ pub(super) async fn validate_recovery_caller(
     use arkret_models_identity::session_credential::{
         SessionGrantCredentialClass, SessionGrantHolderBinding,
     };
+    if session.expires_at <= crate::wire::now() {
+        return Err(ServiceError::protocol(
+            ErrorCode::AuthExpired,
+            "the original forwarding session has expired",
+        ));
+    }
     let actor = crate::routing::identity::session_actor::validated_session_actor(state, session)
         .await
         .map_err(|e| ServiceError::protocol(ErrorCode::Unauthenticated, e.message))?;
@@ -1600,7 +1609,6 @@ pub(super) async fn validate_recovery_caller(
         || grant.account_id != *account
         || grant.credential_class != SessionGrantCredentialClass::Standard
         || account.station_id != state.service_core_id()
-        || session.expires_at <= crate::wire::now()
         || session.revoked_at.is_some()
     {
         return Err(ServiceError::protocol(
@@ -1669,10 +1677,21 @@ async fn send_forward(
         }
         let frozen = state
             .authority_commits()
-            .freeze_forwarded_peer_request(event, &request, crate::wire::now())
+            .freeze_forwarded_peer_request(
+                event,
+                &request,
+                session.agent_session().map(|s| &s.metadata),
+                crate::wire::now(),
+            )
             .await?;
         let body = arkret_canonical::canonical_json_bytes(frozen.as_ref())
             .map_err(|error| ServiceError::internal(error.to_string()))?;
+        if session.expires_at <= crate::wire::now() {
+            return Err(ServiceError::protocol(
+                ErrorCode::AuthExpired,
+                "session expired before forwarding",
+            ));
+        }
         let response = crate::routing::federation::outbox::submit_authority_forward(
             state,
             governance.as_str(),

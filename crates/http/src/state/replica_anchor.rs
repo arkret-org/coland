@@ -529,6 +529,7 @@ async fn prepare_history_original(
         realm_id: realm_id.clone(),
         member_account_id: account.clone(),
         membership_commit_id,
+        content_intent: None,
         history_stream_ref: Some(head.stream_ref.clone()),
     };
     let body = post_peer(
@@ -678,6 +679,7 @@ async fn verified_account_snapshot(
     .await
     .map_err(|error| error.message)?;
     let request = PeerRealmJoinBootstrapRequestBody {
+        content_intent: None,
         history_stream_ref: None,
         request_id: RequestId::new(format!("ak:request:{}", uuid::Uuid::now_v7()))
             .map_err(temporary)?,
@@ -928,6 +930,109 @@ pub(crate) async fn account_continuation_recoverable(
     Ok(lag)
 }
 
+/// Intersect an issuer's home-qualified actions with fresh, exact group
+/// replies. No result is retained for a later issuance, publication or page.
+pub(crate) async fn foreign_content_ceiling(
+    state: &AppState,
+    issue: &coland_storage::AgentSessionAuthorityRequest,
+    home: &coland_storage::HomeContentQueries,
+) -> Result<coland_storage::AgentSessionAuthorityView, String> {
+    use arkret_models_collaboration::governance::realm_join_intake::OwnedAgentContentResponse;
+    let located = crate::routing::realm_join::resolve_verified_authority_of_service(
+        state,
+        &home.realm,
+        &home.governor,
+    )
+    .await
+    .map_err(|e| e.message)?;
+    if located.authority.current_generation() != home.generation
+        || located.authority.current_service_id() != &home.governor
+    {
+        return Err("hosted Realm tenure changed".into());
+    }
+    let mut view = coland_storage::AgentSessionAuthorityView {
+        binding: issue.clone(),
+        granted_scope: home.service_operations.clone(),
+        approval_required: false,
+        realm_ids: vec![],
+        strand_ids: vec![],
+        allowed_tracks: vec![],
+        allowed_data_labels: vec![],
+        allowed_endpoints: vec![],
+        capability_grant_refs: vec![],
+        policy_refs: vec![],
+    };
+    for intent in &home.intents {
+        let query = PeerRealmJoinBootstrapRequestBody {
+            request_id: RequestId::new(format!("ak:request:{}", uuid::Uuid::now_v7()))
+                .map_err(temporary)?,
+            realm_id: home.realm.clone(),
+            member_account_id: issue.agent_account_id.clone(),
+            membership_commit_id: home.membership.clone(),
+            history_stream_ref: None,
+            content_intent: Some(intent.clone()),
+        };
+        let bytes = post_peer(
+            state,
+            &home.governor,
+            BOOTSTRAP_PATH,
+            &query,
+            BOOTSTRAP_MAX_BYTES,
+        )
+        .await?;
+        let reply: OwnedAgentContentResponse = serde_json::from_slice(&bytes).map_err(temporary)?;
+        reply.validate_binding(&query).map_err(temporary)?;
+        let d = reply.scope_details;
+        if d.resources.realm_ids != issue.resource_scope.realm_ids
+            || d.resources.strand_ids != issue.resource_scope.strand_ids
+            || d.realm_ids != d.resources.realm_ids
+            || d.strand_ids != d.resources.strand_ids
+            || !d.constraints.allowed_tracks.is_empty()
+            || !d.constraints.allowed_data_labels.is_empty()
+            || !d.constraints.allowed_endpoints.is_empty()
+            || d.constraints
+                .allowed_strand_ids
+                .as_ref()
+                .is_some_and(|ids| ids != &d.strand_ids)
+            || d.participations.is_some()
+        {
+            continue;
+        }
+        let refs = d
+            .capability_grant_refs
+            .into_iter()
+            .map(arkret_wire::GrantId::new)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(temporary)?;
+        // The flat issuer carrier cannot correlate distinct grant sets to individual actions.
+        if (!view.realm_ids.is_empty() || !view.strand_ids.is_empty())
+            && (view.capability_grant_refs != refs || view.policy_refs != d.policy_refs)
+        {
+            continue;
+        }
+        let action = serde_json::to_value(intent.action).map_err(temporary)?;
+        view.granted_scope.push(
+            action
+                .as_str()
+                .ok_or("content action is not a string")?
+                .to_owned(),
+        );
+        view.realm_ids = d.realm_ids;
+        view.strand_ids = d.strand_ids;
+        view.capability_grant_refs = refs;
+        view.policy_refs = d.policy_refs;
+    }
+    let current = state
+        .persistence()
+        .home_content_queries(issue)
+        .await
+        .map_err(temporary)?;
+    if current.as_ref() != Some(home) {
+        return Err("home authority changed during content issue".into());
+    }
+    Ok(view)
+}
+
 async fn post_peer<T: serde::Serialize>(
     state: &AppState,
     governance: &DidCoreId,
@@ -1152,6 +1257,7 @@ async fn anchor_stream_with_forward_source(
     let realm_id = &anchor.realm_id;
     let join = &anchor.join_commit;
     let request = PeerRealmJoinBootstrapRequestBody {
+        content_intent: None,
         history_stream_ref: None,
         request_id: RequestId::new(format!("ak:request:{}", uuid::Uuid::now_v7()))
             .map_err(temporary)?,
@@ -1978,6 +2084,20 @@ async fn require_forward_bound_result_visibility(
         .await
         .map_err(temporary)?;
     if expected == Some(commit) {
+        // The caller already supplied this complete signed message. The two
+        // callers verified and materialized its governing receipt. Returning
+        // that exact receipt discloses no stored message or other history.
+        if event.kind == arkret_wire::EventKind::MessageCreate
+            && event.executed_by.is_none()
+            && event.applet_id.is_none()
+            && commit.event_ref == event.event_id
+            && session.agent_session().is_some_and(|agent| {
+                event.actor_id.as_account_id() == Some(&agent.metadata.account_id)
+                    && agent.metadata.account_id.station_id == state.service_core_id()
+            })
+        {
+            return Ok(());
+        }
         let account = &session
             .session_grant
             .as_ref()

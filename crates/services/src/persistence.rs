@@ -377,10 +377,11 @@ impl PersistenceHandle {
         &self,
         request: &arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequestBody,
         destination: &arkret_wire::DidCoreId,
+        grant_scope: Option<&coland_storage::VerifiedAgentScopeEvidence>,
     ) -> PersistenceResult<Option<coland_storage::PreparedAccountDeviceForwardSource>> {
         self.persistence
             .account_device_signer_evidence()
-            .prepare_forward_request(request, destination)
+            .prepare_forward_request(request, destination, grant_scope)
             .await
     }
     pub async fn retain_forward_request(
@@ -731,6 +732,29 @@ impl PersistenceHandle {
         self.persistence
             .invite_current_states()
             .invites_in_realm(realm_id)
+            .await
+    }
+
+    pub async fn home_content_queries(
+        &self,
+        request: &coland_storage::AgentSessionAuthorityRequest,
+    ) -> PersistenceResult<Option<coland_storage::HomeContentQueries>> {
+        self.persistence
+            .capability_grant_current_states()
+            .home_content_queries(request)
+            .await
+    }
+
+    pub async fn governed_agent_content_intent(
+        &self,
+        request: &arkret_models_collaboration::governance::realm_join_intake::PeerRealmJoinBootstrapRequestBody,
+        governor: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<
+        arkret_models_collaboration::governance::realm_join_intake::OwnedAgentContentResponse,
+    > {
+        self.persistence
+            .capability_grant_current_states()
+            .governed_agent_content_intent(request, governor)
             .await
     }
 

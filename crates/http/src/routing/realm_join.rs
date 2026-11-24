@@ -4,8 +4,9 @@ use arkret_models_collaboration::governance::membership_invite::{
     MembershipPayload, MembershipPayloadState,
 };
 use arkret_models_collaboration::governance::realm_join_intake::{
-    PeerRealmJoinBootstrapRequestBody, PeerRealmJoinBootstrapResponseBody,
-    SelfRealmJoinPrepareRequestBody, SelfRealmJoinPrepareResponseBody,
+    PeerRealmJoinBootstrapOutcome, PeerRealmJoinBootstrapRequestBody,
+    PeerRealmJoinBootstrapResponseBody, SelfRealmJoinPrepareRequestBody,
+    SelfRealmJoinPrepareResponseBody,
 };
 use arkret_wire::{
     ActorId, Base64UrlString, CommitStreamRef, EventKind, RealmAuthorityBundleRequestBody,
@@ -203,7 +204,7 @@ async fn prepare(
 async fn peer_bootstrap(
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<PeerRealmJoinBootstrapResponseBody> {
+) -> JsonResult<PeerRealmJoinBootstrapOutcome> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     crate::routing::events::peer::validate_peer_request(state, req, true).await?;
     let source_id = crate::routing::events::peer::source_id_from_request(req)?;
@@ -211,8 +212,24 @@ async fn peer_bootstrap(
         .parse_json::<PeerRealmJoinBootstrapRequestBody>()
         .await
         .map_err(invalid_request)?;
+    body.validate_selectors().map_err(invalid_request)?;
     if body.member_account_id.station_id.as_str() != source_id {
         return Err(AppError::not_found("Realm join bootstrap not found"));
+    }
+    if body.content_intent.is_some() {
+        let outcome = state
+            .persistence()
+            .governed_agent_content_intent(&body, &state.service_core_id())
+            .await
+            .map_err(|error| {
+                if error.conflict_code().is_some() {
+                    AppError::capability_denied("governed Agent content intent refused")
+                } else {
+                    unavailable(error)
+                }
+            })?;
+        outcome.validate_binding(&body).map_err(unavailable)?;
+        return json_ok(PeerRealmJoinBootstrapOutcome::Content(Box::new(outcome)));
     }
     let accepted = state
         .authority_commits()
@@ -283,7 +300,9 @@ async fn peer_bootstrap(
             .await
             .map_err(unavailable)?
             .ok_or_else(|| AppError::not_found("Realm join bootstrap not found"))?;
-        return json_ok(bootstrap_response(state, body.request_id, bundle, snapshot).await?);
+        return json_ok(PeerRealmJoinBootstrapOutcome::Snapshot(Box::new(
+            bootstrap_response(state, body.request_id, bundle, snapshot).await?,
+        )));
     }
     // The member Station anchors its held stream on this snapshot: the
     // member's complete disclosure with the Realm stream floor at its own
@@ -311,7 +330,9 @@ async fn peer_bootstrap(
         crate::wire::now(),
     )
     .map_err(unavailable)?;
-    json_ok(bootstrap_response(state, body.request_id, bundle, snapshot).await?)
+    json_ok(PeerRealmJoinBootstrapOutcome::Snapshot(Box::new(
+        bootstrap_response(state, body.request_id, bundle, snapshot).await?,
+    )))
 }
 
 async fn bootstrap_response(

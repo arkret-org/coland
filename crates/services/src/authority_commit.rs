@@ -837,13 +837,14 @@ impl AuthorityCommitApplication {
         &self,
         event: &Event,
         request: &arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequestBody,
+        agent_session: Option<&arkret_models_identity::SessionGrantMetadata>,
         at: DateTime<Utc>,
     ) -> ServiceResult<
         Box<arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequestBody>,
     > {
         Ok(self
             .store()
-            .freeze_forwarded_peer_request(event, request, at)
+            .freeze_forwarded_peer_request(event, request, agent_session, at)
             .await?)
     }
 

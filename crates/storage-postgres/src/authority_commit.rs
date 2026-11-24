@@ -5412,6 +5412,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         &self,
         event: &arkret_wire::Event,
         request: &arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequestBody,
+        agent_session: Option<&arkret_models_identity::SessionGrantMetadata>,
         at: chrono::DateTime<chrono::Utc>,
     ) -> PersistenceResult<
         Box<arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequestBody>,
@@ -5476,6 +5477,14 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
                 let body=frozen.body.ok_or_else(||PersistenceError::Conflict(
                     "temporarily_unavailable: accepted forward requires original result recovery".into()))?;
                 return Ok(Box::new(decode_json(body,"accepted frozen peer request")?));
+            }
+            if event.kind==arkret_wire::EventKind::MessageCreate && event.executed_by.is_none() {
+                if let P::AuthorityForwardEvent(forward)=request {
+                    if let Some(evidence)=&forward.producer_agent_evidence {
+                        let session=agent_session.ok_or_else(||invalid("originating Agent session missing"))?;
+                        crate::agent_session_authority::require_forwarded_message_source(conn,event,evidence,session,chrono::Utc::now()).await?;
+                    }
+                }
             }
             // The same unaccepted business Event may refresh only registered
             // dynamic evidence even after a timeout left status=forwarding.

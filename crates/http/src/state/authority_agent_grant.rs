@@ -11,6 +11,23 @@ pub(super) async fn prepare_agent_grant_scope(
     event: &Event,
     accepted_at: DateTime<Utc>,
 ) -> ServiceResult<Option<coland_storage::VerifiedAgentScopeEvidence>> {
+    prepare_scope(state, event, accepted_at, false).await
+}
+
+pub(super) async fn prepare_owned_forward_scope(
+    state: &AppState,
+    event: &Event,
+    at: DateTime<Utc>,
+) -> ServiceResult<Option<coland_storage::VerifiedAgentScopeEvidence>> {
+    prepare_scope(state, event, at, true).await
+}
+
+async fn prepare_scope(
+    state: &AppState,
+    event: &Event,
+    accepted_at: DateTime<Utc>,
+    owned_forward: bool,
+) -> ServiceResult<Option<coland_storage::VerifiedAgentScopeEvidence>> {
     use arkret_models_collaboration::governance::grant_constraint::CapabilitySubject;
     if event.kind != EventKind::CapabilityGrant {
         return Ok(None);
@@ -24,6 +41,10 @@ pub(super) async fn prepare_agent_grant_scope(
     let CapabilitySubject::Actor(subject) = &payload.grant.subject else {
         return Ok(None);
     };
+    if owned_forward && !matches!(payload.grant.issuer_authority_refs.as_slice(),
+        [arkret_models_collaboration::governance::grant_constraint::IssuerAuthorityRef::OwnedAgent { .. }]) {
+        return Ok(None);
+    }
     let invalid = || {
         ServiceError::Conflict(
             coland_storage::ConflictCode::AgentRequestedScopeCommitmentInvalid.to_string(),
@@ -35,19 +56,21 @@ pub(super) async fn prepare_agent_grant_scope(
     else {
         return Ok(None);
     };
-    crate::routing::identity::agent_pcr::validate_effective_agent_realm_membership(
-        state,
-        &record,
-        event.realm_id.as_str(),
-        accepted_at,
-    )
-    .await
-    .map_err(|error| match error.reason_code.as_deref() {
-        Some(arkret_wire::ReasonCode::ACCOUNTABILITY_GRANT_MISSING) => ServiceError::Conflict(
-            coland_storage::ConflictCode::AccountabilityGrantMissing.to_string(),
-        ),
-        _ => invalid(),
-    })?;
+    if !owned_forward {
+        crate::routing::identity::agent_pcr::validate_effective_agent_realm_membership(
+            state,
+            &record,
+            event.realm_id.as_str(),
+            accepted_at,
+        )
+        .await
+        .map_err(|error| match error.reason_code.as_deref() {
+            Some(arkret_wire::ReasonCode::ACCOUNTABILITY_GRANT_MISSING) => ServiceError::Conflict(
+                coland_storage::ConflictCode::AccountabilityGrantMissing.to_string(),
+            ),
+            _ => invalid(),
+        })?;
+    }
     let method = arkret_wire::DidUrl::new(
         record
             .authorized_verification_method

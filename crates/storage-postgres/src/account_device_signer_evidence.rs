@@ -159,6 +159,7 @@ impl AccountDeviceSignerEvidenceStore for PgAccountDeviceSignerEvidenceArchive {
         &self,
         request: &arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequestBody,
         destination: &arkret_wire::DidCoreId,
+        grant_scope: Option<&coland_storage::VerifiedAgentScopeEvidence>,
     ) -> PersistenceResult<Option<coland_storage::PreparedAccountDeviceForwardSource>> {
         let event = crate::managed_forward_source::event(request)?;
         if event
@@ -172,6 +173,15 @@ impl AccountDeviceSignerEvidenceStore for PgAccountDeviceSignerEvidenceArchive {
         conn.transaction::<_, PgTransactionError, _>(async |conn| {
             crate::managed_forward_source::lock_source(conn, event).await?;
             let at = forward_source::now();
+            if event.kind == arkret_wire::EventKind::CapabilityGrant {
+                crate::capability_grant_current_states::require_home_owned_grant(
+                    conn,
+                    event,
+                    grant_scope,
+                    at,
+                )
+                .await?;
+            }
             let digest = crate::managed_forward_source::digest(request)?;
             let device =
                 forward_source::prepare_in_connection(conn, event, destination, &digest, at)

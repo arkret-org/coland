@@ -120,14 +120,6 @@ async fn content_target(
             )));
         }
     };
-    let governed = sql_query("SELECT EXISTS(SELECT 1 FROM realm_authorities WHERE realm_id=$1 AND service_id=$2) AS present")
-        .bind::<Text,_>(realm.as_str()).bind::<Text,_>(request.agent_account_id.station_id.as_str())
-        .get_result::<crate::query_rows::ExistsRow>(&mut *conn).await.map_err(PersistenceError::database)?.present;
-    if !governed {
-        return Err(unavailable(
-            "resource governance belongs to another Station",
-        ));
-    }
     Ok(ContentTarget {
         realm,
         scope,
@@ -135,7 +127,7 @@ async fn content_target(
     })
 }
 
-fn membership_read(action: &str) -> bool {
+pub(crate) fn membership_read(action: &str) -> bool {
     matches!(
         CapabilityActionId::from_wire(action),
         Some(
@@ -245,15 +237,18 @@ pub(crate) async fn read(
     }
 }
 
-async fn read_at_cut(
+async fn bound_native_key_scope(
     conn: &mut AsyncPgConnection,
-    request: &AgentSessionAuthorityRequest,
+    agent: &arkret_wire::AccountId,
+    controller: &arkret_wire::AccountId,
+    authorization: &arkret_wire::EventId,
+    method: &arkret_wire::DidUrl,
     at: chrono::DateTime<chrono::Utc>,
-) -> PersistenceResult<AgentSessionAuthorityView> {
+) -> PersistenceResult<(AgentKeyAuthorizePayload, AgentKeyScope)> {
     let source = sql_query("SELECT e.envelope,c.commit_json,a.requested_scope,EXISTS(SELECT 1 FROM agent_key_current_states k CROSS JOIN LATERAL jsonb_array_elements(k.value->'authorizations') d WHERE k.realm_id=a.principal_control_realm_id AND d->>'tag_id'=$3||':1' AND d->'value'=e.envelope->'payload') AS active FROM agent_principals a JOIN agent_status_current_states s ON s.realm_id=a.principal_control_realm_id AND s.agent_id=a.id JOIN canonical_events e ON e.envelope->>'event_id'=$3 AND e.state='committed' JOIN realm_commits c ON c.event_pk=e.pk AND c.realm_id=a.principal_control_realm_id WHERE a.id=$1 AND a.controller_principal_id=$2 AND a.requested_scope IS NOT NULL AND s.value='\"active\"'::jsonb")
-        .bind::<Text,_>(request.agent_account_id.principal_id.as_str())
-        .bind::<Text,_>(request.controller_account_id.principal_id.as_str())
-        .bind::<Text,_>(request.agent_key_authorization_ref.as_str())
+        .bind::<Text,_>(agent.principal_id.as_str())
+        .bind::<Text,_>(controller.principal_id.as_str())
+        .bind::<Text,_>(authorization.as_str())
         .get_result::<Source>(&mut *conn).await.optional().map_err(PersistenceError::database)?
         .ok_or_else(||unavailable("current Agent/key binding is absent"))?;
     let event: Event = serde_json::from_value(source.envelope).map_err(unavailable)?;
@@ -266,12 +261,12 @@ async fn read_at_cut(
         ));
     }
     if !source.active
-        || event.event_id != request.agent_key_authorization_ref
+        || event.event_id != *authorization
         || commit.event_ref != event.event_id
         || commit.realm_id != event.realm_id
-        || event.actor_id != ActorId::account(request.agent_account_id.clone())
-        || event.executed_by != Some(ActorId::account(request.controller_account_id.clone()))
-        || key.verification_method != request.verification_method
+        || event.actor_id != ActorId::account(agent.clone())
+        || event.executed_by != Some(ActorId::account(controller.clone()))
+        || key.verification_method != *method
         || key.expires_at.is_some_and(|expiry| at >= expiry)
     {
         return Err(unavailable("current accepted Agent source changed"));
@@ -295,12 +290,12 @@ async fn read_at_cut(
     provision_payload
         .validate_envelope(&accepted.event)
         .map_err(unavailable)?;
-    if provision_payload.agent_id != request.agent_account_id.principal_id
-        || provision_payload.controller_principal_id != request.controller_account_id.principal_id
-        || accepted.event.actor_id != ActorId::account(request.controller_account_id.clone())
+    if provision_payload.agent_id != agent.principal_id
+        || provision_payload.controller_principal_id != controller.principal_id
+        || accepted.event.actor_id != ActorId::account(controller.clone())
         || arkret_models_collaboration::agent_scope::agent_requested_scope_digest(
-            &request.agent_account_id.principal_id,
-            &request.controller_account_id.principal_id,
+            &agent.principal_id,
+            &controller.principal_id,
             &provision,
         )
         .map_err(unavailable)?
@@ -318,8 +313,18 @@ async fn read_at_cut(
         return Err(unavailable("key exceeds its immutable provision ceiling"));
     }
 
-    if request.agent_account_id.station_id != request.controller_account_id.station_id
-        || request.requested_scope.is_empty()
+    if agent.station_id != controller.station_id {
+        return Err(unavailable("controller Station differs"));
+    }
+    Ok((key, provision))
+}
+
+async fn native_key_scope(
+    conn: &mut AsyncPgConnection,
+    request: &AgentSessionAuthorityRequest,
+    at: chrono::DateTime<chrono::Utc>,
+) -> PersistenceResult<(AgentKeyAuthorizePayload, AgentKeyScope)> {
+    if request.requested_scope.is_empty()
         || request
             .requested_scope
             .iter()
@@ -329,8 +334,289 @@ async fn read_at_cut(
     {
         return Err(unavailable("session source request binding is invalid"));
     }
+    bound_native_key_scope(
+        conn,
+        &request.agent_account_id,
+        &request.controller_account_id,
+        &request.agent_key_authorization_ref,
+        &request.verification_method,
+        at,
+    )
+    .await
+}
+
+pub(crate) async fn require_forwarded_message_source(
+    conn: &mut AsyncPgConnection,
+    event: &Event,
+    evidence: &arkret_models_identity::AgentProducerEvidence,
+    session: &arkret_models_identity::SessionGrantMetadata,
+    at: chrono::DateTime<chrono::Utc>,
+) -> PersistenceResult<()> {
+    let verified = arkret_identity::agent_authority_evidence::verify_forwarded_agent_producer(
+        event,
+        evidence,
+        &session.account_id.station_id,
+        at,
+        None,
+    )
+    .map_err(unavailable)?;
+    let state = verified
+        .evidence()
+        .agent_authority_state_evidence
+        .state
+        .as_ref()
+        .ok_or_else(|| unavailable("missing Agent authority"))?;
+    let scope = session
+        .scope_details
+        .as_ref()
+        .ok_or_else(|| unavailable("missing session scope"))?;
+    if verified.account() != &session.account_id
+        || scope.controller_principal_id != state.authorization.controller_principal_id
+        || scope.agent_key_authorization_ref != state.key_authorization_event.event_id
+        || at >= session.expires_at
+    {
+        return Err(PersistenceError::Conflict(
+            "capability_denied: session differs from the exact signed message".into(),
+        ));
+    }
+    crate::agent_origin::check_origin_cut(conn, event, state).await?;
+    let controller = arkret_wire::AccountId::new(
+        scope.controller_principal_id.clone(),
+        session.account_id.station_id.clone(),
+    );
+    crate::agent_interaction_current_states::owned_provenance_in_connection(
+        conn,
+        &session.account_id,
+        &controller,
+        at,
+        true,
+    )
+    .await?
+    .ok_or_else(|| {
+        PersistenceError::Conflict("capability_denied: Agent ownership is no longer current".into())
+    })?;
+    let (key, provision) = bound_native_key_scope(
+        conn,
+        &session.account_id,
+        &controller,
+        &scope.agent_key_authorization_ref,
+        &state.authorization.verification_method,
+        at,
+    )
+    .await?;
+    let strand = event
+        .payload
+        .get("strand_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| unavailable("missing message Strand"))?
+        .parse::<arkret_wire::StrandId>()
+        .map_err(unavailable)?;
+    let mut scopes = vec![format!("realm:{}", event.realm_id)];
+    if let Some(circle) = event.scope_ref.circle_id() {
+        scopes.push(format!("circle:{}:{circle}", event.realm_id));
+    }
+    scopes.push(format!("strand:{}:{strand}", event.realm_id));
+    let agent = session.account_id.principal_id.as_str();
+    crate::agent_participation_admission::lock_selection(conn, agent, true).await?;
+    if !crate::agent_participation_admission::selection_snapshot(conn, agent, &scopes)
+        .await?
+        .is_some_and(|selection| selection.message_creation_allowed)
+    {
+        return Err(PersistenceError::Conflict(
+            "failed_precondition: agent_reply_not_permitted".into(),
+        ));
+    }
+    let target = WireResourceSelector::strand(event.realm_id.clone(), strand.clone());
+    let facts = coland_storage::OperationFacts {
+        strand_id: Some(strand.to_string()),
+        circle_id: event.scope_ref.circle_id().map(ToString::to_string),
+        track: event
+            .payload
+            .get("track_name")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        object_kind: Some("message".to_owned()),
+        ..Default::default()
+    };
+    let operation = coland_storage::AuthorizationOperation {
+        actor: &event.actor_id,
+        actions: &["ak.message.create"],
+        target: &target,
+        at,
+        facts: &facts,
+    };
+    crate::agent_management_admission::require_session_content_ceiling(
+        &session.scopes,
+        scope,
+        &operation,
+    )?;
+    crate::agent_management_admission::require_key_scope_content_ceiling(
+        &key.agent_key_scope,
+        &operation,
+    )?;
+    crate::agent_management_admission::require_key_scope_content_ceiling(&provision, &operation)
+}
+
+pub(crate) async fn home_content_queries(
+    conn: &mut AsyncPgConnection,
+    request: &AgentSessionAuthorityRequest,
+    at: chrono::DateTime<chrono::Utc>,
+) -> PersistenceResult<Option<coland_storage::HomeContentQueries>> {
+    use arkret_models_collaboration::governance::realm_join_intake::{
+        OwnedAgentContentAction, OwnedAgentContentIntent,
+    };
+    #[derive(QueryableByName)]
+    struct Governor {
+        #[diesel(sql_type=Text)]
+        service_id: String,
+        #[diesel(sql_type=BigInt)]
+        generation: i64,
+    }
+    let target = content_target(conn, request).await?;
+    let authority =
+        sql_query("SELECT service_id,generation FROM realm_authorities WHERE realm_id=$1")
+            .bind::<Text, _>(target.realm.as_str())
+            .get_result::<Governor>(&mut *conn)
+            .await
+            .optional()
+            .map_err(PersistenceError::database)?
+            .ok_or_else(|| unavailable("target governing Station is unknown"))?;
+    if authority.service_id == request.agent_account_id.station_id.as_str() {
+        return Ok(None);
+    }
+    let (key, provision) = native_key_scope(conn, request, at).await?;
+    // Use the two accepted originals held by H to name the query. Only G's
+    // live decision establishes their currency for issuance.
+    let pair = crate::agent_interaction_current_states::governed_join_pair(
+        conn,
+        &target.realm,
+        &request.agent_account_id,
+        at,
+        false,
+        None,
+    )
+    .await?
+    .filter(|pair| pair.controller == request.controller_account_id)
+    .ok_or_else(|| unavailable("bound Agent and controller join originals are unavailable"))?;
+    // Only committed local ownership and lifecycle can initiate this signed disclosure.
+    crate::agent_interaction_current_states::owned_provenance_in_connection(
+        conn,
+        &request.agent_account_id,
+        &request.controller_account_id,
+        at,
+        false,
+    )
+    .await?
+    .ok_or_else(|| unavailable("current Agent ownership is unavailable"))?;
+    let mut scopes = vec![format!("realm:{}", target.realm)];
+    if let Some(circle) = target.scope.circle_id() {
+        scopes.push(format!("circle:{}:{circle}", target.realm));
+    }
+    if let Some(strand) = &target.resource.strand_id {
+        scopes.push(format!("strand:{}:{strand}", target.realm));
+    }
+    let selected = crate::agent_participation_admission::selection_snapshot(
+        conn,
+        request.agent_account_id.principal_id.as_str(),
+        &scopes,
+    )
+    .await?;
+    let actor = ActorId::account(request.agent_account_id.clone());
+    let mut service_operations = Vec::new();
+    let mut intents = Vec::new();
+    for name in &request.requested_scope {
+        if arkret_wire::ServiceOperationId::from_wire(name).is_some() {
+            if key.agent_key_scope.actions.contains(name) && provision.actions.contains(name) {
+                service_operations.push(name.clone());
+            }
+            continue;
+        }
+        let Ok(action) =
+            serde_json::from_value::<OwnedAgentContentAction>(Value::String(name.clone()))
+        else {
+            continue;
+        };
+        if !request.approval_evidence_refs.is_empty()
+            || !request.resource_scope.track_names.is_empty()
+        {
+            continue;
+        }
+        let private_permits = match action {
+            OwnedAgentContentAction::MessageCreate => selected
+                .as_ref()
+                .is_some_and(|v| v.message_creation_allowed),
+            OwnedAgentContentAction::ReactionAdd => selected
+                .as_ref()
+                .is_some_and(|v| v.reaction_addition_allowed),
+            OwnedAgentContentAction::ReactionRemove => selected
+                .as_ref()
+                .is_some_and(|v| v.reaction_removal_allowed),
+            _ => true,
+        };
+        let actions = [name.as_str()];
+        let facts = coland_storage::OperationFacts {
+            strand_id: target.resource.strand_id.as_ref().map(ToString::to_string),
+            circle_id: target.scope.circle_id().map(ToString::to_string),
+            object_kind: (action == OwnedAgentContentAction::MessageCreate)
+                .then(|| "message".to_owned()),
+            ..Default::default()
+        };
+        let operation = coland_storage::AuthorizationOperation {
+            actor: &actor,
+            actions: &actions,
+            target: &target.resource,
+            at,
+            facts: &facts,
+        };
+        if private_permits
+            && crate::agent_management_admission::require_key_scope_content_ceiling(
+                &key.agent_key_scope,
+                &operation,
+            )
+            .is_ok()
+            && crate::agent_management_admission::require_key_scope_content_ceiling(
+                &provision, &operation,
+            )
+            .is_ok()
+        {
+            intents.push(OwnedAgentContentIntent {
+                controller_account_id: request.controller_account_id.clone(),
+                controller_membership_commit_id: pair.controller_commit.commit_id.clone(),
+                agent_key_authorization_ref: request.agent_key_authorization_ref.clone(),
+                action,
+                effective_scope: target.scope.clone(),
+                request_digest: request.intent_digest.clone(),
+                backup_root_context: None,
+                strand_id: target.resource.strand_id.clone(),
+            });
+        }
+    }
+    Ok(Some(coland_storage::HomeContentQueries {
+        governor: arkret_wire::DidCoreId::new(authority.service_id).map_err(unavailable)?,
+        generation: u64::try_from(authority.generation).map_err(unavailable)?,
+        realm: target.realm,
+        membership: pair.agent_commit.commit_id,
+        service_operations,
+        intents,
+    }))
+}
+
+async fn read_at_cut(
+    conn: &mut AsyncPgConnection,
+    request: &AgentSessionAuthorityRequest,
+    at: chrono::DateTime<chrono::Utc>,
+) -> PersistenceResult<AgentSessionAuthorityView> {
+    let (key, provision) = native_key_scope(conn, request, at).await?;
     let target = content_target(conn, request).await?;
     let realm = &target.realm;
+    let governed = sql_query("SELECT EXISTS(SELECT 1 FROM realm_authorities WHERE realm_id=$1 AND service_id=$2) AS present")
+        .bind::<Text,_>(realm.as_str()).bind::<Text,_>(request.agent_account_id.station_id.as_str())
+        .get_result::<crate::query_rows::ExistsRow>(&mut *conn).await.map_err(PersistenceError::database)?.present;
+    if !governed {
+        return Err(unavailable(
+            "resource governance belongs to another Station",
+        ));
+    }
     let purpose = crate::account_stream_scan::realm_purpose(conn, realm).await?;
     use arkret_models_collaboration::events_payloads::realm::RealmPurpose;
     let direct = match purpose {

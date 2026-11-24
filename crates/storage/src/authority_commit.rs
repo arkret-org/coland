@@ -2649,11 +2649,12 @@ pub trait AuthorityCommitStore: Send + Sync {
         &self,
         event: &Event,
         request: &arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequestBody,
+        agent_session: Option<&arkret_models_identity::SessionGrantMetadata>,
         at: DateTime<Utc>,
     ) -> PersistenceResult<
         Box<arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequestBody>,
     > {
-        let _ = (event, request, at);
+        let _ = (event, request, agent_session, at);
         Err(crate::PersistenceError::Conflict(
             "dependency_missing: frozen peer request retention is not implemented".into(),
         ))

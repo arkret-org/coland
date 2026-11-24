@@ -94,6 +94,7 @@ pub(crate) async fn require_current(
     _commit: &RealmCommit,
     target_station: &DidCoreId,
     deployment: ParticipationBits,
+    forwarded: Option<&arkret_identity::agent_authority_evidence::VerifiedAgentProducer>,
 ) -> PersistenceResult<()> {
     let mode = if event.executed_by.is_some() {
         "acting_on_behalf_allowed"
@@ -115,11 +116,17 @@ pub(crate) async fn require_current(
     let Some(agent) = event.actual_signer().as_account_id() else {
         return Ok(());
     };
-    if &agent.station_id != target_station {
-        return Err(unresolved());
+    let foreign_message = event.kind == EventKind::MessageCreate
+        && event.executed_by.is_none()
+        && &agent.station_id != target_station
+        && forwarded.is_some_and(|home| home.account() == agent);
+    if !foreign_message {
+        if &agent.station_id != target_station {
+            return Err(unresolved());
+        }
+        Box::pin(require_owner_current(conn, agent)).await?;
+        lock_selection(conn, agent.principal_id.as_str(), true).await?;
     }
-    Box::pin(require_owner_current(conn, agent)).await?;
-    lock_selection(conn, agent.principal_id.as_str(), true).await?;
 
     let mut scopes = vec![format!("realm:{}", event.realm_id)];
     if let arkret_wire::ScopeRef::Circle { circle_id, .. } = &event.scope_ref {
@@ -204,10 +211,15 @@ pub(crate) async fn require_current(
         }
         scopes.push(format!("strand:{}:{strand}", event.realm_id));
     }
-    let selected = selection_at_cut(conn, agent.principal_id.as_str(), &scopes, true)
-        .await?
-        .ok_or_else(unresolved)?;
-    let mut effective = deployment.intersect(selected);
+    let mut effective = if foreign_message {
+        // The authenticated home checked its own selection on this exact message.
+        deployment
+    } else {
+        let selected = selection_at_cut(conn, agent.principal_id.as_str(), &scopes, true)
+            .await?
+            .ok_or_else(unresolved)?;
+        deployment.intersect(selected)
+    };
     for scope in &scopes {
         if let Some(ceiling) = governance_component(conn, event.realm_id.as_str(), scope).await? {
             effective = effective.intersect(ceiling);

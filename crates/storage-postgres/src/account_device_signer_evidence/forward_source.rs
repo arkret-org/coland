@@ -59,6 +59,13 @@ pub(crate) async fn prepare_context_in_connection(
         ))
         .into());
     }
+    crate::member_state_admission::verify_forwarded_controller_target(
+        conn,
+        event,
+        &producer.account_id,
+        attested_at,
+    )
+    .await?;
     if matches!(
         event.kind,
         arkret_wire::EventKind::MlsGenesis | arkret_wire::EventKind::MlsCommit

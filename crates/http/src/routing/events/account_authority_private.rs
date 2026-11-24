@@ -32,11 +32,32 @@ pub(super) async fn read_agent_session_authority(
             "Agent session source belongs to another Station"
         ));
     }
-    let outcome = state
-        .persistence()
-        .agent_session_authority(&request, chrono::Utc::now())
-        .await
-        .map_err(|error| AppError::internal(error.to_string()))?;
+    let queries = state.persistence().home_content_queries(&request).await;
+    let outcome = match queries {
+        Ok(Some(home)) => crate::state::foreign_content_ceiling(state, &request, &home)
+            .await
+            .map_err(AppError::internal)?,
+        Ok(None) => state
+            .persistence()
+            .agent_session_authority(&request, chrono::Utc::now())
+            .await
+            .map_err(|e| AppError::internal(e.to_string()))?,
+        Err(e) if e.conflict_code() == Some(coland_storage::ConflictCode::CapabilityDenied) => {
+            coland_storage::AgentSessionAuthorityView {
+                binding: request.clone(),
+                granted_scope: vec![],
+                approval_required: false,
+                realm_ids: vec![],
+                strand_ids: vec![],
+                allowed_tracks: vec![],
+                allowed_data_labels: vec![],
+                allowed_endpoints: vec![],
+                capability_grant_refs: vec![],
+                policy_refs: vec![],
+            }
+        }
+        Err(e) => return Err(AppError::internal(e.to_string())),
+    };
     if !outcome.matches_request(&request) {
         return Err(AppError::internal(
             "Agent source response lost its exact request binding",

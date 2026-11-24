@@ -368,6 +368,31 @@ async fn read_controller_in_connection(
     lock: bool,
     expected_join: Option<(&Event, &RealmCommit)>,
 ) -> PersistenceResult<Option<AccountId>> {
+    let Some(pair) = governed_join_pair(conn, realm, agent, at, lock, expected_join).await? else {
+        return Ok(None);
+    };
+    Ok(
+        owned_provenance_in_connection(conn, agent, &pair.controller, at, lock)
+            .await?
+            .map(|_| pair.controller),
+    )
+}
+
+/// Only the two governing membership originals; native lifecycle is owned by H.
+pub(crate) struct GovernedJoinPair {
+    pub(crate) controller: AccountId,
+    pub(crate) controller_commit: RealmCommit,
+    pub(crate) agent_commit: RealmCommit,
+}
+
+pub(crate) async fn governed_join_pair(
+    conn: &mut AsyncPgConnection,
+    realm: &RealmId,
+    agent: &AccountId,
+    at: chrono::DateTime<chrono::Utc>,
+    lock: bool,
+    expected_join: Option<(&Event, &RealmCommit)>,
+) -> PersistenceResult<Option<GovernedJoinPair>> {
     let joined = sql_query(format!("SELECT m.realm_id,m.current_commit_id,m.current_stream_position,m.value,e.envelope,c.commit_json,NULL::text AS scope_set_digest,NULL::jsonb AS accountability_scope FROM member_state_current_states m LEFT JOIN realm_commits c ON c.commit_id=m.current_commit_id AND c.realm_id=m.realm_id AND c.stream_position=m.current_stream_position LEFT JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' WHERE m.realm_id=$1 AND m.member_id=$2 AND m.membership='join'{}",if lock { " FOR SHARE OF m" } else { "" }))
         .bind::<Text,_>(realm.as_str()).bind::<Text,_>(ActorId::account(agent.clone()).to_string())
         .get_result::<OwnedCurrentSourceRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
@@ -471,11 +496,11 @@ async fn read_controller_in_connection(
             "owned controller join original producer source is unavailable",
         ));
     }
-    Ok(
-        owned_provenance_in_connection(conn, agent, &controller, at, lock)
-            .await?
-            .map(|_| controller),
-    )
+    Ok(Some(GovernedJoinPair {
+        controller,
+        controller_commit: controller_join_commit,
+        agent_commit: agent_join_commit,
+    }))
 }
 
 /// The existing accepted ownership reader, usable before an Agent's first join.
@@ -1040,6 +1065,7 @@ pub(crate) async fn admit_in_connection(
     conn: &mut AsyncPgConnection,
     event: &Event,
     commit: &RealmCommit,
+    forwarded_controller: Option<&AccountId>,
     review: Option<&crate::agent_management_review::ReviewAdmission>,
 ) -> PersistenceResult<()> {
     if event.kind != EventKind::AgentInteractionSet {
@@ -1065,16 +1091,29 @@ pub(crate) async fn admit_in_connection(
         ));
     }
     crate::realm_authorization_cut::lock_realm_authorization_cut(conn, &event.realm_id).await?;
-    if controller_in_connection(
-        conn,
-        &event.realm_id,
-        &payload.agent_account_id,
-        commit.committed_at,
-    )
-    .await?
-    .as_ref()
-        != Some(&payload.controller_account_id)
+    let controller = if payload.interaction_mode == AgentInteractionMode::Public
+        && forwarded_controller == Some(&payload.controller_account_id)
     {
+        governed_join_pair(
+            conn,
+            &event.realm_id,
+            &payload.agent_account_id,
+            commit.committed_at,
+            true,
+            None,
+        )
+        .await?
+        .map(|pair| pair.controller)
+    } else {
+        controller_in_connection(
+            conn,
+            &event.realm_id,
+            &payload.agent_account_id,
+            commit.committed_at,
+        )
+        .await?
+    };
+    if controller.as_ref() != Some(&payload.controller_account_id) {
         return Err(denied(
             "Agent ownership or member generation is not current",
         ));
@@ -1243,6 +1282,7 @@ pub(crate) async fn require_shared_producer_in_connection(
     conn: &mut AsyncPgConnection,
     event: &Event,
     commit: &RealmCommit,
+    forwarded: Option<&arkret_identity::agent_authority_evidence::VerifiedAgentProducer>,
 ) -> PersistenceResult<()> {
     if !requires_shared_public_mode(event) {
         return Ok(());
@@ -1278,9 +1318,32 @@ pub(crate) async fn require_shared_producer_in_connection(
             value.binding.validate_shape().map_err(invalid)?;
             if value.binding.unordered_participant_ids.iter().any(|a| a.as_account_id() == Some(agent)) && value.binding.authorization_basis.kind == arkret_models_collaboration::objects::direct_conversation::DirectConversationAuthorizationKind::AgentController { continue; }
         }
-        let Some(controller) =
+        let current = if let Some(home) = forwarded.filter(|home| {
+            event.kind == EventKind::MessageCreate
+                && event.executed_by.is_none()
+                && home.account() == agent
+        }) {
+            governed_join_pair(
+                conn,
+                &event.realm_id,
+                agent,
+                commit.committed_at,
+                true,
+                None,
+            )
+            .await?
+            .filter(|pair| {
+                pair.controller.principal_id
+                    == home
+                        .evidence()
+                        .controller_account_gate_attestation
+                        .principal_id
+            })
+            .map(|pair| pair.controller)
+        } else {
             controller_in_connection(conn, &event.realm_id, agent, commit.committed_at).await?
-        else {
+        };
+        let Some(controller) = current else {
             return Err(denied("shared Agent authority is unavailable"));
         };
         require_current_public_in_connection(conn, &event.realm_id, &controller, agent).await?;

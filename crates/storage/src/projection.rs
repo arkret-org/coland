@@ -1020,8 +1020,42 @@ pub fn effective_capability_grant_state_digest(
         .map_err(PersistenceError::database)
 }
 
+/// Describes exactly which signed queries the hosted endpoint can initiate.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HomeContentQueries {
+    pub governor: arkret_wire::DidCoreId,
+    pub generation: u64,
+    pub realm: arkret_wire::RealmId,
+    pub membership: arkret_wire::RealmCommitId,
+    pub service_operations: Vec<String>,
+    pub intents:
+        Vec<arkret_models_collaboration::governance::realm_join_intake::OwnedAgentContentIntent>,
+}
+
 #[async_trait]
 pub trait CapabilityGrantCurrentStateStore: Send + Sync {
+    async fn home_content_queries(
+        &self,
+        _request: &crate::AgentSessionAuthorityRequest,
+    ) -> PersistenceResult<Option<HomeContentQueries>> {
+        Err(crate::PersistenceError::Database(
+            "home content source unavailable".into(),
+        ))
+    }
+
+    /// Current group authority for one authenticated home-Station request.
+    async fn governed_agent_content_intent(
+        &self,
+        _request: &arkret_models_collaboration::governance::realm_join_intake::PeerRealmJoinBootstrapRequestBody,
+        _governor: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<
+        arkret_models_collaboration::governance::realm_join_intake::OwnedAgentContentResponse,
+    > {
+        Err(crate::PersistenceError::Database(
+            "governed Agent content source unavailable".into(),
+        ))
+    }
+
     /// Deployment-private issuer source supply from one durable current cut.
     async fn agent_session_authority(
         &self,

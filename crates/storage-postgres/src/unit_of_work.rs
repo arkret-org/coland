@@ -2850,6 +2850,16 @@ async fn commit_prepared_event_authority(
                 conn,
                 event,
                 &request.authority_commit.commit,
+                request
+                    .forwarded_producer_evidence
+                    .as_ref()
+                    .map(|verified| {
+                        &verified
+                            .evidence
+                            .device_projection_attestation
+                            .attestation
+                            .account_id
+                    }),
                 management_review.as_ref(),
             )
         })
@@ -2863,6 +2873,7 @@ async fn commit_prepared_event_authority(
             &request.authority_commit.commit,
             &request.authority_commit.expected_authority.service_id,
             request.agent_deployment_ceiling,
+            request.forwarded_agent_producer.as_ref(),
         )
     })
     .await?;
@@ -2872,6 +2883,7 @@ async fn commit_prepared_event_authority(
             conn,
             event,
             &request.authority_commit.commit,
+            request.forwarded_agent_producer.as_ref(),
         )
     })
     .await?;
@@ -3080,6 +3092,16 @@ async fn commit_prepared_event_authority(
                 conn,
                 event,
                 &request.authority_commit.commit,
+                request
+                    .forwarded_producer_evidence
+                    .as_ref()
+                    .map(|verified| {
+                        &verified
+                            .evidence
+                            .device_projection_attestation
+                            .attestation
+                            .account_id
+                    }),
                 management_review.as_ref(),
                 event_approvals,
             )
@@ -3690,6 +3712,7 @@ async fn commit_content_current_states_inner(
         event,
         commit,
         event_approvals,
+        request.forwarded_agent_producer.as_ref(),
     )
     .await?;
     crate::message_revision_current_states::commit_message_revise_current_state_in_connection(

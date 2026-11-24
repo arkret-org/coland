@@ -494,6 +494,7 @@ pub(super) async fn assert_agent_generation_after_consume(
             realm_id: realm.clone(),
             member_account_id: agent.clone(),
             membership_commit_id: join.clone(),
+            content_intent: None,
             history_stream_ref: Some(stream.clone()),
         }
     };

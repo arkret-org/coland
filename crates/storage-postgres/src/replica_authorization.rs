@@ -314,8 +314,46 @@ pub(crate) async fn exact_current_evidence(
     Ok(Some((head, entries)))
 }
 
-/// Complete authorization inputs at the latest verified held Realm cut.
+/// Return a held governing join only when the exact member selector is
+/// continuous through the latest known Realm head.
+pub(crate) async fn current_join_commit(
+    conn: &mut AsyncPgConnection,
+    realm: &RealmId,
+    account: &arkret_wire::AccountId,
+) -> PersistenceResult<Option<arkret_wire::RealmCommit>> {
+    let stream = arkret_wire::CommitStreamRef::Realm {
+        realm_id: realm.clone(),
+    };
+    let selector = CurrentSelector::MemberState {
+        actor_id: arkret_wire::ActorId::account(account.clone()),
+    };
+    let Some((_, rows)) =
+        exact_current_evidence(conn, &stream, std::slice::from_ref(&selector)).await?
+    else {
+        return Ok(None);
+    };
+    let Some(revision) = rows.first().and_then(|row| {
+        row.parent_membership_revision(realm, &arkret_wire::ActorId::account(account.clone()))
+    }) else {
+        return Ok(None);
+    };
+    let row = diesel::sql_query("SELECT commit_json AS payload FROM realm_commits WHERE realm_id=$1 AND commit_id=$2 AND stream_position=$3")
+        .bind::<Text,_>(realm.as_str()).bind::<Text,_>(revision.commit_id.as_str()).bind::<BigInt,_>(i64::try_from(revision.stream_position).map_err(invalid)?)
+        .get_result::<crate::JsonPayloadRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let commit: arkret_wire::RealmCommit = serde_json::from_value(row.payload).map_err(invalid)?;
+    commit.validate_content_address().map_err(invalid)?;
+    Ok((commit.realm_id == *realm
+        && commit.stream_ref == stream
+        && commit.commit_id == revision.commit_id
+        && commit.stream_position == revision.stream_position)
+        .then_some(commit))
+}
+
 /// Unknown coverage is unavailable, never an empty grant set.
+/// Complete authorization inputs at the latest verified held Realm cut.
 pub(crate) async fn authorization_evidence(
     conn: &mut AsyncPgConnection,
     realm: &RealmId,

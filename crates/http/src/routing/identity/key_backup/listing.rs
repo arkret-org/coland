@@ -35,6 +35,11 @@ pub(crate) async fn list_key_backups(
         arkret_models_crypto::KeysBackupsListParameters::Manager(query) => {
             return super::native::inventory(depot, req, query).await;
         }
+        arkret_models_crypto::KeysBackupsListParameters::Sidecar(_) => {
+            return Err(AppError::capability_denied(
+                "Sidecar root preparation requires current write authority",
+            ));
+        }
         arkret_models_crypto::KeysBackupsListParameters::Account(_) => {}
     }
     if depot

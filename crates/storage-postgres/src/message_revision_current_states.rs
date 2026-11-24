@@ -199,12 +199,15 @@ pub(crate) fn commit_message_create_current_state_in_connection<'a>(
     event: &'a arkret_wire::Event,
     commit: &'a arkret_wire::RealmCommit,
     prepared: Option<&'a coland_storage::EventApprovalCommit>,
+    forwarded: Option<&'a arkret_identity::agent_authority_evidence::VerifiedAgentProducer>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = PersistenceResult<()>> + Send + 'a>> {
     if event.kind != arkret_wire::EventKind::MessageCreate {
         return Box::pin(std::future::ready(Ok(())));
     }
     crate::boxed_future(|| {
-        commit_message_create_current_state_in_connection_inner(conn, event, commit, prepared)
+        commit_message_create_current_state_in_connection_inner(
+            conn, event, commit, prepared, forwarded,
+        )
     })
 }
 
@@ -213,6 +216,7 @@ async fn commit_message_create_current_state_in_connection_inner(
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
     prepared: Option<&coland_storage::EventApprovalCommit>,
+    forwarded: Option<&arkret_identity::agent_authority_evidence::VerifiedAgentProducer>,
 ) -> PersistenceResult<()> {
     arkret_schema::validate_event_for_submit(event)
         .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
@@ -318,6 +322,7 @@ async fn commit_message_create_current_state_in_connection_inner(
             &attributed,
             commit,
             prepared,
+            forwarded,
         )
         .await?;
     if matches!(event.scope_ref, arkret_wire::ScopeRef::Circle { .. }) {

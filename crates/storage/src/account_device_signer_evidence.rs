@@ -98,6 +98,7 @@ pub trait AccountDeviceSignerEvidenceStore: Send + Sync {
         &self,
         request: &arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequestBody,
         destination: &arkret_wire::DidCoreId,
+        grant_scope: Option<&crate::VerifiedAgentScopeEvidence>,
     ) -> PersistenceResult<Option<PreparedAccountDeviceForwardSource>>;
 
     /// Publish the signed source together with its exact queued original under

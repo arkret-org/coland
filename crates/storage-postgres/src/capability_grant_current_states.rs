@@ -823,6 +823,67 @@ fn materialized_grant(
     }
 }
 
+/// Only evidence retained by governing first admission for this exact signed
+/// grant can establish that its home verified the private provision ceiling.
+pub(crate) async fn home_verified_grant_controller<'a>(
+    conn: &mut AsyncPgConnection,
+    event: &arkret_wire::Event,
+    body: &'a arkret_models_collaboration::events_payloads::CapabilityGrantCreateBody,
+) -> PersistenceResult<Option<&'a arkret_wire::AccountId>> {
+    let [
+        IssuerAuthorityRef::OwnedAgent {
+            controller_account_id,
+            realm_id,
+            ..
+        },
+    ] = body.issuer_authority_refs.as_slice()
+    else {
+        return Ok(None);
+    };
+    let CapabilitySubject::Actor(subject) = &body.subject else {
+        return Ok(None);
+    };
+    let Some(agent) = subject.as_account_id() else {
+        return Ok(None);
+    };
+    if event.executed_by.is_some()
+        || event.applet_id.is_some()
+        || event.kind != arkret_wire::EventKind::CapabilityGrant
+        || event.actor_id != body.issuer_id
+        || event.actor_id.as_account_id() != Some(controller_account_id)
+        || realm_id != &event.realm_id
+        || controller_account_id == agent
+        || controller_account_id.station_id != agent.station_id
+    {
+        return Ok(None);
+    }
+    let verified = sql_query(
+        "SELECT EXISTS(SELECT 1 FROM forwarded_producer_device_evidence d
+        JOIN realm_commits c ON c.commit_id=d.commit_id
+        JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed'
+        JOIN realm_authorities g ON g.realm_id=c.realm_id
+        WHERE c.realm_id=$1 AND e.id=$2 AND d.principal_id=$3 AND d.station_id=$4
+        AND g.service_id<>d.station_id) AS present",
+    )
+    .bind::<Text, _>(realm_id.as_str())
+    .bind::<diesel::sql_types::Binary, _>(event.event_id.token_bytes().to_vec())
+    .bind::<Text, _>(controller_account_id.principal_id.as_str())
+    .bind::<Text, _>(controller_account_id.station_id.as_str())
+    .get_result::<crate::query_rows::ExistsRow>(&mut *conn)
+    .await
+    .map_err(PersistenceError::database)?;
+    if verified.present
+        && crate::account_stream_scan::realm_purpose(conn, realm_id).await?
+            == Some(
+                arkret_models_collaboration::events_payloads::realm::RealmPurpose::Collaboration,
+            )
+    {
+        Ok(Some(controller_account_id))
+    } else {
+        Ok(None)
+    }
+}
+
 /// Enforce the subject's immutable ceiling under the actual grant transaction.
 /// Qualified encrypted custody supplies the controller disclosure. Its exact
 /// accepted provision, genesis, authorization and active receipt are rechecked
@@ -843,6 +904,14 @@ async fn require_agent_provision_ceiling_in_connection(
     if !crate::realm_authorization_cut::is_owned_agent_in_connection(conn, &event.realm_id, account)
         .await?
     {
+        return Ok(());
+    }
+    if home_verified_grant_controller(conn, event, body)
+        .await?
+        .is_some()
+    {
+        // Current joins and controller coverage are required by the owned
+        // grant materializer before this transaction can commit.
         return Ok(());
     }
     let evidence = evidence.ok_or_else(|| conflict("agent_requested_scope_commitment_invalid"))?;
@@ -867,6 +936,16 @@ async fn require_agent_provision_ceiling_in_connection(
     {
         return Err(conflict("agent_requested_scope_commitment_invalid"));
     }
+    require_disclosed_grant_scope(conn, account, body, evidence).await
+}
+
+async fn require_disclosed_grant_scope(
+    conn: &mut AsyncPgConnection,
+    account: &arkret_wire::AccountId,
+    body: &arkret_models_collaboration::events_payloads::CapabilityGrantCreateBody,
+    evidence: &coland_storage::VerifiedAgentScopeEvidence,
+) -> PersistenceResult<()> {
+    let binding = evidence.accepted_binding();
     let authorization =
         arkret_models_collaboration::events_payloads::agent::AgentKeyAuthorizePayload::try_from(
             &evidence.command().authorize_event.event,
@@ -897,6 +976,57 @@ async fn require_agent_provision_ceiling_in_connection(
         return Err(conflict("agent_grant_exceeds_requested_scope"));
     }
     Ok(())
+}
+
+/// Only the original controller can use the home verifier for this grant.
+pub(crate) async fn require_home_owned_grant(
+    conn: &mut AsyncPgConnection,
+    event: &arkret_wire::Event,
+    evidence: Option<&coland_storage::VerifiedAgentScopeEvidence>,
+    at: chrono::DateTime<chrono::Utc>,
+) -> PersistenceResult<()> {
+    let Some(CapabilityGrantCurrentMutation::Create { body, .. }) = mutation_for_event(event)?
+    else {
+        return Ok(());
+    };
+    let [
+        IssuerAuthorityRef::OwnedAgent {
+            controller_account_id,
+            realm_id,
+            ..
+        },
+    ] = body.issuer_authority_refs.as_slice()
+    else {
+        return Ok(());
+    };
+    body.validate_owned_agent_shape()
+        .map_err(|e| schema_violation(e.to_string()))?;
+    let invalid = || conflict("agent_requested_scope_commitment_invalid");
+    let evidence = evidence.ok_or_else(invalid)?;
+    let CapabilitySubject::Actor(subject) = &body.subject else {
+        return Err(invalid());
+    };
+    let agent = subject.as_account_id().ok_or_else(invalid)?;
+    let producer = event
+        .account_device_producer()
+        .map_err(|_| invalid())?
+        .ok_or_else(invalid)?;
+    if &producer.account_id != controller_account_id
+        || event.executed_by.is_some()
+        || event.applet_id.is_some()
+        || event.actor_id != body.issuer_id
+        || realm_id != &event.realm_id
+        || agent == controller_account_id
+        || agent.station_id != controller_account_id.station_id
+        || evidence.accepted_binding().controller_account != *controller_account_id
+        || evidence.command().requested_scope_disclosure.agent_id != agent.principal_id
+        || evidence.accepted_binding().verified_at > at
+    {
+        return Err(invalid());
+    }
+    crate::member_state_admission::native_join_authority(conn, agent, controller_account_id, at)
+        .await?;
+    require_disclosed_grant_scope(conn, agent, &body, evidence).await
 }
 
 /// The accepted original stays private to native admission. A later close
@@ -1101,11 +1231,16 @@ async fn materialize_capability_grant_inner(
             )
         })
         .await?;
-        if let Some(controller) = crate::boxed_future(|| {
-            subject_cut.owned_controller_in_connection(conn, commit.committed_at)
-        })
-        .await?
-        {
+        let controller = match home_verified_grant_controller(conn, event, &body).await? {
+            Some(home) => Some(ActorId::account(home.clone())),
+            None => {
+                crate::boxed_future(|| {
+                    subject_cut.owned_controller_in_connection(conn, commit.committed_at)
+                })
+                .await?
+            }
+        };
+        if let Some(controller) = controller {
             let controller = controller
                 .as_account_id()
                 .ok_or_else(|| conflict("Agent authorization controller is not an account"))?;
@@ -1647,6 +1782,47 @@ impl CapabilityGrantCurrentStateStore for PgCapabilityGrantCurrentStateStore {
             Ok(cut
                 .bounded_actor_authorization_in_connection(conn, at)
                 .await?)
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
+
+    async fn home_content_queries(
+        &self,
+        request: &coland_storage::AgentSessionAuthorityRequest,
+    ) -> PersistenceResult<Option<coland_storage::HomeContentQueries>> {
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async |conn| {
+            sql_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+                .execute(&mut *conn)
+                .await?;
+            Ok(crate::agent_session_authority::home_content_queries(
+                conn,
+                request,
+                chrono::Utc::now(),
+            )
+            .await?)
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
+
+    async fn governed_agent_content_intent(
+        &self,
+        request: &arkret_models_collaboration::governance::realm_join_intake::PeerRealmJoinBootstrapRequestBody,
+        governor: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<
+        arkret_models_collaboration::governance::realm_join_intake::OwnedAgentContentResponse,
+    > {
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async |conn| {
+            sql_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+                .execute(&mut *conn)
+                .await?;
+            Ok(
+                crate::realm_authorization_cut::governed_content_intent(conn, request, governor)
+                    .await?,
+            )
         })
         .await
         .map_err(PgTransactionError::into_persistence)

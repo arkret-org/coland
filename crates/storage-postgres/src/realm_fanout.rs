@@ -500,17 +500,24 @@ async fn remote_targets(
                     row.commit.stream_ref,
                     arkret_wire::CommitStreamRef::Realm { .. }
                 ) {
-                    let Some(floor) = crate::account_stream_scan::caller_realm_floor_in_connection(
+                    match crate::account_stream_scan::caller_realm_floor_in_connection(
                         conn,
                         &event.realm_id,
                         &witness.member_id,
                     )
-                    .await?
-                    else {
-                        continue;
-                    };
-                    if row.commit.stream_position < floor.oldest_position {
-                        continue;
+                    .await
+                    {
+                        Ok(Some(floor)) if row.commit.stream_position >= floor.oldest_position => {}
+                        Ok(_) => continue,
+                        // A refusal excludes this recipient, even when the same Station
+                        // has a separate eligible member. It cannot veto the Realm write.
+                        Err(error)
+                            if error.conflict_code()
+                                == Some(coland_storage::ConflictCode::CapabilityDenied) =>
+                        {
+                            continue;
+                        }
+                        Err(error) => return Err(error),
                     }
                 }
                 match crate::committed_disclosure::full_event_for_member_in_connection(

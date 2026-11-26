@@ -44,6 +44,7 @@ use arkret_signatures::http_signature::{
     Component, SignedRequestParts, canonical_message, format_signature_input_component_list,
     parse_signature_input,
 };
+use arkret_wire::ServiceOperationId;
 use coland_services::federation::{
     ClaimFederationDeliveriesCommand, FederationDeadLetter, FederationDeliveryOutcome,
     FederationDeliveryRecord, PendingFederationDelivery, RecordFederationAttemptCommand,
@@ -52,6 +53,7 @@ use coland_storage::FederationOutboxPolicyResolution;
 use rand::RngExt;
 use uuid::Uuid;
 
+use super::outbound::ResolvedFederationPeerTarget;
 use crate::state::AppState;
 
 /// How often the dispatcher polls the outbox when idle.
@@ -212,15 +214,16 @@ pub(crate) fn rfc9421_sign(
     method: &str,
     target_url: &str,
 ) -> reqwest::header::HeaderMap {
-    rfc9421_sign_with_window(state, headers, method, target_url, 300)
+    let operation = operation_for_canonical_http_request(method, target_url);
+    rfc9421_sign_with_window(state, headers, method, target_url, operation, 300)
 }
 
 fn operation_for_canonical_http_request(
     method: &str,
     target_url: &str,
-) -> Option<arkret_wire::ServiceOperationId> {
+) -> Option<ServiceOperationId> {
     let url = reqwest::Url::parse(target_url).ok()?;
-    arkret_wire::ServiceOperationId::from_http_request(method, url.path())
+    ServiceOperationId::from_http_request(method, url.path())
 }
 
 fn rfc9421_sign_with_window(
@@ -228,6 +231,7 @@ fn rfc9421_sign_with_window(
     mut headers: reqwest::header::HeaderMap,
     method: &str,
     target_url: &str,
+    operation: Option<ServiceOperationId>,
     validity_seconds: i64,
 ) -> reqwest::header::HeaderMap {
     let created = now_unix_secs();
@@ -243,7 +247,7 @@ fn rfc9421_sign_with_window(
         Component::Header("source-trust-domain".to_owned()),
         Component::Header("destination-trust-domain".to_owned()),
     ];
-    if let Some(operation) = operation_for_canonical_http_request(method, target_url) {
+    if let Some(operation) = operation {
         insert_header_if_valid(&mut headers, "arkret-operation", operation.as_str());
         covered.push(Component::Header("arkret-operation".to_owned()));
     }
@@ -334,7 +338,8 @@ pub(crate) async fn relay_signal_once(
         "destination-trust-domain",
         &peer_target.trust_domain,
     );
-    let headers = rfc9421_sign_with_window(state, headers, "POST", &target, 5);
+    let operation = operation_for_canonical_http_request("POST", &target);
+    let headers = rfc9421_sign_with_window(state, headers, "POST", &target, operation, 5);
     let response = client
         .post(parsed_url)
         .headers(headers)
@@ -452,12 +457,11 @@ pub(crate) async fn signed_peer_request(
     max_response_bytes: usize,
 ) -> Result<PeerSubmitResponse, String> {
     let peer_target = super::resolved_peer_target(state, peer_id, "station", false).await?;
-    let target = format!("{}{path}", peer_target.base_url);
     signed_peer_request_to_target(
         state,
         peer_id,
-        &peer_target.trust_domain,
-        &target,
+        &peer_target,
+        path,
         body,
         None,
         max_response_bytes,
@@ -477,8 +481,8 @@ pub(crate) async fn signed_peer_command(
     signed_peer_request_to_target(
         state,
         peer_id,
-        &peer_target.trust_domain,
-        &format!("{}{path}", peer_target.base_url),
+        &peer_target,
+        path,
         body,
         Some(idempotency_key),
         max_response_bytes,
@@ -513,15 +517,17 @@ pub(crate) async fn signed_deployment_account_status_resolve(
         .account_authority_trust_domain
         .as_ref()
         .ok_or_else(|| "Account Authority trust domain is not configured".to_owned())?;
-    let target = format!(
-        "{}/_arkret/peer/account-status/resolve",
-        authority_url.as_str().trim_end_matches('/')
-    );
+    let peer_target = ResolvedFederationPeerTarget {
+        base_url: authority_url.as_str().trim_end_matches('/').to_owned(),
+        trust_domain: authority_trust_domain.to_string(),
+    };
     signed_peer_request_to_target(
         state,
         authority_id.as_str(),
-        authority_trust_domain.as_str(),
-        &target,
+        &peer_target,
+        ServiceOperationId::PeerAccountStatusReadResolveV1
+            .descriptor()
+            .http_path,
         body,
         None,
         2 * 1024 * 1024,
@@ -532,14 +538,15 @@ pub(crate) async fn signed_deployment_account_status_resolve(
 async fn signed_peer_request_to_target(
     state: &AppState,
     peer_id: &str,
-    trust_domain: &str,
-    target: &str,
+    peer_target: &ResolvedFederationPeerTarget,
+    path: &str,
     body: &[u8],
     idempotency_key: Option<&str>,
     max_response_bytes: usize,
 ) -> Result<PeerSubmitResponse, String> {
+    let target = format!("{}{path}", peer_target.base_url);
     let (parsed_url, client) = crate::security::validate_http_url_for_egress_with_pinned_client(
-        target,
+        &target,
         "peer read",
         state.config().development_mode,
         REQUEST_TIMEOUT,
@@ -561,14 +568,21 @@ async fn signed_peer_request_to_target(
         "source-trust-domain",
         state.config().trust_domain.as_str(),
     );
-    insert_header_if_valid(&mut headers, "destination-trust-domain", trust_domain);
+    insert_header_if_valid(
+        &mut headers,
+        "destination-trust-domain",
+        &peer_target.trust_domain,
+    );
     if let Some(key) = idempotency_key {
         headers.insert(
             "idempotency-key",
             reqwest::header::HeaderValue::from_str(key).map_err(|error| error.to_string())?,
         );
     }
-    let headers = rfc9421_sign(state, headers, "POST", target);
+    // The operation uses the canonical route, while the signature binds the deployment URL.
+    let canonical_path = path.split_once('?').map_or(path, |(path, _)| path);
+    let operation = ServiceOperationId::from_http_request("POST", canonical_path);
+    let headers = rfc9421_sign_with_window(state, headers, "POST", &target, operation, 300);
     let mut response = client
         .post(parsed_url)
         .headers(headers)

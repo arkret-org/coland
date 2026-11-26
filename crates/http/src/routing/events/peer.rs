@@ -2004,10 +2004,25 @@ mod account_authority_identity_tests {
 
     #[tokio::test]
     async fn account_status_resolve_uses_deployment_endpoint_and_separate_trust_domain() {
+        assert_signed_account_status_resolve("").await;
+    }
+
+    #[tokio::test]
+    async fn account_status_resolve_signs_operation_and_target_under_auth_prefix() {
+        assert_signed_account_status_resolve("/auth").await;
+    }
+
+    async fn assert_signed_account_status_resolve(prefix: &str) {
+        use arkret_signatures::http_signature::{
+            HttpSignatureScenario, SignatureVerificationPolicy,
+            verify_signed_canonical_json_message,
+        };
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let endpoint = format!("http://{address}");
+        let endpoint = format!("http://{address}{prefix}/");
+        let path = format!("{prefix}/_arkret/peer/account-status/resolve");
         let config = crate::config::AppConfig {
             development_mode: true,
             account_authority_url: Some(endpoint.clone()),
@@ -2017,6 +2032,7 @@ mod account_authority_identity_tests {
             ..crate::config::AppConfig::test_default()
         };
         let state = AppState::new(config, Db { pool: None });
+        let public_key = state.notary_signing_key().verifying_key();
         let authority = state.service_core_id();
         let source_domain = state.config().trust_domain.to_string();
         let destination_domain = state
@@ -2053,10 +2069,9 @@ mod account_authority_identity_tests {
             let headers = std::str::from_utf8(&bytes[..header_end])
                 .unwrap()
                 .to_owned();
-            assert!(
-                headers
-                    .to_ascii_lowercase()
-                    .starts_with("post /_arkret/peer/account-status/resolve http/1.1")
+            assert_eq!(
+                headers.lines().next().unwrap(),
+                format!("POST {path} HTTP/1.1")
             );
             for (name, value) in [
                 ("source-service-id", source.as_str()),
@@ -2068,19 +2083,10 @@ mod account_authority_identity_tests {
                 assert!(
                     headers
                         .lines()
-                        .any(|line| line == format!("{name}: {value}"))
+                        .any(|line| line == format!("{name}: {value}")),
+                    "missing {name}: {value}"
                 );
             }
-            assert!(
-                headers
-                    .lines()
-                    .any(|line| line.starts_with("signature: sig1=:"))
-            );
-            assert!(
-                headers
-                    .lines()
-                    .any(|line| line.starts_with("signature-input: sig1="))
-            );
             assert!(
                 !headers
                     .lines()
@@ -2097,7 +2103,33 @@ mod account_authority_identity_tests {
                 assert!(n > 0);
                 bytes.extend_from_slice(&buffer[..n]);
             }
-            assert_eq!(&bytes[header_end..header_end + length], expected.as_slice());
+            let received_body = &bytes[header_end..header_end + length];
+            assert_eq!(received_body, expected.as_slice());
+            let policy = SignatureVerificationPolicy::for_scenario(
+                HttpSignatureScenario::ServiceToServiceV1,
+                &[
+                    "content-digest",
+                    "source-trust-domain",
+                    "destination-trust-domain",
+                ],
+            )
+            .unwrap();
+            verify_signed_canonical_json_message(
+                "POST",
+                &format!("http://{address}{path}"),
+                &address.to_string(),
+                &path,
+                headers
+                    .lines()
+                    .skip(1)
+                    .filter_map(|line| line.split_once(": ")),
+                false,
+                received_body,
+                &public_key,
+                &policy,
+                Utc::now().timestamp(),
+            )
+            .unwrap();
             let answer = b"{}";
             stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",answer.len()).as_bytes()).await.unwrap();
             stream.write_all(answer).await.unwrap();
@@ -2109,11 +2141,14 @@ mod account_authority_identity_tests {
                 &CanonicalServiceUrl::canonicalize(&endpoint).unwrap(),
                 &body,
             )
+            .await;
+        tokio::time::timeout(std::time::Duration::from_secs(5), server)
             .await
+            .unwrap()
             .unwrap();
+        let response = response.unwrap();
         assert_eq!(response.status, 200);
         assert_eq!(response.body, b"{}");
-        server.await.unwrap();
     }
 
     #[tokio::test]

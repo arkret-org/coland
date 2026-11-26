@@ -857,8 +857,7 @@ mod tests {
         )
         .await;
         let generic_error = generic
-            .err()
-            .expect("unchecked pointer must be rejected")
+            .expect_err("unchecked pointer must be rejected")
             .into_persistence();
         assert!(
             matches!(&generic_error, PersistenceError::Conflict(reason)

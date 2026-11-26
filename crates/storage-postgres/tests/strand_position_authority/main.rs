@@ -126,13 +126,13 @@ struct PlacementSetup {
 }
 
 async fn prepare_placement_setup(pool: &PgPool) -> PlacementSetup {
-    let opened = Box::pin(open_discussion(&pool, "strand-position-authority")).await;
+    let opened = Box::pin(open_discussion(pool, "strand-position-authority")).await;
     let uow = PgEventCommitUnitOfWork::new(pool.clone());
     let realm = opened.head.authority_commit.event.realm_id.clone();
     let actor = opened.head.authority_commit.event.actor_id.clone();
     let at = opened.head.authority_commit.commit.committed_at;
     let board = Box::pin(ordinary_realm::source_request(
-        &pool,
+        pool,
         next_request(
             &opened.head.authority_commit,
             arkret_wire::EventKind::SpaceCreate,
@@ -150,7 +150,7 @@ async fn prepare_placement_setup(pool: &PgPool) -> PlacementSetup {
     let board_id = arkret_wire::SpaceId::from_event_id(&board.authority_commit.event.event_id);
     uow.commit_event(board.clone()).await.unwrap();
     let list_a = Box::pin(ordinary_realm::source_request(
-        &pool,
+        pool,
         next_request(
             &board.authority_commit,
             arkret_wire::EventKind::SpaceCreate,
@@ -176,7 +176,7 @@ async fn prepare_placement_setup(pool: &PgPool) -> PlacementSetup {
     let list_a_id = arkret_wire::SpaceId::from_event_id(&list_a.authority_commit.event.event_id);
     uow.commit_event(list_a.clone()).await.unwrap();
     let list_b = Box::pin(ordinary_realm::source_request(
-        &pool,
+        pool,
         next_request(
             &list_a.authority_commit,
             arkret_wire::EventKind::SpaceCreate,
@@ -216,7 +216,7 @@ async fn exercise_placement_cas_and_reorder(
     let at = opened.head.authority_commit.commit.committed_at;
     let uow = PgEventCommitUnitOfWork::new(pool.clone());
     let first = Box::pin(ordinary_realm::source_request(
-        &pool,
+        pool,
         next_request(
             &list_b.authority_commit,
             arkret_wire::EventKind::StrandMove,
@@ -233,15 +233,15 @@ async fn exercise_placement_cas_and_reorder(
     ))
     .await;
     uow.commit_event(first.clone()).await.unwrap();
-    let initial = position(&pool, &board_id, &opened.strand_id).await;
+    let initial = position(pool, &board_id, &opened.strand_id).await;
     assert_eq!(initial.value, json!({"list_space_id":list_a_id,"rank":"a"}));
     assert_eq!(
         initial.current_stream_position,
         first.authority_commit.commit.stream_position as i64
     );
     let first_counts = (
-        count(&pool, &realm, "canonical_events").await,
-        count(&pool, &realm, "realm_commits").await,
+        count(pool, &realm, "canonical_events").await,
+        count(pool, &realm, "realm_commits").await,
     );
     assert!(
         !uow.commit_event(first.clone())
@@ -252,11 +252,11 @@ async fn exercise_placement_cas_and_reorder(
     assert_eq!(
         first_counts,
         (
-            count(&pool, &realm, "canonical_events").await,
-            count(&pool, &realm, "realm_commits").await,
+            count(pool, &realm, "canonical_events").await,
+            count(pool, &realm, "realm_commits").await,
         )
     );
-    let replayed = position(&pool, &board_id, &opened.strand_id).await;
+    let replayed = position(pool, &board_id, &opened.strand_id).await;
     assert_eq!(replayed.value, initial.value);
     assert_eq!(
         replayed.current_stream_position,
@@ -264,7 +264,7 @@ async fn exercise_placement_cas_and_reorder(
     );
 
     let bad = Box::pin(ordinary_realm::source_request(
-        &pool,
+        pool,
         next_request(
             &first.authority_commit,
             arkret_wire::EventKind::StrandReorder,
@@ -281,26 +281,23 @@ async fn exercise_placement_cas_and_reorder(
         ),
     ))
     .await;
-    let events_before = count(&pool, &realm, "canonical_events").await;
-    let commits_before = count(&pool, &realm, "realm_commits").await;
+    let events_before = count(pool, &realm, "canonical_events").await;
+    let commits_before = count(pool, &realm, "realm_commits").await;
     assert_eq!(
         uow.commit_event(bad).await.unwrap_err().conflict_code(),
         Some(ConflictCode::FailedPrecondition)
     );
-    assert_eq!(
-        count(&pool, &realm, "canonical_events").await,
-        events_before
-    );
-    assert_eq!(count(&pool, &realm, "realm_commits").await, commits_before);
+    assert_eq!(count(pool, &realm, "canonical_events").await, events_before);
+    assert_eq!(count(pool, &realm, "realm_commits").await, commits_before);
 
     let stranger = Box::pin(ordinary_realm::human_profile::admit(
-        &pool,
+        pool,
         &ordinary_realm::station(),
         "placement-stranger",
     ))
     .await;
     let unauthorized_move = Box::pin(ordinary_realm::source_request(
-        &pool,
+        pool,
         next_request(
             &first.authority_commit,
             arkret_wire::EventKind::StrandMove,
@@ -319,24 +316,21 @@ async fn exercise_placement_cas_and_reorder(
             .conflict_code(),
         Some(ConflictCode::CapabilityDenied)
     );
-    assert_eq!(
-        count(&pool, &realm, "canonical_events").await,
-        events_before
-    );
-    assert_eq!(count(&pool, &realm, "realm_commits").await, commits_before);
-    let refused = position(&pool, &board_id, &opened.strand_id).await;
+    assert_eq!(count(pool, &realm, "canonical_events").await, events_before);
+    assert_eq!(count(pool, &realm, "realm_commits").await, commits_before);
+    let refused = position(pool, &board_id, &opened.strand_id).await;
     assert_eq!(refused.value, initial.value);
     assert_eq!(
         refused.current_stream_position,
         initial.current_stream_position
     );
     assert_eq!(
-        position(&pool, &board_id, &opened.strand_id).await.value,
+        position(pool, &board_id, &opened.strand_id).await.value,
         initial.value
     );
 
     let unauthorized = Box::pin(ordinary_realm::source_request(
-        &pool,
+        pool,
         next_request(
             &first.authority_commit,
             arkret_wire::EventKind::StrandReorder,
@@ -355,14 +349,11 @@ async fn exercise_placement_cas_and_reorder(
             .conflict_code(),
         Some(ConflictCode::CapabilityDenied)
     );
-    assert_eq!(
-        count(&pool, &realm, "canonical_events").await,
-        events_before
-    );
-    assert_eq!(count(&pool, &realm, "realm_commits").await, commits_before);
+    assert_eq!(count(pool, &realm, "canonical_events").await, events_before);
+    assert_eq!(count(pool, &realm, "realm_commits").await, commits_before);
 
     let reordered = Box::pin(ordinary_realm::source_request(
-        &pool,
+        pool,
         next_request(
             &first.authority_commit,
             arkret_wire::EventKind::StrandReorder,
@@ -381,12 +372,12 @@ async fn exercise_placement_cas_and_reorder(
     .await;
     uow.commit_event(reordered.clone()).await.unwrap();
     assert_eq!(
-        position(&pool, &board_id, &opened.strand_id).await.value,
+        position(pool, &board_id, &opened.strand_id).await.value,
         json!({"list_space_id":list_a_id,"rank":"b"})
     );
     let reordered_counts = (
-        count(&pool, &realm, "canonical_events").await,
-        count(&pool, &realm, "realm_commits").await,
+        count(pool, &realm, "canonical_events").await,
+        count(pool, &realm, "realm_commits").await,
     );
     assert!(
         !uow.commit_event(reordered.clone())
@@ -397,11 +388,11 @@ async fn exercise_placement_cas_and_reorder(
     assert_eq!(
         reordered_counts,
         (
-            count(&pool, &realm, "canonical_events").await,
-            count(&pool, &realm, "realm_commits").await,
+            count(pool, &realm, "canonical_events").await,
+            count(pool, &realm, "realm_commits").await,
         )
     );
-    let replayed = position(&pool, &board_id, &opened.strand_id).await;
+    let replayed = position(pool, &board_id, &opened.strand_id).await;
     assert_eq!(
         replayed.value,
         json!({"list_space_id":list_a_id,"rank":"b"})
@@ -428,7 +419,7 @@ async fn exercise_placement_wip_postimage(
     let at = opened.head.authority_commit.commit.committed_at;
     let uow = PgEventCommitUnitOfWork::new(pool.clone());
     let second_strand = Box::pin(ordinary_realm::source_request(
-        &pool,
+        pool,
         next_request(
             &reordered.authority_commit,
             arkret_wire::EventKind::StrandCreate,
@@ -450,7 +441,7 @@ async fn exercise_placement_wip_postimage(
         arkret_wire::StrandId::from_event_id(&second_strand.authority_commit.event.event_id);
     uow.commit_event(second_strand.clone()).await.unwrap();
     let over_wip = Box::pin(ordinary_realm::source_request(
-        &pool,
+        pool,
         next_request(
             &second_strand.authority_commit,
             arkret_wire::EventKind::StrandMove,
@@ -467,8 +458,8 @@ async fn exercise_placement_wip_postimage(
     ))
     .await;
     let before = (
-        count(&pool, &realm, "canonical_events").await,
-        count(&pool, &realm, "realm_commits").await,
+        count(pool, &realm, "canonical_events").await,
+        count(pool, &realm, "realm_commits").await,
     );
     assert_eq!(
         uow.commit_event(over_wip)
@@ -480,13 +471,13 @@ async fn exercise_placement_wip_postimage(
     assert_eq!(
         before,
         (
-            count(&pool, &realm, "canonical_events").await,
-            count(&pool, &realm, "realm_commits").await
+            count(pool, &realm, "canonical_events").await,
+            count(pool, &realm, "realm_commits").await
         )
     );
 
     let move_out = Box::pin(ordinary_realm::source_request(
-        &pool,
+        pool,
         next_request(
             &second_strand.authority_commit,
             arkret_wire::EventKind::StrandMove,
@@ -505,7 +496,7 @@ async fn exercise_placement_wip_postimage(
     .await;
     uow.commit_event(move_out.clone()).await.unwrap();
     let now_fits = Box::pin(ordinary_realm::source_request(
-        &pool,
+        pool,
         next_request(
             &move_out.authority_commit,
             arkret_wire::EventKind::StrandMove,
@@ -523,7 +514,7 @@ async fn exercise_placement_wip_postimage(
     .await;
     uow.commit_event(now_fits.clone()).await.unwrap();
     assert_eq!(
-        position(&pool, &board_id, &second_id).await.value,
+        position(pool, &board_id, &second_id).await.value,
         json!({"list_space_id":list_a_id,"rank":"a"})
     );
 }
@@ -547,13 +538,13 @@ struct WipWarnSetup {
 }
 
 async fn prepare_wip_warn_setup(pool: &PgPool) -> WipWarnSetup {
-    let opened = Box::pin(open_discussion(&pool, "strand-position-wip-enforcement")).await;
+    let opened = Box::pin(open_discussion(pool, "strand-position-wip-enforcement")).await;
     let uow = PgEventCommitUnitOfWork::new(pool.clone());
     let realm = opened.head.authority_commit.event.realm_id.clone();
     let actor = opened.head.authority_commit.event.actor_id.clone();
     let at = opened.head.authority_commit.commit.committed_at;
     let board = Box::pin(ordinary_realm::source_request(
-        &pool,
+        pool,
         next_request(
             &opened.head.authority_commit,
             arkret_wire::EventKind::SpaceCreate,
@@ -571,7 +562,7 @@ async fn prepare_wip_warn_setup(pool: &PgPool) -> WipWarnSetup {
     let board_id = arkret_wire::SpaceId::from_event_id(&board.authority_commit.event.event_id);
     uow.commit_event(board.clone()).await.unwrap();
     let warn_list = Box::pin(ordinary_realm::source_request(
-        &pool,
+        pool,
         next_request(
             &board.authority_commit,
             arkret_wire::EventKind::SpaceCreate,
@@ -597,7 +588,7 @@ async fn prepare_wip_warn_setup(pool: &PgPool) -> WipWarnSetup {
     let warn_id = arkret_wire::SpaceId::from_event_id(&warn_list.authority_commit.event.event_id);
     uow.commit_event(warn_list.clone()).await.unwrap();
     let review_list = Box::pin(ordinary_realm::source_request(
-        &pool,
+        pool,
         next_request(
             &warn_list.authority_commit,
             arkret_wire::EventKind::SpaceCreate,
@@ -624,7 +615,7 @@ async fn prepare_wip_warn_setup(pool: &PgPool) -> WipWarnSetup {
         arkret_wire::SpaceId::from_event_id(&review_list.authority_commit.event.event_id);
     uow.commit_event(review_list.clone()).await.unwrap();
     let second_strand = Box::pin(ordinary_realm::source_request(
-        &pool,
+        pool,
         next_request(
             &review_list.authority_commit,
             arkret_wire::EventKind::StrandCreate,
@@ -667,7 +658,7 @@ async fn exercise_wip_warn_and_review(pool: &PgPool, setup: &WipWarnSetup) {
     let at = opened.head.authority_commit.commit.committed_at;
     let uow = PgEventCommitUnitOfWork::new(pool.clone());
     let warn_first = Box::pin(ordinary_realm::source_request(
-        &pool,
+        pool,
         next_request(
             &second_strand.authority_commit,
             arkret_wire::EventKind::StrandMove,
@@ -685,7 +676,7 @@ async fn exercise_wip_warn_and_review(pool: &PgPool, setup: &WipWarnSetup) {
     .await;
     uow.commit_event(warn_first.clone()).await.unwrap();
     let warn_over_limit = Box::pin(ordinary_realm::source_request(
-        &pool,
+        pool,
         next_request(
             &warn_first.authority_commit,
             arkret_wire::EventKind::StrandMove,
@@ -703,12 +694,12 @@ async fn exercise_wip_warn_and_review(pool: &PgPool, setup: &WipWarnSetup) {
     .await;
     uow.commit_event(warn_over_limit.clone()).await.unwrap();
     assert_eq!(
-        position(&pool, &board_id, &second_id).await.value,
+        position(pool, &board_id, &second_id).await.value,
         json!({"list_space_id":warn_id,"rank":"b"})
     );
 
     let review_first = Box::pin(ordinary_realm::source_request(
-        &pool,
+        pool,
         next_request(
             &warn_over_limit.authority_commit,
             arkret_wire::EventKind::StrandMove,
@@ -727,7 +718,7 @@ async fn exercise_wip_warn_and_review(pool: &PgPool, setup: &WipWarnSetup) {
     .await;
     uow.commit_event(review_first.clone()).await.unwrap();
     let review_over_limit = Box::pin(ordinary_realm::source_request(
-        &pool,
+        pool,
         next_request(
             &review_first.authority_commit,
             arkret_wire::EventKind::StrandMove,
@@ -745,8 +736,8 @@ async fn exercise_wip_warn_and_review(pool: &PgPool, setup: &WipWarnSetup) {
     ))
     .await;
     let before = (
-        count(&pool, &realm, "canonical_events").await,
-        count(&pool, &realm, "realm_commits").await,
+        count(pool, &realm, "canonical_events").await,
+        count(pool, &realm, "realm_commits").await,
     );
     assert_eq!(
         uow.commit_event(review_over_limit)
@@ -758,12 +749,12 @@ async fn exercise_wip_warn_and_review(pool: &PgPool, setup: &WipWarnSetup) {
     assert_eq!(
         before,
         (
-            count(&pool, &realm, "canonical_events").await,
-            count(&pool, &realm, "realm_commits").await
+            count(pool, &realm, "canonical_events").await,
+            count(pool, &realm, "realm_commits").await
         )
     );
     assert_eq!(
-        position(&pool, &board_id, &second_id).await.value,
+        position(pool, &board_id, &second_id).await.value,
         json!({"list_space_id":warn_id,"rank":"b"})
     );
 }
@@ -786,13 +777,13 @@ struct WipOverrideSetup {
 }
 
 async fn prepare_wip_override_setup(pool: &PgPool) -> WipOverrideSetup {
-    let opened = Box::pin(open_discussion(&pool, "strand-position-wip-override")).await;
+    let opened = Box::pin(open_discussion(pool, "strand-position-wip-override")).await;
     let uow = PgEventCommitUnitOfWork::new(pool.clone());
     let realm = opened.head.authority_commit.event.realm_id.clone();
     let actor = opened.head.authority_commit.event.actor_id.clone();
     let at = opened.head.authority_commit.commit.committed_at;
     let board = Box::pin(ordinary_realm::source_request(
-        &pool,
+        pool,
         next_request(
             &opened.head.authority_commit,
             arkret_wire::EventKind::SpaceCreate,
@@ -810,7 +801,7 @@ async fn prepare_wip_override_setup(pool: &PgPool) -> WipOverrideSetup {
     let board_id = arkret_wire::SpaceId::from_event_id(&board.authority_commit.event.event_id);
     uow.commit_event(board.clone()).await.unwrap();
     let list_a = Box::pin(ordinary_realm::source_request(
-        &pool,
+        pool,
         next_request(
             &board.authority_commit,
             arkret_wire::EventKind::SpaceCreate,
@@ -836,7 +827,7 @@ async fn prepare_wip_override_setup(pool: &PgPool) -> WipOverrideSetup {
     let list_a_id = arkret_wire::SpaceId::from_event_id(&list_a.authority_commit.event.event_id);
     uow.commit_event(list_a.clone()).await.unwrap();
     let list_b = Box::pin(ordinary_realm::source_request(
-        &pool,
+        pool,
         next_request(
             &list_a.authority_commit,
             arkret_wire::EventKind::SpaceCreate,
@@ -862,7 +853,7 @@ async fn prepare_wip_override_setup(pool: &PgPool) -> WipOverrideSetup {
     let list_b_id = arkret_wire::SpaceId::from_event_id(&list_b.authority_commit.event.event_id);
     uow.commit_event(list_b.clone()).await.unwrap();
     let second_strand = Box::pin(ordinary_realm::source_request(
-        &pool,
+        pool,
         next_request(
             &list_b.authority_commit,
             arkret_wire::EventKind::StrandCreate,
@@ -884,7 +875,7 @@ async fn prepare_wip_override_setup(pool: &PgPool) -> WipOverrideSetup {
         arkret_wire::StrandId::from_event_id(&second_strand.authority_commit.event.event_id);
     uow.commit_event(second_strand.clone()).await.unwrap();
     let first_placed = Box::pin(ordinary_realm::source_request(
-        &pool,
+        pool,
         next_request(
             &second_strand.authority_commit,
             arkret_wire::EventKind::StrandMove,
@@ -902,7 +893,7 @@ async fn prepare_wip_override_setup(pool: &PgPool) -> WipOverrideSetup {
     .await;
     uow.commit_event(first_placed.clone()).await.unwrap();
     let second_placed = Box::pin(ordinary_realm::source_request(
-        &pool,
+        pool,
         next_request(
             &first_placed.authority_commit,
             arkret_wire::EventKind::StrandMove,
@@ -972,7 +963,7 @@ async fn exercise_wip_override_resource_grants(
             "active_strand_count_override_allowed":false}),
         );
     let conflicting_grant = Box::pin(ordinary_realm::source_request(
-        &pool,
+        pool,
         next_request(
             &second_placed.authority_commit,
             arkret_wire::EventKind::CapabilityGrant,
@@ -989,7 +980,7 @@ async fn exercise_wip_override_resource_grants(
     .await;
     uow.commit_event(conflicting_grant.clone()).await.unwrap();
     let conflicting_move = Box::pin(ordinary_realm::source_request(
-        &pool,
+        pool,
         next_request(
             &conflicting_grant.authority_commit,
             arkret_wire::EventKind::StrandMove,
@@ -1007,8 +998,8 @@ async fn exercise_wip_override_resource_grants(
     ))
     .await;
     let before = (
-        count(&pool, &realm, "canonical_events").await,
-        count(&pool, &realm, "realm_commits").await,
+        count(pool, &realm, "canonical_events").await,
+        count(pool, &realm, "realm_commits").await,
     );
     assert_eq!(
         uow.commit_event(conflicting_move)
@@ -1020,12 +1011,12 @@ async fn exercise_wip_override_resource_grants(
     assert_eq!(
         before,
         (
-            count(&pool, &realm, "canonical_events").await,
-            count(&pool, &realm, "realm_commits").await
+            count(pool, &realm, "canonical_events").await,
+            count(pool, &realm, "realm_commits").await
         )
     );
     let override_grant = Box::pin(ordinary_realm::source_request(
-        &pool,
+        pool,
         next_request(
             &conflicting_grant.authority_commit,
             arkret_wire::EventKind::CapabilityGrant,
@@ -1045,7 +1036,7 @@ async fn exercise_wip_override_resource_grants(
     // Root ownership admits ordinary moves, but the narrow grant cannot
     // override WIP for another Strand or destination List.
     let wrong_target = Box::pin(ordinary_realm::source_request(
-        &pool,
+        pool,
         next_request(
             &override_grant.authority_commit,
             arkret_wire::EventKind::StrandMove,
@@ -1063,8 +1054,8 @@ async fn exercise_wip_override_resource_grants(
     ))
     .await;
     let before = (
-        count(&pool, &realm, "canonical_events").await,
-        count(&pool, &realm, "realm_commits").await,
+        count(pool, &realm, "canonical_events").await,
+        count(pool, &realm, "realm_commits").await,
     );
     assert_eq!(
         uow.commit_event(wrong_target)
@@ -1076,8 +1067,8 @@ async fn exercise_wip_override_resource_grants(
     assert_eq!(
         before,
         (
-            count(&pool, &realm, "canonical_events").await,
-            count(&pool, &realm, "realm_commits").await
+            count(pool, &realm, "canonical_events").await,
+            count(pool, &realm, "realm_commits").await
         )
     );
 
@@ -1125,7 +1116,7 @@ async fn exercise_wip_override_global_deny(
         "denied_space_ids":[list_a_id]
     }]);
     let denial_grant = Box::pin(ordinary_realm::source_request(
-        &pool,
+        pool,
         next_request(
             &override_grant.authority_commit,
             arkret_wire::EventKind::CapabilityGrant,
@@ -1142,7 +1133,7 @@ async fn exercise_wip_override_global_deny(
     .await;
     uow.commit_event(denial_grant.clone()).await.unwrap();
     let denied_by_other_grant = Box::pin(ordinary_realm::source_request(
-        &pool,
+        pool,
         next_request(
             &denial_grant.authority_commit,
             arkret_wire::EventKind::StrandMove,
@@ -1160,8 +1151,8 @@ async fn exercise_wip_override_global_deny(
     ))
     .await;
     let before = (
-        count(&pool, &realm, "canonical_events").await,
-        count(&pool, &realm, "realm_commits").await,
+        count(pool, &realm, "canonical_events").await,
+        count(pool, &realm, "realm_commits").await,
     );
     assert_eq!(
         uow.commit_event(denied_by_other_grant)
@@ -1173,12 +1164,12 @@ async fn exercise_wip_override_global_deny(
     assert_eq!(
         before,
         (
-            count(&pool, &realm, "canonical_events").await,
-            count(&pool, &realm, "realm_commits").await
+            count(pool, &realm, "canonical_events").await,
+            count(pool, &realm, "realm_commits").await
         )
     );
     let denial_revoked = Box::pin(ordinary_realm::source_request(
-        &pool,
+        pool,
         next_request(
             &denial_grant.authority_commit,
             arkret_wire::EventKind::CapabilityRevoke,
@@ -1198,7 +1189,7 @@ async fn exercise_wip_override_global_deny(
     uow.commit_event(denial_revoked.clone()).await.unwrap();
 
     let override_move = Box::pin(ordinary_realm::source_request(
-        &pool,
+        pool,
         next_request(
             &denial_revoked.authority_commit,
             arkret_wire::EventKind::StrandMove,
@@ -1217,7 +1208,7 @@ async fn exercise_wip_override_global_deny(
     .await;
     uow.commit_event(override_move.clone()).await.unwrap();
     assert_eq!(
-        position(&pool, &board_id, &second_id).await.value,
+        position(pool, &board_id, &second_id).await.value,
         json!({"list_space_id":list_a_id,"rank":"b"})
     );
 
@@ -1239,7 +1230,7 @@ async fn exercise_wip_after_override_revocation(
     let at = opened.head.authority_commit.commit.committed_at;
     let uow = PgEventCommitUnitOfWork::new(pool.clone());
     let revoked = Box::pin(ordinary_realm::source_request(
-        &pool,
+        pool,
         next_request(
             &override_move.authority_commit,
             arkret_wire::EventKind::CapabilityRevoke,
@@ -1258,7 +1249,7 @@ async fn exercise_wip_after_override_revocation(
     .await;
     uow.commit_event(revoked.clone()).await.unwrap();
     let move_out = Box::pin(ordinary_realm::source_request(
-        &pool,
+        pool,
         next_request(
             &revoked.authority_commit,
             arkret_wire::EventKind::StrandMove,
@@ -1277,7 +1268,7 @@ async fn exercise_wip_after_override_revocation(
     .await;
     uow.commit_event(move_out.clone()).await.unwrap();
     let after_revocation = Box::pin(ordinary_realm::source_request(
-        &pool,
+        pool,
         next_request(
             &move_out.authority_commit,
             arkret_wire::EventKind::StrandMove,
@@ -1295,8 +1286,8 @@ async fn exercise_wip_after_override_revocation(
     ))
     .await;
     let before = (
-        count(&pool, &realm, "canonical_events").await,
-        count(&pool, &realm, "realm_commits").await,
+        count(pool, &realm, "canonical_events").await,
+        count(pool, &realm, "realm_commits").await,
     );
     assert_eq!(
         uow.commit_event(after_revocation)
@@ -1308,12 +1299,12 @@ async fn exercise_wip_after_override_revocation(
     assert_eq!(
         before,
         (
-            count(&pool, &realm, "canonical_events").await,
-            count(&pool, &realm, "realm_commits").await
+            count(pool, &realm, "canonical_events").await,
+            count(pool, &realm, "realm_commits").await
         )
     );
     assert_eq!(
-        position(&pool, &board_id, &second_id).await.value,
+        position(pool, &board_id, &second_id).await.value,
         json!({"list_space_id":list_b_id,"rank":"a"})
     );
 }

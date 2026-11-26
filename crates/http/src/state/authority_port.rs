@@ -986,7 +986,8 @@ mod tests {
             self_event_route(&EventKind::MlsCommit),
             Err(coland_services::ServiceError::SchemaViolation(_))
         ));
-        for kind in [EventKind::ConsentReplace] {
+        {
+            let kind = EventKind::ConsentReplace;
             assert_eq!(self_event_route(&kind).unwrap(), SelfEventRoute::Consent);
         }
         for kind in [

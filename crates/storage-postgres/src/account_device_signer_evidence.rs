@@ -63,7 +63,7 @@ mod retention_error_tests {
                 Ok(())
             })
             .await;
-        let error = retention_transaction_error(result.err().expect("SQLSTATE 40001 abort"));
+        let error = retention_transaction_error(result.expect_err("SQLSTATE 40001 abort"));
         assert_eq!(
             error.conflict_code(),
             Some(ConflictCode::TemporarilyUnavailable)

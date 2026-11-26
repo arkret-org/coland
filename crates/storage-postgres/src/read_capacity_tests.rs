@@ -8,15 +8,12 @@
 //! hot Realm's history or the number of Realms. A sequential scan of either
 //! table fails the matrix outright.
 
-#[path = "../tests/support/historical_human.rs"]
-mod capacity_human;
-
 use diesel::sql_types::{Array, BigInt, Json, Jsonb, Text};
 use diesel_async::SimpleAsyncConnection;
 use horme::RunQueryDsl;
 use serde_json::Value;
 
-use crate::{AsyncPgConnection, QueryableByName, pg_conn, sql_query};
+use crate::{AsyncPgConnection, QueryableByName, historical_human, pg_conn, sql_query};
 
 const HOT_HISTORY: i64 = 20_000;
 const COLD_HISTORY: i64 = 20;
@@ -26,12 +23,12 @@ const PAGE: i64 = 100;
 // database never participates in the physical capacity measurements below.
 async fn admitted_circle_template() -> Value {
     use arkret_wire::{ActorId, CommitStreamRef, EventAdmissionSubmission, EventKind, ScopeRef};
-    use capacity_human::ordinary_realm;
     use coland_storage::EventCommitUnitOfWork;
+    use historical_human::ordinary_realm;
 
     let database = crate::test_database::TestDatabase::lease().await;
     let pool = database.pool();
-    let fixture = Box::pin(capacity_human::HumanFixture::new(
+    let fixture = Box::pin(historical_human::HumanFixture::new(
         &pool,
         ordinary_realm::human_profile::station_did(&ordinary_realm::station()),
     ))
@@ -321,13 +318,13 @@ async fn per_stream_reads_stay_bounded_across_one_hundred_and_one_thousand_realm
     let database = crate::test_database::TestDatabase::lease().await;
     let pool = database.pool();
     let mut conn = pg_conn(&pool).await.unwrap();
-    seed(&mut *conn, 1, 1, HOT_HISTORY).await;
+    seed(&mut conn, 1, 1, HOT_HISTORY).await;
     let mut seeded = 1;
     let hot_realm = "ak:realm:capacity-1";
     let hot_stream = "stream-1";
     for realms in [1_i64, 100, 1000] {
         if realms > seeded {
-            seed(&mut *conn, seeded + 1, realms, COLD_HISTORY).await;
+            seed(&mut conn, seeded + 1, realms, COLD_HISTORY).await;
             seeded = realms;
         }
         conn.batch_execute(

@@ -473,11 +473,11 @@ mod test_construction {
                     // runtime deadlocks the connection that serves them.
                     let leased = Arc::new(TestDatabase::lease_blocking());
                     leased.bind_device_inventory_station(
-                        &development_fixture_service_identity(&config)
+                        development_fixture_service_identity(&config)
                             .identity()
                             .expect("fixture has a serving identity")
                             .service_id
-                            .to_string(),
+                            .as_ref(),
                     );
                     (
                         Db { pool: None },
@@ -1921,9 +1921,7 @@ pub fn getrandom_seed(out: &mut [u8; 32]) {
 }
 
 #[cfg(test)]
-#[path = "../../../storage-postgres/tests/support/ordinary_realm.rs"]
-#[allow(dead_code)]
-mod hydration_ordinary_realm;
+use crate::historical_human::ordinary_realm as hydration_ordinary_realm;
 
 #[cfg(test)]
 mod committed_event_hydration_tests {

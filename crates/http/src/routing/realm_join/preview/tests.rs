@@ -377,8 +377,8 @@ impl GovernedRealm {
         .await;
         commit_projected_invite(store, transaction.clone()).await;
         self.head = transaction.commit;
-        let invite_id = InviteId::from_event_id(&event.event_id);
-        invite_id
+
+        InviteId::from_event_id(&event.event_id)
     }
 
     async fn cancel_invite(
@@ -798,8 +798,26 @@ fn disclose_requires_the_committed_required_members() {
         CurrentSelector::RealmProfile,
         serde_json::json!({"schema":"ak.schema.realm_profile.v1","title":"x".repeat(257)}),
     );
-    assert!(disclose(&policy, audience, &realm_id, 3, &[join_rule.clone()]).is_none());
-    assert!(disclose(&policy, audience, &realm_id, 3, &[history.clone()]).is_none());
+    assert!(
+        disclose(
+            &policy,
+            audience,
+            &realm_id,
+            3,
+            std::slice::from_ref(&join_rule)
+        )
+        .is_none()
+    );
+    assert!(
+        disclose(
+            &policy,
+            audience,
+            &realm_id,
+            3,
+            std::slice::from_ref(&history)
+        )
+        .is_none()
+    );
     let preview = disclose(
         &policy,
         audience,

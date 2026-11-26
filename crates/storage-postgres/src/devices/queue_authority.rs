@@ -799,64 +799,6 @@ pub(super) async fn ack_recipient_with_token(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use serde_json::json;
-
-    use super::*;
-
-    fn welcome_row(endpoint: Value) -> QueueDeliveryRow {
-        QueueDeliveryRow {
-            position: 7,
-            delivery_kind: "mls_welcome".to_owned(),
-            delivery_json: json!({
-                "welcome_id": "ak:mls_welcome_delivery:0199aaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa",
-                "realm_id": "ak:realm:Ac1aCK8aQdnkYImvdH3DFjq4jDCP198pXYWCGzGuVyj5",
-                "effective_scope": {"kind":"realm", "realm_id":"ak:realm:Ac1aCK8aQdnkYImvdH3DFjq4jDCP198pXYWCGzGuVyj5"},
-                "commit_event_ref": "ak:event:AQJmSg1s9QyzppFeJL40dN92YVHZeLdBBt3UWHa9XNOD",
-                "recipient_actor_id": {"kind":"service", "service_id":"ak:did_core:webvh:z6mkfixturestationb"},
-                "recipient_endpoint": endpoint,
-                "keypackage_claim_ref": "ak:keypackage_claim:0199cccc-cccc-7ccc-8ccc-cccccccccccc",
-                "ciphertext_base64url": "AQIDBA",
-                "producer_proof": {
-                    "context": "ak.mls_welcome_delivery_signature.v1",
-                    "signature_algorithm": "Ed25519",
-                    "verification_method": "did:webvh:z6mkfixturealice:alice.example#device-fixture",
-                    "signed_digest": "sha256:f51a607977aa5ba077764b06209d77c0231822b23a59be07cdb44f11f6582a29",
-                    "created_at": "2026-09-20T00:00:00.000Z",
-                    "signature": "R_RF4nAmz0yEIvqPt7BLemCd4npd36B5p5wyhSB8gXy2AL2AHTZHypwUsIsbqL5mZ3uesmfoOdcO8vbShWzNDw"
-                }
-            }),
-        }
-    }
-
-    #[test]
-    fn human_queue_rejects_welcome_for_another_device() {
-        let row = welcome_row(
-            json!({"kind":"device", "device_id":"ak:device:0199bbbb-bbbb-7bbb-8bbb-bbbbbbbbbbbb"}),
-        );
-        let selector = RecipientQueueSelector::HumanDevice {
-            recipient: "ak:did_core:webvh:z6mkfixturestationb".to_owned(),
-            device_id: "ak:device:0199dddd-dddd-7ddd-8ddd-dddddddddddd".to_owned(),
-        };
-        assert!(decode_delivery(row, &selector).is_err());
-    }
-
-    #[test]
-    fn agent_queue_rejects_welcome_for_another_method() {
-        let row = welcome_row(
-            json!({"kind":"agent_runtime", "verification_method":"did:webvh:z6mkfixturealice:alice.example#device-fixture"}),
-        );
-        let selector = RecipientQueueSelector::AgentRuntime {
-            agent_id: "ak:did_core:webvh:z6mkfixturestationb".to_owned(),
-            verification_method: "did:webvh:z6mkfixturealice:alice.example#different".to_owned(),
-            authorization_event_ref: "ak:event:AQJmSg1s9QyzppFeJL40dN92YVHZeLdBBt3UWHa9XNOD"
-                .to_owned(),
-        };
-        assert!(decode_delivery(row, &selector).is_err());
-    }
-}
-
 /// Realm queue identity never depends on its current governing Station.
 pub(super) fn queue_subject(actor: &arkret_wire::ActorId) -> PersistenceResult<String> {
     if actor.as_realm_actor_id().is_some() {
@@ -933,4 +875,62 @@ pub(super) async fn inactive_batch_recipient_accounts(
         }
     }
     Ok(inactive)
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn welcome_row(endpoint: Value) -> QueueDeliveryRow {
+        QueueDeliveryRow {
+            position: 7,
+            delivery_kind: "mls_welcome".to_owned(),
+            delivery_json: json!({
+                "welcome_id": "ak:mls_welcome_delivery:0199aaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa",
+                "realm_id": "ak:realm:Ac1aCK8aQdnkYImvdH3DFjq4jDCP198pXYWCGzGuVyj5",
+                "effective_scope": {"kind":"realm", "realm_id":"ak:realm:Ac1aCK8aQdnkYImvdH3DFjq4jDCP198pXYWCGzGuVyj5"},
+                "commit_event_ref": "ak:event:AQJmSg1s9QyzppFeJL40dN92YVHZeLdBBt3UWHa9XNOD",
+                "recipient_actor_id": {"kind":"service", "service_id":"ak:did_core:webvh:z6mkfixturestationb"},
+                "recipient_endpoint": endpoint,
+                "keypackage_claim_ref": "ak:keypackage_claim:0199cccc-cccc-7ccc-8ccc-cccccccccccc",
+                "ciphertext_base64url": "AQIDBA",
+                "producer_proof": {
+                    "context": "ak.mls_welcome_delivery_signature.v1",
+                    "signature_algorithm": "Ed25519",
+                    "verification_method": "did:webvh:z6mkfixturealice:alice.example#device-fixture",
+                    "signed_digest": "sha256:f51a607977aa5ba077764b06209d77c0231822b23a59be07cdb44f11f6582a29",
+                    "created_at": "2026-09-20T00:00:00.000Z",
+                    "signature": "R_RF4nAmz0yEIvqPt7BLemCd4npd36B5p5wyhSB8gXy2AL2AHTZHypwUsIsbqL5mZ3uesmfoOdcO8vbShWzNDw"
+                }
+            }),
+        }
+    }
+
+    #[test]
+    fn human_queue_rejects_welcome_for_another_device() {
+        let row = welcome_row(
+            json!({"kind":"device", "device_id":"ak:device:0199bbbb-bbbb-7bbb-8bbb-bbbbbbbbbbbb"}),
+        );
+        let selector = RecipientQueueSelector::HumanDevice {
+            recipient: "ak:did_core:webvh:z6mkfixturestationb".to_owned(),
+            device_id: "ak:device:0199dddd-dddd-7ddd-8ddd-dddddddddddd".to_owned(),
+        };
+        assert!(decode_delivery(row, &selector).is_err());
+    }
+
+    #[test]
+    fn agent_queue_rejects_welcome_for_another_method() {
+        let row = welcome_row(
+            json!({"kind":"agent_runtime", "verification_method":"did:webvh:z6mkfixturealice:alice.example#device-fixture"}),
+        );
+        let selector = RecipientQueueSelector::AgentRuntime {
+            agent_id: "ak:did_core:webvh:z6mkfixturestationb".to_owned(),
+            verification_method: "did:webvh:z6mkfixturealice:alice.example#different".to_owned(),
+            authorization_event_ref: "ak:event:AQJmSg1s9QyzppFeJL40dN92YVHZeLdBBt3UWHa9XNOD"
+                .to_owned(),
+        };
+        assert!(decode_delivery(row, &selector).is_err());
+    }
 }

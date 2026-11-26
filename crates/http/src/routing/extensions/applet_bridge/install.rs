@@ -1082,6 +1082,17 @@ pub(super) fn ghost_actors_allowed_for_install(
     package_allows && scope_approved && actor_policy_allows
 }
 
+pub(super) fn registration_revision_from_event(
+    event: &Event,
+) -> Result<Option<arkret_wire::RealmCommitId>, AppError> {
+    let payload: arkret_models_integration::AppletRegistrationPayload = serde_json::from_value(
+        serde_json::to_value(&event.payload)
+            .map_err(|e| AppError::schema_violation(e.to_string()))?,
+    )
+    .map_err(|e| AppError::schema_violation(e.to_string()))?;
+    Ok(payload.expected_commit_id)
+}
+
 #[cfg(test)]
 mod tests {
     use arkret_identifiers::{Did, DidCoreId, Hash};
@@ -1437,7 +1448,7 @@ mod tests {
         let document = DidDocument::new(
             test_applet_service_did(),
             package.webhook_signature_policy.key_ref.to_string(),
-            json!({"kty": "OKP", "crv": "X25519", "x": arkret_canonical::base64url_encode(&[31; 32])}).to_string(),
+            json!({"kty": "OKP", "crv": "X25519", "x": arkret_canonical::base64url_encode([31; 32])}).to_string(),
         );
         let evidence = AppletRegistrationEpochEvidence::from_did_document(
             &document,
@@ -1618,15 +1629,4 @@ mod tests {
             .is_err()
         );
     }
-}
-
-pub(super) fn registration_revision_from_event(
-    event: &Event,
-) -> Result<Option<arkret_wire::RealmCommitId>, AppError> {
-    let payload: arkret_models_integration::AppletRegistrationPayload = serde_json::from_value(
-        serde_json::to_value(&event.payload)
-            .map_err(|e| AppError::schema_violation(e.to_string()))?,
-    )
-    .map_err(|e| AppError::schema_violation(e.to_string()))?;
-    Ok(payload.expected_commit_id)
 }

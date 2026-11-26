@@ -448,22 +448,19 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        event.producer_proof = Some(
-            ProducerEventProof {
-                kind: "detached_jws".to_owned(),
-                verification_method: DidUrl::new(
-                    "did:webvh:z6mkstoredactor:example.test#key-1".to_owned(),
-                )
-                .unwrap(),
-                event_digest: event_digest.clone(),
-                created_at: event.created_at,
-                domain: None,
-                audience: None,
-                proof_purpose: None,
-                jws: arkret_wire::test_support::structural_only_detached_jws(&event_digest),
-            }
-            .into(),
-        );
+        event.producer_proof = Some(ProducerEventProof {
+            kind: "detached_jws".to_owned(),
+            verification_method: DidUrl::new(
+                "did:webvh:z6mkstoredactor:example.test#key-1".to_owned(),
+            )
+            .unwrap(),
+            event_digest: event_digest.clone(),
+            created_at: event.created_at,
+            domain: None,
+            audience: None,
+            proof_purpose: None,
+            jws: arkret_wire::test_support::structural_only_detached_jws(&event_digest),
+        });
         event
     }
 

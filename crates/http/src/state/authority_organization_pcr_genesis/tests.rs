@@ -4,10 +4,6 @@
 
 #[path = "../../../../storage-postgres/tests/support/organization_origin.rs"]
 mod organization_origin;
-#[path = "../../../../storage-postgres/tests/support/sql_fault_matrix.rs"]
-#[allow(dead_code)]
-mod sql_fault_matrix;
-
 use std::sync::Arc;
 
 use arkret_models_collaboration::authority_commit::{
@@ -23,6 +19,7 @@ use salvo::http::StatusCode;
 use salvo::test::{ResponseExt as _, TestClient};
 
 use super::super::AppState;
+use crate::sql_fault_matrix;
 
 struct OriginTls(rustls::ServerConfig);
 impl salvo::conn::IntoConfigStream<rustls::ServerConfig> for OriginTls {

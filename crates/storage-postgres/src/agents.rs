@@ -422,8 +422,7 @@ async fn write_agent_principal(
     } else {
         Err(PersistenceError::Conflict(format!(
             "Agent `{agent_id}` controller/PCR authorization binding is immutable"
-        ))
-        .into())
+        )))
     }
 }
 

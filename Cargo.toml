@@ -20,8 +20,13 @@ edition = "2024"
 rust-version = "1.99"
 license = "Apache-2.0"
 repository = "https://github.com/arkret-org/coland"
-homepage = "https://github.com/arkret-org/coland"
+homepage = "https://arkret.org"
 authors = ["Arkret contributors"]
+
+# Keep the HTTP test binary within Apple's compact-unwind offset limit.
+[profile.test]
+opt-level = 1
+incremental = false
 
 # The HTTP and PostgreSQL request futures are polled on the same Tokio stack.
 # Optimize temporary moves in their debug builds while keeping debug assertions.
@@ -92,7 +97,6 @@ bs58 = "0.5.1"
 bytes = "1.12.1"
 chrono = "0.4.45"
 chacha20poly1305 = "0.11"
-chrono-tz = { version = "0.10.4", default-features = false }
 deadpool = "0.13"
 diesel = "2.3.14"
 pq-sys = { version = "0.7.5", features = ["bundled"] }

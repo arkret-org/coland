@@ -743,6 +743,14 @@ pub(crate) fn global_notification_payload(value: Value) -> PersistenceResult<Val
         .map_err(|error| PersistenceError::Internal(error.to_string()))
 }
 
+/// Decode one stored notification payload into the branch its `id` form
+/// selected. Used only by `to_delta`, which has already chosen the branch.
+fn decode_notification_data<T: serde::de::DeserializeOwned>(value: Value) -> PersistenceResult<T> {
+    serde_json::from_value(value).map_err(|error| {
+        PersistenceError::Internal(format!("account notification data is invalid: {error}"))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -826,12 +834,4 @@ mod tests {
             )
         );
     }
-}
-
-/// Decode one stored notification payload into the branch its `id` form
-/// selected. Used only by `to_delta`, which has already chosen the branch.
-fn decode_notification_data<T: serde::de::DeserializeOwned>(value: Value) -> PersistenceResult<T> {
-    serde_json::from_value(value).map_err(|error| {
-        PersistenceError::Internal(format!("account notification data is invalid: {error}"))
-    })
 }

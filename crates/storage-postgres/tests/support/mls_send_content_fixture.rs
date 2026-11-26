@@ -422,7 +422,7 @@ pub async fn prepare(
         let (head, custody) = Box::pin(
             coland_test_support::agent_origin::admit_controller_history_custody(
                 pool,
-                &principal,
+                principal,
                 &station_method,
                 &station_key,
             ),

@@ -1143,9 +1143,7 @@ pub(super) async fn list_sidecars(
 }
 
 #[cfg(test)]
-#[path = "../../../../../storage-postgres/tests/support/ordinary_realm.rs"]
-#[allow(dead_code)]
-mod source_context_test_realm;
+use crate::historical_human::ordinary_realm as source_context_test_realm;
 
 #[cfg(test)]
 mod tests {

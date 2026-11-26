@@ -6,12 +6,9 @@ use diesel::sql_types::{BigInt, Jsonb, Text, Timestamptz};
 use diesel_async::AsyncPgConnection;
 use horme::{OptionalExtension as _, RunQueryDsl};
 
-use crate::{PersistenceError, PersistenceResult};
-
 #[cfg(test)]
-#[path = "../tests/support/ordinary_realm.rs"]
-#[allow(dead_code)]
-mod ordinary_realm;
+use crate::historical_human::ordinary_realm;
+use crate::{PersistenceError, PersistenceResult};
 
 /// Read only the proven canonical policy row, including verified replica provenance.
 pub(crate) async fn read_asset_privacy_policy_current(
@@ -1177,7 +1174,7 @@ mod tests {
         );
         assert_eq!(current.value, serde_json::json!({"disclosure":"required"}));
         let stored = crate::PgEventStore { pool }
-            .get(&denied.authority_commit.event.event_id.to_string())
+            .get(denied.authority_commit.event.event_id.as_ref())
             .await
             .unwrap();
         assert!(

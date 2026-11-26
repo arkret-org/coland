@@ -417,7 +417,7 @@ async fn request_peer_preview(
         "destination-trust-domain",
         &peer_target.trust_domain,
     );
-    let headers = rfc9421_sign(state, headers, "POST", &target);
+    let headers = rfc9421_sign(state, headers, "POST", &url, PEER_PREVIEW_PATH);
     let mut response = client
         .post(url)
         .headers(headers)

@@ -1679,15 +1679,21 @@ async fn resolve_direct_peer(
     // Both participants can resolve this pair. Keep the controller and runtime
     // roles fixed regardless of which participant made the authenticated read.
     let owned_roles = match (session.agent_session().is_some(), peer_descriptor) {
-        (false, ContactPeer::Agent { controller_account_id, .. })
-            if actor.as_account_id() == Some(controller_account_id) => Some((&actor, &peer)),
+        (
+            false,
+            ContactPeer::Agent {
+                controller_account_id,
+                ..
+            },
+        ) if actor.as_account_id() == Some(controller_account_id) => Some((&actor, &peer)),
         (true, ContactPeer::Human { .. }) => Some((&peer, &actor)),
         _ => None,
     };
     let agent_basis = match owned_roles {
         Some((controller, agent)) => match (controller.as_account_id(), agent.as_account_id()) {
             (Some(controller), Some(agent)) if agent.station_id == state.service_core_id() => {
-                agent_direct_authorization_basis(state, controller, agent.principal_id.as_str()).await?
+                agent_direct_authorization_basis(state, controller, agent.principal_id.as_str())
+                    .await?
             }
             _ => None,
         },
@@ -2371,8 +2377,10 @@ mod tests {
 
     #[test]
     fn admission_organization_labels_use_the_renamed_policy_and_evidence() {
-        let mut policy = AccountRegistrationPolicy::default();
-        policy.allowed_organization_labels = vec!["Team.Example".to_owned()];
+        let policy = AccountRegistrationPolicy {
+            allowed_organization_labels: vec!["Team.Example".to_owned()],
+            ..Default::default()
+        };
         let evidence: AccountRegistrationPolicyEvidence = serde_json::from_value(json!({
             "organization_label": "Research.Team.Example."
         }))
@@ -2504,7 +2512,10 @@ mod tests {
                 Some(controller.to_string())
             );
             assert_eq!(direct_founder_for_pair(actor, peer, None, None), None);
-            assert_eq!(direct_founder_for_pair(actor, peer, None, Some(&unrelated)), None);
+            assert_eq!(
+                direct_founder_for_pair(actor, peer, None, Some(&unrelated)),
+                None
+            );
         }
     }
 

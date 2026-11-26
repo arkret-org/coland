@@ -98,6 +98,81 @@ fn backup_actor_matches(backup: &Value, actor_id: &arkret_wire::ActorId) -> bool
         .and_then(|value| serde_json::from_value::<arkret_wire::ActorId>(value).ok())
         .is_some_and(|owner| &owner == actor_id)
 }
+
+pub(crate) async fn recovery_unlock_manifest(
+    state: &AppState,
+    account: &arkret_wire::AccountId,
+) -> Result<Value, AppError> {
+    let basis = state
+        .key_backups()
+        .confirmed_active_series_basis(account)
+        .await
+        .map_err(|error| AppError::internal(error.to_string()))?
+        .ok_or_else(|| AppError::internal("confirmed PCR pointer basis is absent"))?;
+    let pointers = basis.state;
+    let actor = arkret_wire::ActorId::account(account.clone()).to_string();
+    let query = coland_services::identity::KeyBackupListQuery {
+        actor_id: actor.clone(),
+        backup_kind: None,
+        series_id: None,
+        after: None,
+        limit: 1,
+    };
+    let revision = state
+        .key_backups()
+        .list_page(&query)
+        .await
+        .map_err(|error| AppError::internal(error.to_string()))?
+        .revision;
+    let backups = state
+        .key_backups()
+        .backups_for_actor(&actor)
+        .await
+        .map_err(|error| AppError::internal(error.to_string()))?;
+    let mut manifest = Vec::new();
+    for backup in backups {
+        let typed: KeyBackup = serde_json::from_value(backup.clone())
+            .map_err(|error| AppError::internal(error.to_string()))?;
+        let pointer = match typed.backup_kind {
+            BackupKind::SecretStorage => &pointers.secret_storage,
+        };
+        if pointer.series_id() == Some(&typed.series_id)
+            && backup
+                .get("expires_at")
+                .and_then(Value::as_str)
+                .is_none_or(|time| {
+                    chrono::DateTime::parse_from_rfc3339(time).is_ok_and(|time| time > Utc::now())
+                })
+        {
+            manifest.push(backup);
+        }
+    }
+    if revision
+        != state
+            .key_backups()
+            .list_page(&query)
+            .await
+            .map_err(|error| AppError::internal(error.to_string()))?
+            .revision
+    {
+        return Err(AppError::conflict(
+            "backup manifest changed during verification",
+        ));
+    }
+    // Freeze the confirmed Account Authority basis from the current active-series
+    // projection. This is the response DTO's authority_commit_id, separate from
+    // the signed active-series payload's source_commit_ref (§7.6.1).
+    // The revision below detects changes to the backup set itself.
+    let frozen = json!({
+        "backups": manifest,
+        "revision": revision,
+        "actor_id": actor,
+        "realm_id": pointers.control_realm_id,
+        "authority_commit_id": pointers.authority_commit_id,
+        "committed_ref": basis.committed_ref,
+    });
+    Ok(frozen)
+}
 #[cfg(test)]
 mod tests {
     use arkret_identifiers::DidCoreId;
@@ -656,79 +731,4 @@ mod tests {
             KEY_BACKUP_DAILY_DOWNLOAD_LIMIT_MAX
         );
     }
-}
-
-pub(crate) async fn recovery_unlock_manifest(
-    state: &AppState,
-    account: &arkret_wire::AccountId,
-) -> Result<Value, AppError> {
-    let basis = state
-        .key_backups()
-        .confirmed_active_series_basis(account)
-        .await
-        .map_err(|error| AppError::internal(error.to_string()))?
-        .ok_or_else(|| AppError::internal("confirmed PCR pointer basis is absent"))?;
-    let pointers = basis.state;
-    let actor = arkret_wire::ActorId::account(account.clone()).to_string();
-    let query = coland_services::identity::KeyBackupListQuery {
-        actor_id: actor.clone(),
-        backup_kind: None,
-        series_id: None,
-        after: None,
-        limit: 1,
-    };
-    let revision = state
-        .key_backups()
-        .list_page(&query)
-        .await
-        .map_err(|error| AppError::internal(error.to_string()))?
-        .revision;
-    let backups = state
-        .key_backups()
-        .backups_for_actor(&actor)
-        .await
-        .map_err(|error| AppError::internal(error.to_string()))?;
-    let mut manifest = Vec::new();
-    for backup in backups {
-        let typed: KeyBackup = serde_json::from_value(backup.clone())
-            .map_err(|error| AppError::internal(error.to_string()))?;
-        let pointer = match typed.backup_kind {
-            BackupKind::SecretStorage => &pointers.secret_storage,
-        };
-        if pointer.series_id() == Some(&typed.series_id)
-            && backup
-                .get("expires_at")
-                .and_then(Value::as_str)
-                .is_none_or(|time| {
-                    chrono::DateTime::parse_from_rfc3339(time).is_ok_and(|time| time > Utc::now())
-                })
-        {
-            manifest.push(backup);
-        }
-    }
-    if revision
-        != state
-            .key_backups()
-            .list_page(&query)
-            .await
-            .map_err(|error| AppError::internal(error.to_string()))?
-            .revision
-    {
-        return Err(AppError::conflict(
-            "backup manifest changed during verification",
-        ));
-    }
-    // Freeze the confirmed Account Authority basis from the current active-series
-    // projection. This is the response DTO's authority_commit_id, separate from
-    // the signed active-series payload's source_commit_ref (§7.6.1).
-    // The revision below detects changes to the backup set itself.
-    let frozen = json!({
-        "backups": manifest,
-        "revision": revision,
-        "actor_id": actor,
-        "realm_id": pointers.control_realm_id,
-        "authority_commit_id": pointers.authority_commit_id,
-        "committed_ref": basis.committed_ref,
-    });
-    Ok(frozen)
 }

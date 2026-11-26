@@ -23,6 +23,9 @@ pub mod content_encoding;
 pub mod deactivation_push_fanout;
 pub mod error;
 pub mod failpoints;
+#[cfg(test)]
+#[path = "../../storage-postgres/tests/support/historical_human.rs"]
+mod historical_human;
 pub mod http_signature;
 pub mod ids;
 pub mod jws_verify;
@@ -37,6 +40,9 @@ pub mod routing;
 pub mod runtime_settings;
 pub mod security;
 pub mod security_rotation_worker;
+#[cfg(test)]
+#[path = "../../storage-postgres/tests/support/sql_fault_matrix.rs"]
+mod sql_fault_matrix;
 pub mod state;
 mod test_material_admission;
 pub mod util;
@@ -121,81 +127,6 @@ pub fn service_with_request_size_limit(state: AppState, max_request_size_bytes: 
         ),
         cors_allow_origin,
     )
-}
-
-#[cfg(test)]
-pub(crate) mod test_event {
-    use arkret_identifiers::{DidCoreId, Hlc};
-    use arkret_test_kit::proof::StructuralOnlyPayloadSigner;
-    use arkret_wire::{Did, DidUrl, Event, Result, ScopeRef};
-    use chrono::{DateTime, Utc};
-    use serde_json::Value;
-
-    pub(crate) fn station_id() -> DidCoreId {
-        super::test_actor_id_str(
-            "did:webvh:z2dmjYwAPJzv5CZsnAzt8auVZRn1GfuxhpK2t3Q3K3rj4B1x:coland.local:webvh:service",
-        )
-    }
-
-    pub fn raw_event(
-        kind: impl Into<String>,
-        scope_ref: ScopeRef,
-        actor_id: DidCoreId,
-        _fixture_index: u64,
-        _hlc: Hlc,
-        payload: Value,
-    ) -> Result<Event> {
-        arkret_wire::test_support::raw_event(kind, scope_ref, actor_id, station_id(), payload)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn raw_event_at(
-        kind: impl Into<String>,
-        scope_ref: ScopeRef,
-        actor_id: DidCoreId,
-        _fixture_index: u64,
-        _hlc: Hlc,
-        payload: Value,
-        created_at: DateTime<Utc>,
-    ) -> Result<Event> {
-        arkret_wire::test_support::raw_event_at(
-            kind,
-            scope_ref,
-            actor_id,
-            station_id(),
-            payload,
-            created_at,
-        )
-    }
-
-    /// Attach a proof that binds the Event digest but carries no key material.
-    ///
-    /// Every caller stores the result straight into durable storage and then
-    /// exercises a read, query or stream path; none of them reaches admission,
-    /// so no signature is ever verified and a real one would assert something
-    /// the case does not establish. The name says which of the two fidelities
-    /// this is, and the placeholder comes from the shared test-kit signer,
-    /// whose JWS tracks the covered bytes -- a constant literal here would
-    /// survive a payload edit and pin nothing.
-    pub fn attach_structural_only_producer_proof(event: &mut Event, verification_method: DidUrl) {
-        let signer_did = Did::new(
-            verification_method
-                .as_str()
-                .split('#')
-                .next()
-                .expect("a DID URL has a subject")
-                .to_owned(),
-        )
-        .expect("fixture verification method has a DID subject");
-        let signer = StructuralOnlyPayloadSigner::new(signer_did, verification_method.clone());
-        *event = arkret_test_kit::sign_structural_only_event(
-            event.clone(),
-            &signer,
-            arkret_canonical::DigestSuite::Sha256,
-        )
-        .expect("structural-only fixture proof attaches")
-        .expect_structural_only();
-    }
 }
 
 /// Exercise the production current-device selector after a committed PCR unit.
@@ -297,4 +228,79 @@ pub async fn test_fresh_producer_agent_evidence(
     event: &arkret_wire::Event,
 ) -> coland_services::ServiceResult<Option<arkret_models_identity::AgentProducerEvidence>> {
     crate::state::fresh_producer_agent_evidence(state, event).await
+}
+
+#[cfg(test)]
+pub(crate) mod test_event {
+    use arkret_identifiers::{DidCoreId, Hlc};
+    use arkret_test_kit::proof::StructuralOnlyPayloadSigner;
+    use arkret_wire::{Did, DidUrl, Event, Result, ScopeRef};
+    use chrono::{DateTime, Utc};
+    use serde_json::Value;
+
+    pub(crate) fn station_id() -> DidCoreId {
+        super::test_actor_id_str(
+            "did:webvh:z2dmjYwAPJzv5CZsnAzt8auVZRn1GfuxhpK2t3Q3K3rj4B1x:coland.local:webvh:service",
+        )
+    }
+
+    pub fn raw_event(
+        kind: impl Into<String>,
+        scope_ref: ScopeRef,
+        actor_id: DidCoreId,
+        _fixture_index: u64,
+        _hlc: Hlc,
+        payload: Value,
+    ) -> Result<Event> {
+        arkret_wire::test_support::raw_event(kind, scope_ref, actor_id, station_id(), payload)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn raw_event_at(
+        kind: impl Into<String>,
+        scope_ref: ScopeRef,
+        actor_id: DidCoreId,
+        _fixture_index: u64,
+        _hlc: Hlc,
+        payload: Value,
+        created_at: DateTime<Utc>,
+    ) -> Result<Event> {
+        arkret_wire::test_support::raw_event_at(
+            kind,
+            scope_ref,
+            actor_id,
+            station_id(),
+            payload,
+            created_at,
+        )
+    }
+
+    /// Attach a proof that binds the Event digest but carries no key material.
+    ///
+    /// Every caller stores the result straight into durable storage and then
+    /// exercises a read, query or stream path; none of them reaches admission,
+    /// so no signature is ever verified and a real one would assert something
+    /// the case does not establish. The name says which of the two fidelities
+    /// this is, and the placeholder comes from the shared test-kit signer,
+    /// whose JWS tracks the covered bytes -- a constant literal here would
+    /// survive a payload edit and pin nothing.
+    pub fn attach_structural_only_producer_proof(event: &mut Event, verification_method: DidUrl) {
+        let signer_did = Did::new(
+            verification_method
+                .as_str()
+                .split('#')
+                .next()
+                .expect("a DID URL has a subject")
+                .to_owned(),
+        )
+        .expect("fixture verification method has a DID subject");
+        let signer = StructuralOnlyPayloadSigner::new(signer_did, verification_method.clone());
+        *event = arkret_test_kit::sign_structural_only_event(
+            event.clone(),
+            &signer,
+            arkret_canonical::DigestSuite::Sha256,
+        )
+        .expect("structural-only fixture proof attaches")
+        .expect_structural_only();
+    }
 }

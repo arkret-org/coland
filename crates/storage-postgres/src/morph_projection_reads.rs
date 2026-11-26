@@ -1777,21 +1777,6 @@ pub(crate) async fn ordinary_delivery_guard(
 }
 
 #[cfg(test)]
-#[path = "../../test-support/src/device_authorization_history.rs"]
-#[expect(
-    dead_code,
-    reason = "Only accepted human genesis is needed by the Morph read fixture."
-)]
-mod device_authorization_history;
-#[cfg(test)]
-#[path = "../../test-support/src/pcr_genesis.rs"]
-#[expect(
-    dead_code,
-    reason = "Only accepted human genesis is needed by the Morph read fixture."
-)]
-mod pcr_genesis;
-
-#[cfg(test)]
 mod tests {
     use arkret_wire::{Event, RealmCommit, ScopeRef};
     use coland_storage::{IdentityStoreRegistry as _, SyncStoreRegistry as _};
@@ -2054,13 +2039,13 @@ mod tests {
     async fn human_document_fixture(
         database: &crate::test_database::TestDatabase,
     ) -> (
-        super::pcr_genesis::PcrGenesisFixture,
+        crate::pcr_genesis::PcrGenesisFixture,
         Event,
         Event,
         DocumentMorphView,
     ) {
         let persistence = crate::PgPersistenceStore::new(database.pool());
-        let identity = super::pcr_genesis::PcrGenesisFixture::new(
+        let identity = crate::pcr_genesis::PcrGenesisFixture::new(
             "did:web:morph-station.example".parse().unwrap(),
         );
         identity.admit_into(&persistence).await.unwrap();
@@ -3089,7 +3074,7 @@ mod tests {
     async fn native_morph_accepted_human_list_holds_cut_and_rechecks_empty_substitution() {
         let database = morph_database().await;
         let persistence = crate::PgPersistenceStore::new(database.pool().clone());
-        let identity = super::pcr_genesis::PcrGenesisFixture::new(
+        let identity = crate::pcr_genesis::PcrGenesisFixture::new(
             "did:web:morph-station.example".parse().unwrap(),
         );
         identity.admit_into(&persistence).await.unwrap();
@@ -3264,11 +3249,11 @@ mod tests {
         database: &crate::test_database::TestDatabase,
     ) -> (
         crate::PgPersistenceStore,
-        super::pcr_genesis::PcrGenesisFixture,
+        crate::pcr_genesis::PcrGenesisFixture,
         coland_storage::AccountContentDeliveryInput,
     ) {
         let persistence = crate::PgPersistenceStore::new(database.pool());
-        let identity = super::pcr_genesis::PcrGenesisFixture::new(
+        let identity = crate::pcr_genesis::PcrGenesisFixture::new(
             "did:web:morph-station.example".parse().unwrap(),
         );
         identity.admit_into(&persistence).await.unwrap();
@@ -3414,7 +3399,7 @@ mod tests {
     async fn import_human_status_genesis(
         pool: &crate::PgPool,
         persistence: &crate::PgPersistenceStore,
-        identity: &super::pcr_genesis::PcrGenesisFixture,
+        identity: &crate::pcr_genesis::PcrGenesisFixture,
     ) {
         let mut conn = pool.get().await.unwrap();
         let pcr = human_realm_in_connection(&mut conn, &identity.history.account)

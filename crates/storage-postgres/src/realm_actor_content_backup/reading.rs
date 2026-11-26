@@ -422,9 +422,9 @@ fn inventory_original_commits(
         for commit in originals {
             commit
                 .verify_commit_id_matches_content()
-                .map_err(|error| unavailable(&error.to_string()))?;
+                .map_err(|error| unavailable(error.to_string()))?;
             let bytes = arkret_canonical::canonical_json_bytes(commit)
-                .map_err(|error| unavailable(&error.to_string()))?;
+                .map_err(|error| unavailable(error.to_string()))?;
             if let Some((original_bytes, _)) = commits.get(&commit.commit_id) {
                 if original_bytes != &bytes {
                     return Err(unavailable(

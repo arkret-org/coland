@@ -454,11 +454,10 @@ impl PgAuthorityCommitStore {
         conn.transaction::<_,PgTransactionError,_>(async |conn| {
             lock_subject(conn, account, Some(&producer.account_id)).await?;
             crate::managed_forward_source::lock_source(conn, event).await?;
-            if let Some(row) = intent(conn, original, account).await? {
-                if row.terminal.is_some() {
+            if let Some(row) = intent(conn, original, account).await?
+                && row.terminal.is_some() {
                     return Err(invalid("accepted original requires its historical result reader").into());
                 }
-            }
             // This is the existing unsigned business-body builder used before
             // issuing evidence, never a transmitted missing-evidence probe.
             let draft = PeerAuthorityForwardEventRequestBody {

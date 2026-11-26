@@ -1220,6 +1220,8 @@ async fn refresh_embedded_webvh_document_for_high_risk(
     Ok(())
 }
 
+use arkret_identity::DidBindingEvidenceReceiptExt;
+
 #[cfg(test)]
 mod did_binding_tests {
     use coland_storage_postgres::Db;
@@ -1645,5 +1647,3 @@ mod did_binding_tests {
         .expect_err("the proof transcript is bound to the Event it was signed over");
     }
 }
-
-use arkret_identity::DidBindingEvidenceReceiptExt;

@@ -781,10 +781,7 @@ pub(crate) async fn account_subscribe_notification_should_wake(
             .flatten()
             .is_some_and(|account| account.account_id == *account_id);
     }
-    if realm_id_accessible(state, &notification.realm_id, session).await {
-        return true;
-    }
-    false
+    realm_id_accessible(state, &notification.realm_id, session).await
 }
 
 fn account_subscribe_query(req: &mut Request) -> Result<AccountSubscribeParameters, String> {

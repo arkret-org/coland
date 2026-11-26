@@ -125,6 +125,9 @@ mod call_participant_issuer_sources;
 mod call_state_current_states;
 mod circle_current_states;
 mod circle_reads;
+#[cfg(test)]
+#[path = "../tests/support/historical_human.rs"]
+mod historical_human;
 mod invite_locators;
 mod invite_new_source_ledger;
 mod issued_realm_snapshots;

@@ -1,6 +1,9 @@
 //! Real PostgreSQL executor of the shared Pin admission fixture.
 //! Accepted Human PCR and Profile fixtures exercise the storage admission boundary.
 
+#[cfg(test)]
+use crate::historical_human::ordinary_realm;
+#[cfg(not(test))]
 #[path = "../tests/support/ordinary_realm.rs"]
 #[allow(dead_code)]
 mod ordinary_realm;

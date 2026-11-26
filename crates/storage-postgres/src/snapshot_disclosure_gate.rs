@@ -3474,11 +3474,10 @@ mod tests {
                 revision,
                 ..
             } = entry
+                && message_id == &floored
             {
-                if message_id == &floored {
-                    revision.stream_position = 12;
-                    revision.commit_id = RealmCommitId::from_digest([13; 32]);
-                }
+                revision.stream_position = 12;
+                revision.commit_id = RealmCommitId::from_digest([13; 32]);
             }
         }
         let visible = disclose_to_account(material.clone(), &bob, &facts).unwrap();

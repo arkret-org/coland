@@ -238,8 +238,6 @@ fn strand_assigned_to_relations(
 }
 
 #[cfg(test)]
-// ── Handlers ───────────────────────────────────────────────────────────
-
 fn document_projection_document(
     morph: &MorphProjection,
     body: Value,

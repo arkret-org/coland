@@ -1316,6 +1316,40 @@ async fn public_blob(state: &AppState, blob_ref: &str) -> ServiceResult<Vec<u8>>
     Ok(bytes)
 }
 
+/// Resolver evidence for a real native recipient. Storage independently checks
+/// that evidence and refuses an omitted proof for a native publication.
+pub(super) async fn native_welcome_target(
+    state: &AppState,
+    welcome: &MlsWelcomeDelivery,
+) -> ServiceResult<Option<coland_storage::AppletManagedDeviceScopeGuard>> {
+    let MlsWelcomeRecipientEndpoint::Device { device_id } = &welcome.recipient_endpoint else {
+        return Ok(None);
+    };
+    if welcome.recipient_actor_id.as_realm_actor_id().is_none() {
+        return Ok(None);
+    }
+    let Some(authority) = state
+        .persistence()
+        .applet_managed_device_authority(&welcome.recipient_actor_id, device_id, chrono::Utc::now())
+        .await?
+    else {
+        return Ok(None);
+    };
+    crate::routing::identity::applet_managed_device::scope_guard_for_authority(
+        state,
+        &authority,
+        &welcome.effective_scope,
+    )
+    .await
+    .map(Some)
+    .map_err(|error| {
+        ServiceError::protocol(
+            arkret_wire::ErrorCode::TemporarilyUnavailable,
+            error.to_string(),
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use arkret_mls::{ArkretMlsGroup, ArkretMlsIdentity};
@@ -1750,38 +1784,4 @@ mod tests {
             Some(ConflictCode::SignatureInvalid)
         );
     }
-}
-
-/// Resolver evidence for a real native recipient. Storage independently checks
-/// that evidence and refuses an omitted proof for a native publication.
-pub(super) async fn native_welcome_target(
-    state: &AppState,
-    welcome: &MlsWelcomeDelivery,
-) -> ServiceResult<Option<coland_storage::AppletManagedDeviceScopeGuard>> {
-    let MlsWelcomeRecipientEndpoint::Device { device_id } = &welcome.recipient_endpoint else {
-        return Ok(None);
-    };
-    if welcome.recipient_actor_id.as_realm_actor_id().is_none() {
-        return Ok(None);
-    }
-    let Some(authority) = state
-        .persistence()
-        .applet_managed_device_authority(&welcome.recipient_actor_id, device_id, chrono::Utc::now())
-        .await?
-    else {
-        return Ok(None);
-    };
-    crate::routing::identity::applet_managed_device::scope_guard_for_authority(
-        state,
-        &authority,
-        &welcome.effective_scope,
-    )
-    .await
-    .map(Some)
-    .map_err(|error| {
-        ServiceError::protocol(
-            arkret_wire::ErrorCode::TemporarilyUnavailable,
-            error.to_string(),
-        )
-    })
 }

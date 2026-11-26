@@ -123,15 +123,7 @@ fn fixture_bootstrap_step(
     pool: &coland_storage_postgres::PgPool,
     unit: &coland_storage::OrdinaryRealmBootstrapCommitUnit,
     queued_at: chrono::DateTime<chrono::Utc>,
-) -> Pin<
-    Box<
-        dyn Future<
-                Output = coland_storage::PersistenceResult<
-                    coland_storage::OrdinaryRealmBootstrapCommitOutcome,
-                >,
-            > + Send,
-    >,
-> {
+) -> FixtureStoreFuture<coland_storage::OrdinaryRealmBootstrapCommitOutcome> {
     let pool = pool.clone();
     let unit = unit.clone();
     fixture_future(|| async move {
@@ -144,20 +136,15 @@ fn fixture_bootstrap_step(
     })
 }
 
+type FixtureStoreFuture<T> =
+    Pin<Box<dyn Future<Output = coland_storage::PersistenceResult<T>> + Send>>;
+
 fn fixture_delivery_step(
     pool: &coland_storage_postgres::PgPool,
     account: &AccountId,
     station: &arkret_wire::DidCoreId,
     input: &coland_storage::AccountContentDeliveryInput,
-) -> Pin<
-    Box<
-        dyn Future<
-                Output = coland_storage::PersistenceResult<
-                    Option<Box<dyn coland_storage::AccountContentDeliveryGuard>>,
-                >,
-            > + Send,
-    >,
-> {
+) -> FixtureStoreFuture<Option<Box<dyn coland_storage::AccountContentDeliveryGuard>>> {
     let pool = pool.clone();
     let account = account.clone();
     let station = station.clone();
@@ -179,17 +166,11 @@ fn fixture_realm_export_step(
     realm_id: &arkret_wire::RealmId,
     actor: &arkret_wire::ActorId,
     station: &arkret_wire::DidCoreId,
-) -> Pin<
-    Box<
-        dyn Future<
-                Output = coland_storage::PersistenceResult<
-                    Option<(
-                        arkret_models_collaboration::governance::realm_governance::RealmExport,
-                        Vec<arkret_wire::CommittedEventView>,
-                    )>,
-                >,
-            > + Send,
-    >,
+) -> FixtureStoreFuture<
+    Option<(
+        arkret_models_collaboration::governance::realm_governance::RealmExport,
+        Vec<arkret_wire::CommittedEventView>,
+    )>,
 > {
     let pool = pool.clone();
     let realm_id = realm_id.clone();
@@ -247,17 +228,11 @@ fn fixture_strand_watch_current_step(
     request: &arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentRequestBody,
     account: &AccountId,
     issuer: &arkret_wire::DidCoreId,
-) -> Pin<
-    Box<
-        dyn Future<
-                Output = coland_storage::PersistenceResult<
-                    coland_storage::SelfExactCurrentRead<
-                        arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentResponseBody,
-                    >,
-                >,
-            > + Send,
+) -> FixtureStoreFuture<
+    coland_storage::SelfExactCurrentRead<
+        arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentResponseBody,
     >,
->{
+> {
     let pool = pool.clone();
     let request = request.clone();
     let account = account.clone();
@@ -529,7 +504,7 @@ async fn pending_agent_handshake_reads(
                 .unwrap()
                 .public_blobs = vec![public_blob(&info), public_blob(&tree)];
             source_candidate(pool, &mut genesis).await;
-            let genesis = ordinary_realm::source_request(&pool, genesis).await;
+            let genesis = ordinary_realm::source_request(pool, genesis).await;
             uow.commit_event(genesis.clone()).await.unwrap();
             let accepted_bindings = group.verified_leaf_bindings().unwrap();
             let update_binding = binding(Some(genesis.authority_commit.event.event_id.clone()), 0, 1);
@@ -581,7 +556,7 @@ async fn pending_agent_handshake_reads(
                 .unwrap()
                 .value;
             source_candidate(pool, &mut commit).await;
-            let commit = ordinary_realm::source_request(&pool, commit).await;
+            let commit = ordinary_realm::source_request(pool, commit).await;
             uow.commit_event(commit.clone()).await.unwrap();
             group
                 .install_accepted_commit(
@@ -603,7 +578,7 @@ async fn pending_agent_handshake_reads(
                     "created_at":arkret_canonical::format_timestamp_canonical(at)}}),
                 at,
             );
-            let strand = ordinary_realm::source_request(&pool, strand).await;
+            let strand = ordinary_realm::source_request(pool, strand).await;
             uow.commit_event(strand.clone()).await.unwrap();
             let mut context = make_request(
                 EventKind::SidecarContextAttach,
@@ -615,7 +590,7 @@ async fn pending_agent_handshake_reads(
                 &commit.authority_commit,
             );
             source_candidate(pool, &mut context).await;
-            let context = ordinary_realm::source_request(&pool, context).await;
+            let context = ordinary_realm::source_request(pool, context).await;
             uow.commit_event(context.clone()).await.unwrap();
             (group, tracker, genesis, commit, context, info, tree)
         })
@@ -876,9 +851,7 @@ async fn case_desired_agents_require_owned_active_key_and_exact_realm_membership
     let agent_did = original_genesis.object.initial_resolution.unwrap().did;
     let delegation = format!("{agent_did}#managed-controller");
     let key_event = sidecar_agent::agent_control_event(
-        &principal.history.device_verification_method,
-        principal.history.founding_device_signing_seed,
-        controller,
+        &principal.history,
         &agent,
         &genesis.event.realm_id,
         &delegation,
@@ -1155,7 +1128,7 @@ async fn case_pending_sidecar_handshake_reads_keep_content_private_and_reject_st
 
 // Construct the large scenario outside the harness Future's poll frame.
 fn boxed_pending_sidecar_handshake() -> Pin<Box<dyn Future<Output = ()> + Send>> {
-    fixture_future(|| pending_sidecar_handshake_scenario())
+    fixture_future(pending_sidecar_handshake_scenario)
 }
 
 async fn pending_sidecar_handshake_scenario() {
@@ -1211,9 +1184,7 @@ async fn pending_sidecar_handshake_scenario() {
     let agent_did = original_genesis.object.initial_resolution.unwrap().did;
     let delegation = format!("{agent_did}#managed-controller");
     let key_event = sidecar_agent::agent_control_event(
-        &principal.history.device_verification_method,
-        principal.history.founding_device_signing_seed,
-        controller,
+        &principal.history,
         &agent,
         &genesis.event.realm_id,
         &delegation,
@@ -1282,9 +1253,7 @@ async fn pending_sidecar_handshake_scenario() {
         "authorized_event_ref":key_event.event_id,
     }]);
     let renewal = sidecar_agent::agent_control_event(
-        &principal.history.device_verification_method,
-        principal.history.founding_device_signing_seed,
-        controller,
+        &principal.history,
         &agent,
         &genesis.event.realm_id,
         &delegation,
@@ -1430,20 +1399,37 @@ async fn owned_welcome_footprint(
     arkret_canonical::canonical_sha256(&serde_json::json!([ordinary, control, deliveries])).unwrap()
 }
 
-async fn owned_welcome_held_delivery_scenario(
-    pool: &coland_storage_postgres::PgPool,
-    principal: &pcr_genesis::PcrGenesisFixture,
-    agent: &AccountId,
-    genesis: &coland_storage::AuthorityCommitTransaction,
-    key_event: &arkret_wire::Event,
-    key_commit: &arkret_wire::RealmCommit,
-    realm_parent: &coland_storage::AuthorityCommitTransaction,
-    welcome: &arkret_wire::MlsWelcomeDelivery,
+struct HeldWelcomeDelivery<'a> {
+    pool: &'a coland_storage_postgres::PgPool,
+    principal: &'a pcr_genesis::PcrGenesisFixture,
+    agent: &'a AccountId,
+    genesis: &'a coland_storage::AuthorityCommitTransaction,
+    key_event: &'a arkret_wire::Event,
+    key_commit: &'a arkret_wire::RealmCommit,
+    realm_parent: &'a coland_storage::AuthorityCommitTransaction,
+    welcome: &'a arkret_wire::MlsWelcomeDelivery,
     endpoint: coland_storage::AgentEndpointGuard,
     evidence: coland_storage::VerifiedAgentScopeEvidence,
-    scope: &arkret_models_collaboration::events_payloads::agent::AgentKeyScope,
+    scope: &'a arkret_models_collaboration::events_payloads::agent::AgentKeyScope,
+}
+
+async fn owned_welcome_held_delivery_scenario(
+    delivery: HeldWelcomeDelivery<'_>,
     case: OwnedWelcomeCase,
 ) {
+    let HeldWelcomeDelivery {
+        pool,
+        principal,
+        agent,
+        genesis,
+        key_event,
+        key_commit,
+        realm_parent,
+        welcome,
+        endpoint,
+        evidence,
+        scope,
+    } = delivery;
     use coland_storage::AccountContentDeliveryInput;
     use diesel::sql_types::Text;
     use diesel_async::RunQueryDsl;
@@ -1845,9 +1831,7 @@ async fn consumed_sidecar_agent_scenario(
             bind_native_pairing_approval(&mut authorization, &historical_station.core);
         }
         let key_event = sidecar_agent::agent_control_event(
-            &principal.history.device_verification_method,
-            principal.history.founding_device_signing_seed,
-            controller, &agent, &genesis.event.realm_id, &delegation,
+            &principal.history, &agent, &genesis.event.realm_id, &delegation,
             authorization, genesis.commit.committed_at,
         );
         let key_commit = sidecar_agent::station_successor(&genesis.commit, &key_event, &station_did, 1);
@@ -2516,9 +2500,7 @@ async fn consumed_sidecar_agent_scenario(
                 verification_method: method.clone(),
             };
             let scope = content_scope.as_ref().unwrap();
-            let (vault, evidence) = fixture_future(|| retain_delivery_scope_for_runtime(
-                &pool, &historical_station, &principal.history, &agent, &key_event, scope, &endpoint, true,
-            )).await;
+            let (vault, evidence) = fixture_future(|| retain_delivery_scope_for_runtime(agent_scope_custody::DeliveryScopeFixture { pool: &pool, station: &historical_station, principal: &principal.history, agent: &agent, key_event: &key_event, scope, endpoint: &endpoint }, true)).await;
             if matches!(case, OwnedWelcomeCase::DeviceMessagesContinuationOwnerLeave | OwnedWelcomeCase::DeviceMessagesContinuationPolicyDeny | OwnedWelcomeCase::DeviceMessagesOwnerLeave | OwnedWelcomeCase::DeviceMessagesPolicyDeny) {
                 let input = Box::new(OwnedConsumerDeviceFlow {
                     pool: pool.clone(), station: historical_station.clone(),
@@ -2547,11 +2529,7 @@ async fn consumed_sidecar_agent_scenario(
             // Poll the delivery cut on its own ordinary Tokio task rather
             // than nesting it beneath the large real MLS preparation frame.
             tokio::spawn(async move {
-                fixture_future(|| owned_welcome_held_delivery_scenario(
-                    &future_pool, &future_principal, &future_agent, &future_genesis,
-                    &future_key_event, &future_key_commit, &future_parent,
-                    &future_delivery, endpoint, evidence, &future_scope, case,
-                )).await;
+                fixture_future(|| owned_welcome_held_delivery_scenario(HeldWelcomeDelivery { pool: &future_pool, principal: &future_principal, agent: &future_agent, genesis: &future_genesis, key_event: &future_key_event, key_commit: &future_key_commit, realm_parent: &future_parent, welcome: &future_delivery, endpoint, evidence, scope: &future_scope }, case)).await;
             }).await.unwrap();
             // The real recipient joined these exact producer-signed Welcome
             // bytes above. No consume/ACK is synthesized by this delivery test.
@@ -3201,11 +3179,18 @@ async fn provision_owned_agent_binding_phase(
         agent_did,
         requested_scope,
         publish_binding,
-        prepared_inception,
-        current_root_seed,
+        AgentRootSigningMaterial {
+            prepared_inception,
+            current_root_seed,
+        },
         None,
     )
     .await
+}
+
+struct AgentRootSigningMaterial<'a> {
+    prepared_inception: Option<&'a arkret_signatures::webvh::PreparedPrincipalInception>,
+    current_root_seed: &'a [u8; 32],
 }
 
 async fn provision_owned_agent_binding_phase_at_head(
@@ -3214,14 +3199,17 @@ async fn provision_owned_agent_binding_phase_at_head(
     agent_did: arkret_wire::Did,
     requested_scope: Option<&arkret_models_collaboration::events_payloads::agent::AgentKeyScope>,
     publish_binding: bool,
-    prepared_inception: Option<&arkret_signatures::webvh::PreparedPrincipalInception>,
-    current_root_seed: &[u8; 32],
+    root: AgentRootSigningMaterial<'_>,
     accepted_controller_head: Option<&arkret_wire::RealmCommit>,
 ) -> (
     arkret_wire::AccountId,
     coland_storage::AuthorityCommitTransaction,
     arkret_wire::EventId,
 ) {
+    let AgentRootSigningMaterial {
+        prepared_inception,
+        current_root_seed,
+    } = root;
     use arkret_wire::{ActorId, RealmId};
     use coland_storage::{
         ActorProfileStore, AgentPcrGenesisAdmissionWrite, AgentProvisionAdmissionWrite,
@@ -3539,7 +3527,7 @@ async fn case_ordinary_member_can_join_own_agent_without_permission_to_add_human
 
 // Keep the expanded real-transaction scenario outside the harness poll frame.
 fn boxed_ordinary_member_owned_agent_join() -> Pin<Box<dyn Future<Output = ()> + Send>> {
-    fixture_future(|| ordinary_member_owned_agent_join_scenario())
+    fixture_future(ordinary_member_owned_agent_join_scenario)
 }
 
 async fn ordinary_member_owned_agent_join_scenario() {
@@ -3879,9 +3867,7 @@ async fn case_encrypted_agent_join_rechecks_claimability_and_writes_nothing_on_r
     let agent_did = original_genesis.object.initial_resolution.unwrap().did;
     let delegation = format!("{agent_did}#managed-controller");
     let key_event = sidecar_agent::agent_control_event(
-        &principal.history.device_verification_method,
-        principal.history.founding_device_signing_seed,
-        controller,
+        &principal.history,
         &agent,
         &genesis.event.realm_id,
         &delegation,
@@ -4201,7 +4187,7 @@ async fn agent_mode_controller_cas_preserves_derived_sidecar_roster() {
 
 // Construct the large scenario outside the harness Future's poll frame.
 fn boxed_agent_mode_controller_cas() -> Pin<Box<dyn Future<Output = AgentModeScenario> + Send>> {
-    fixture_future(|| agent_mode_controller_cas_scenario())
+    fixture_future(agent_mode_controller_cas_scenario)
 }
 
 async fn agent_mode_footprint(
@@ -4314,9 +4300,7 @@ async fn agent_mode_controller_cas_scenario() -> AgentModeScenario {
     );
     let delegation = format!("{agent_did}#managed-controller");
     let key_event = sidecar_agent::agent_control_event(
-        &principal.history.device_verification_method,
-        principal.history.founding_device_signing_seed,
-        controller,
+        &principal.history,
         &agent,
         &genesis.event.realm_id,
         &delegation,
@@ -4780,7 +4764,7 @@ async fn agent_publish_policy_scenario<F>(
     let mut policy_revision = None;
     for effect in ["deny", "require_review", "allow"] {
         previous = import_agent_management_policy(
-            &pool,
+            pool,
             &previous,
             controller,
             policy_revision,
@@ -4793,10 +4777,10 @@ async fn agent_publish_policy_scenario<F>(
             stream_position: previous.commit.stream_position,
         });
         let mut opening = make_mode(&previous, "public", Some(mode_revision.clone()));
-        source_candidate(&pool, &mut opening).await;
-        let before = agent_mode_footprint(&pool, realm_id).await;
+        source_candidate(pool, &mut opening).await;
+        let before = agent_mode_footprint(pool, realm_id).await;
         if effect != "allow" {
-            let error = fixture_commit_step(&pool, opening).await.unwrap_err();
+            let error = fixture_commit_step(pool, opening).await.unwrap_err();
             let expected = if effect == "deny" {
                 "forbids publishing"
             } else {
@@ -4811,17 +4795,17 @@ async fn agent_publish_policy_scenario<F>(
                     "{error}"
                 );
             }
-            assert_eq!(agent_mode_footprint(&pool, realm_id).await, before);
+            assert_eq!(agent_mode_footprint(pool, realm_id).await, before);
         } else {
-            let opening = ordinary_realm::source_request(&pool, opening).await;
-            fixture_commit_step(&pool, opening.clone()).await.unwrap();
+            let opening = ordinary_realm::source_request(pool, opening).await;
+            fixture_commit_step(pool, opening.clone()).await.unwrap();
             previous = opening.authority_commit.clone();
             mode_revision = arkret_wire::CurrentRevision {
                 commit_id: previous.commit.commit_id.clone(),
                 stream_position: previous.commit.stream_position,
             };
             previous = import_agent_management_policy(
-                &pool,
+                pool,
                 &previous,
                 controller,
                 policy_revision.take(),
@@ -4829,13 +4813,13 @@ async fn agent_publish_policy_scenario<F>(
                 "publish",
             )
             .await;
-            let before_replay = agent_mode_footprint(&pool, realm_id).await;
-            fixture_commit_step(&pool, opening).await.unwrap();
-            assert_eq!(agent_mode_footprint(&pool, realm_id).await, before_replay);
+            let before_replay = agent_mode_footprint(pool, realm_id).await;
+            fixture_commit_step(pool, opening).await.unwrap();
+            assert_eq!(agent_mode_footprint(pool, realm_id).await, before_replay);
             let mut unchanged = make_mode(&previous, "public", Some(mode_revision));
-            source_candidate(&pool, &mut unchanged).await;
-            let unchanged = ordinary_realm::source_request(&pool, unchanged).await;
-            fixture_commit_step(&pool, unchanged.clone()).await.unwrap();
+            source_candidate(pool, &mut unchanged).await;
+            let unchanged = ordinary_realm::source_request(pool, unchanged).await;
+            fixture_commit_step(pool, unchanged.clone()).await.unwrap();
             previous = unchanged.authority_commit;
             mode_revision = arkret_wire::CurrentRevision {
                 commit_id: previous.commit.commit_id.clone(),
@@ -4845,9 +4829,9 @@ async fn agent_publish_policy_scenario<F>(
         // With a deny/review policy present, private remains an unreviewed
         // controller choice; switching off never needs publish permission.
         let mut private = make_mode(&previous, "private", Some(mode_revision));
-        source_candidate(&pool, &mut private).await;
-        let private = ordinary_realm::source_request(&pool, private).await;
-        fixture_commit_step(&pool, private.clone()).await.unwrap();
+        source_candidate(pool, &mut private).await;
+        let private = ordinary_realm::source_request(pool, private).await;
+        fixture_commit_step(pool, private.clone()).await.unwrap();
         previous = private.authority_commit;
         mode_revision = arkret_wire::CurrentRevision {
             commit_id: previous.commit.commit_id.clone(),
@@ -4870,14 +4854,14 @@ async fn agent_publish_policy_scenario<F>(
             .bind::<Text,_>(realm_id.as_str()).bind::<Jsonb,_>(serde_json::json!(agent)).execute(&mut *conn).await.unwrap();
     }
     let mut opening = make_mode(&previous, "public", Some(mode_revision));
-    source_candidate(&pool, &mut opening).await;
-    let before = agent_mode_footprint(&pool, realm_id).await;
-    let error = fixture_commit_step(&pool, opening).await.unwrap_err();
+    source_candidate(pool, &mut opening).await;
+    let before = agent_mode_footprint(pool, realm_id).await;
+    let error = fixture_commit_step(pool, opening).await.unwrap_err();
     assert!(
         error.to_string().contains("revision_unavailable"),
         "{error}"
     );
-    assert_eq!(agent_mode_footprint(&pool, realm_id).await, before);
+    assert_eq!(agent_mode_footprint(pool, realm_id).await, before);
 }
 
 /// Real RFC transitions, accepted ownership/key/membership and real PostgreSQL
@@ -4946,9 +4930,7 @@ async fn sidecar_post_tree_preserves_historical_endpoint_and_rejects_paused_self
         sidecar_agent::agent_key_authorization(agent_did, &controller.principal_id, now);
     authorization["supersedes"] = serde_json::json!([{"key_id":key_event.payload["key_id"],"authorized_event_ref":key_event.event_id}]);
     let renewal = sidecar_agent::agent_control_event(
-        &principal.history.device_verification_method,
-        principal.history.founding_device_signing_seed,
-        controller,
+        &principal.history,
         agent,
         &agent_genesis.event.realm_id,
         &format!("{agent_did}#managed-controller"),
@@ -4959,7 +4941,7 @@ async fn sidecar_post_tree_preserves_historical_endpoint_and_rejects_paused_self
         sidecar_agent::station_successor(key_commit, &renewal, &principal.history.station_did, 10);
     historical_control_source::admit_control(
         &profiles,
-        &pool,
+        pool,
         AgentControlAdmissionWrite {
             commit: coland_storage::AuthorityCommitTransaction {
                 expected_authority: agent_genesis.expected_authority.clone(),
@@ -5383,10 +5365,10 @@ async fn sidecar_post_tree_preserves_historical_endpoint_and_rejects_paused_self
         binding(&paused_cut, &before.value),
         &remove.commit,
         &tracker,
-        &group,
+        group,
         consumed_proposals,
     );
-    let request = ordinary_realm::source_request(&pool, request).await;
+    let request = ordinary_realm::source_request(pool, request).await;
     uow.commit_event(request.clone()).await.unwrap();
     let accepted = arkret_wire::CommittedEventFullView {
         event: request.authority_commit.event,
@@ -5439,7 +5421,7 @@ async fn sidecar_post_tree_preserves_historical_endpoint_and_rejects_paused_self
         group.local_content_sender_domain().unwrap(),
         arkret_models_crypto::EventContentRoutingContext::None,
         coland_test_support::mls_content::local_material(
-            &group,
+            group,
             EventKind::MessageCreate.as_str(),
             &current.value.current_mls_commit_event_ref.clone(),
         )
@@ -5603,9 +5585,7 @@ async fn owned_agent_delivery_cut_scenario(expiry_case: DeliveryExpiryCase) {
             serde_json::json!(arkret_canonical::format_timestamp_canonical(expiry));
     }
     let key_event = sidecar_agent::agent_control_event(
-        &principal.history.device_verification_method,
-        principal.history.founding_device_signing_seed,
-        controller,
+        &principal.history,
         &agent,
         &genesis.event.realm_id,
         &format!("{agent_did}#managed-controller"),
@@ -5667,15 +5647,15 @@ async fn owned_agent_delivery_cut_scenario(expiry_case: DeliveryExpiryCase) {
         )
         .unwrap(),
     });
-    let (_vault, evidence) = retain_delivery_scope(
-        &pool,
-        &station,
-        &principal.history,
-        &agent,
-        &key_event,
-        &content_scope,
-        input.agent_endpoint.as_ref().unwrap(),
-    )
+    let (_vault, evidence) = retain_delivery_scope(agent_scope_custody::DeliveryScopeFixture {
+        pool: &pool,
+        station: &station,
+        principal: &principal.history,
+        agent: &agent,
+        key_event: &key_event,
+        scope: &content_scope,
+        endpoint: input.agent_endpoint.as_ref().unwrap(),
+    })
     .await;
     let missing = fixture_delivery_step(&pool, &agent, &agent.station_id, &input).await;
     assert!(
@@ -6158,7 +6138,7 @@ async fn import_agent_management_policy(
     let event = &tx.event;
     let commit = &tx.commit;
     let mut conn = pool.get().await.unwrap();
-    (&mut *conn).transaction::<(), diesel::result::Error, _>(async move |conn| {
+    (*conn).transaction::<(), diesel::result::Error, _>(async move |conn| {
         diesel::sql_query("INSERT INTO canonical_events(id,digest_suite,digest,actor_id,realm_id,scope_ref,kind,canonical_bytes,envelope,state,committed_at) VALUES($1,1,$2,$3,$4,$5,$6,$7,$8,'committed',$9)")
             .bind::<Binary,_>(event.event_id.token_bytes().to_vec()).bind::<Binary,_>(event.event_id.digest_bytes().to_vec())
             .bind::<Text,_>(event.actor_id.to_string()).bind::<Text,_>(event.realm_id.as_str())
@@ -7092,7 +7072,7 @@ async fn management_review_atomic_join_scenario(
             .management_review_decide(
                 &administrator,
                 &decision(&vote),
-                &[vote.clone()],
+                std::slice::from_ref(&vote),
                 &current,
                 chrono::Utc::now(),
             )
@@ -7101,112 +7081,116 @@ async fn management_review_atomic_join_scenario(
     };
     assert_eq!(approved.status, ManagementReviewStatus::Approved);
     assert_eq!(agent_mode_footprint(&pool, realm).await, before);
-    if let Some(case) = aa_case {
-        if matches!(
+    if let Some(case) = aa_case
+        && matches!(
             case,
             ManagementAaCase::ControllerTerminal
                 | ManagementAaCase::RetainedVoteTerminal
                 | ManagementAaCase::RealExpiry
                 | ManagementAaCase::WriterHeldCut
-        ) {
-            if case == ManagementAaCase::WriterHeldCut {
-                Box::pin(management_review_writer_held_cut(
-                    &pool,
-                    &station,
-                    &reviews,
-                    &administrator,
-                    &lookup,
-                    &current,
-                    &approver.history.account,
-                ))
-                .await;
-                let fresh = Box::pin(management_current_for_accounts(
-                    &pool,
-                    &station,
-                    &[controller.clone(), approver.history.account.clone()],
-                ))
-                .await;
-                assert_eq!(
-                    Box::pin(reviews.management_review_status(
-                        &body.requester_actor_id,
-                        &lookup,
-                        &fresh,
-                        chrono::Utc::now()
-                    ))
-                    .await
-                    .unwrap()
-                    .status,
-                    ManagementReviewStatus::Superseded
-                );
-                assert_eq!(agent_mode_footprint(&pool, realm).await, before);
-                assert_eq!(management_review_consumed_vote_count(&pool, realm).await, 0);
-                return;
-            }
-            let status_caller = if case == ManagementAaCase::ControllerTerminal {
-                &administrator
-            } else {
-                &body.requester_actor_id
-            };
-            let expected = if case == ManagementAaCase::RealExpiry {
-                while chrono::Utc::now() < approved.expires_at {
-                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-                }
-                ManagementReviewStatus::Expired
-            } else {
-                let changed = if case == ManagementAaCase::ControllerTerminal {
-                    controller
-                } else {
-                    &approver.history.account
-                };
-                current = Box::pin(management_advance_current(&pool, &station, &current, changed,
-                    arkret_models_collaboration::objects::account_status::AccountStatus::Deactivated)).await;
-                ManagementReviewStatus::Superseded
-            };
+        )
+    {
+        if case == ManagementAaCase::WriterHeldCut {
+            Box::pin(management_review_writer_held_cut(
+                &pool,
+                &station,
+                &reviews,
+                &administrator,
+                &lookup,
+                &current,
+                &approver.history.account,
+            ))
+            .await;
+            let fresh = Box::pin(management_current_for_accounts(
+                &pool,
+                &station,
+                &[controller.clone(), approver.history.account.clone()],
+            ))
+            .await;
             assert_eq!(
                 Box::pin(reviews.management_review_status(
-                    status_caller,
+                    &body.requester_actor_id,
                     &lookup,
-                    &current,
+                    &fresh,
                     chrono::Utc::now()
                 ))
                 .await
                 .unwrap()
                 .status,
-                expected
+                ManagementReviewStatus::Superseded
             );
-            let mut attempt = Box::pin(ordinary_realm::source_request(
-                &pool,
-                ordinary_realm::request_for_event(
-                    &policy.authority_commit,
-                    candidate.authority_commit.event.clone(),
-                    chrono::Utc::now(),
-                ),
-            ))
-            .await;
-            attempt.self_producer_guard = Some(producer.clone());
-            let batch = EventBatchCommitRequest {
-                audit_unit: None,
-                event_approvals: Some(EventApprovalCommit {
-                    carrier_binding: None,
-                    management_current: Some(current.clone()),
-                    event_id: attempt.authority_commit.event.event_id.clone(),
-                    event_digest: arkret_canonical::canonical_sha256(
-                        &attempt.authority_commit.event,
-                    )
-                    .unwrap(),
-                    committed_at: attempt.authority_commit.commit.committed_at,
-                    methods: vec![vote.clone()],
-                }),
-                events: vec![attempt],
-                realm_organization_proof: None,
-                applet_authoring_preview: None,
-                agent_membership_cascade: None,
-            };
-            assert!(fixture_commit_batch_step(&pool, batch).await.is_err());
             assert_eq!(agent_mode_footprint(&pool, realm).await, before);
             assert_eq!(management_review_consumed_vote_count(&pool, realm).await, 0);
             return;
         }
+        let status_caller = if case == ManagementAaCase::ControllerTerminal {
+            &administrator
+        } else {
+            &body.requester_actor_id
+        };
+        let expected = if case == ManagementAaCase::RealExpiry {
+            while chrono::Utc::now() < approved.expires_at {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            ManagementReviewStatus::Expired
+        } else {
+            let changed = if case == ManagementAaCase::ControllerTerminal {
+                controller
+            } else {
+                &approver.history.account
+            };
+            current = Box::pin(management_advance_current(
+                &pool,
+                &station,
+                &current,
+                changed,
+                arkret_models_collaboration::objects::account_status::AccountStatus::Deactivated,
+            ))
+            .await;
+            ManagementReviewStatus::Superseded
+        };
+        assert_eq!(
+            Box::pin(reviews.management_review_status(
+                status_caller,
+                &lookup,
+                &current,
+                chrono::Utc::now()
+            ))
+            .await
+            .unwrap()
+            .status,
+            expected
+        );
+        let mut attempt = Box::pin(ordinary_realm::source_request(
+            &pool,
+            ordinary_realm::request_for_event(
+                &policy.authority_commit,
+                candidate.authority_commit.event.clone(),
+                chrono::Utc::now(),
+            ),
+        ))
+        .await;
+        attempt.self_producer_guard = Some(producer.clone());
+        let batch = EventBatchCommitRequest {
+            audit_unit: None,
+            event_approvals: Some(EventApprovalCommit {
+                carrier_binding: None,
+                management_current: Some(current.clone()),
+                event_id: attempt.authority_commit.event.event_id.clone(),
+                event_digest: arkret_canonical::canonical_sha256(&attempt.authority_commit.event)
+                    .unwrap(),
+                committed_at: attempt.authority_commit.commit.committed_at,
+                methods: vec![vote.clone()],
+            }),
+            events: vec![attempt],
+            realm_organization_proof: None,
+            applet_authoring_preview: None,
+            agent_membership_cascade: None,
+        };
+        assert!(fixture_commit_batch_step(&pool, batch).await.is_err());
+        assert_eq!(agent_mode_footprint(&pool, realm).await, before);
+        assert_eq!(management_review_consumed_vote_count(&pool, realm).await, 0);
+        return;
     }
     if withdraw_approver {
         let arkret_models_identity::principal_registration_anchor::PrincipalRegistrationAnchor::WebvhRegistration { log_entries, .. } = &approver.history.registration_anchor;
@@ -7619,7 +7603,7 @@ async fn management_review_atomic_join_scenario(
                     decision: ManagementReviewDecision::Approve,
                     approval_signatures: vec![public_vote.signature.clone()],
                 },
-                &[public_vote.clone()],
+                std::slice::from_ref(&public_vote),
                 &current,
                 chrono::Utc::now()
             )
@@ -8646,8 +8630,10 @@ async fn owned_consumer_fixture_with_prepared_scope(
             did.clone(),
             Some(&scope),
             true,
-            None,
-            &[102; 32],
+            AgentRootSigningMaterial {
+                prepared_inception: None,
+                current_root_seed: &[102; 32],
+            },
             Some(&controller_head),
         ))
         .await;
@@ -8660,9 +8646,7 @@ async fn owned_consumer_fixture_with_prepared_scope(
         authorization["audience"] = serde_json::json!([station.core]);
         bind_native_pairing_approval(&mut authorization, &station.core);
         let key = sidecar_agent::agent_control_event(
-            &controller.history.device_verification_method,
-            controller.history.founding_device_signing_seed,
-            &controller.history.account,
+            &controller.history,
             &account,
             &genesis.event.realm_id,
             &format!("{did}#managed-controller"),
@@ -8714,17 +8698,20 @@ async fn owned_consumer_fixture_with_prepared_scope(
             )
             .unwrap(),
         };
+        let delivery_scope = agent_scope_custody::DeliveryScopeFixture {
+            pool: &pool,
+            station: &station,
+            principal: &controller.history,
+            agent: &account,
+            key_event: &key,
+            scope: &scope,
+            endpoint: &endpoint,
+        };
         if prepare_only {
             assert_eq!(count, 1);
             assert_eq!(index, 0);
             let prepared = Box::pin(agent_scope_custody::prepare_delivery_scope_for_disconnect(
-                &pool,
-                &station,
-                &controller.history,
-                &account,
-                &key,
-                &scope,
-                &endpoint,
+                delivery_scope,
             ))
             .await;
             return (
@@ -8743,30 +8730,10 @@ async fn owned_consumer_fixture_with_prepared_scope(
             );
         }
         let (vault, _) = if receipt_probe {
-            Box::pin(
-                agent_scope_custody::retain_delivery_scope_for_receipt_probe(
-                    &pool,
-                    &station,
-                    &controller.history,
-                    &account,
-                    &key,
-                    &scope,
-                    &endpoint,
-                ),
-            )
-            .await
+            Box::pin(agent_scope_custody::retain_delivery_scope_for_receipt_probe(delivery_scope))
+                .await
         } else {
-            Box::pin(retain_delivery_scope_for_runtime(
-                &pool,
-                &station,
-                &controller.history,
-                &account,
-                &key,
-                &scope,
-                &endpoint,
-                true,
-            ))
-            .await
+            Box::pin(retain_delivery_scope_for_runtime(delivery_scope, true)).await
         };
         let public = agent_mode_request(
             &agent_join.authority_commit,
@@ -9279,15 +9246,10 @@ async fn owned_consumer_quota_scenario() {
         fixture_commit_step(&fixture.pool, candidates[0].clone()),
         fixture_commit_step(&fixture.pool, candidates[1].clone())
     );
-    assert_eq!(
-        usize::from(first.is_ok()) + usize::from(second.is_ok()),
-        1,
-        "both Agent Events cannot reserve the last controller unit"
-    );
-    let (winner, loser, error) = if first.is_ok() {
-        (0, 1, second.unwrap_err())
-    } else {
-        (1, 0, first.unwrap_err())
+    let (winner, loser, error) = match (first, second) {
+        (Ok(_), Err(error)) => (0, 1, error),
+        (Err(error), Ok(_)) => (1, 0, error),
+        _ => panic!("exactly one Agent Event must reserve the last controller unit"),
     };
     assert!(
         matches!(
@@ -9405,13 +9367,15 @@ async fn owned_consumer_http_for_endpoint(
     vault: &DeliveryScopeVault,
 ) -> OwnedConsumerHttpFixture {
     owned_consumer_http_for_endpoint_with_storage(
-        pool,
-        station,
-        controller,
-        realm,
-        agent,
-        endpoint,
-        vault,
+        ConsumerEndpointFixture {
+            pool,
+            station,
+            controller,
+            realm,
+            agent,
+            endpoint,
+            vault,
+        },
         None,
         chrono::TimeDelta::hours(1),
         None,
@@ -9419,18 +9383,31 @@ async fn owned_consumer_http_for_endpoint(
     .await
 }
 
+struct ConsumerEndpointFixture<'a> {
+    pool: &'a coland_storage_postgres::PgPool,
+    station: &'a historical_control_source::HistoricalControlStation,
+    controller: &'a AccountId,
+    realm: &'a arkret_wire::RealmId,
+    agent: &'a AccountId,
+    endpoint: &'a coland_storage::AgentEndpointGuard,
+    vault: &'a DeliveryScopeVault,
+}
+
 async fn owned_consumer_http_for_endpoint_with_storage(
-    pool: &coland_storage_postgres::PgPool,
-    station: &historical_control_source::HistoricalControlStation,
-    controller: &AccountId,
-    realm: &arkret_wire::RealmId,
-    agent: &AccountId,
-    endpoint: &coland_storage::AgentEndpointGuard,
-    vault: &DeliveryScopeVault,
+    fixture: ConsumerEndpointFixture<'_>,
     object_storage: Option<std::sync::Arc<dyn coland_services::delivery::ObjectStoragePort>>,
     grant_lifetime: chrono::TimeDelta,
     receiving_station: Option<&historical_control_source::HistoricalControlStation>,
 ) -> OwnedConsumerHttpFixture {
+    let ConsumerEndpointFixture {
+        pool,
+        station,
+        controller,
+        realm,
+        agent,
+        endpoint,
+        vault,
+    } = fixture;
     use arkret_models_collaboration::session_grants::*;
     use arkret_models_identity::session_credential::*;
     use sha2::{Digest, Sha256};
@@ -10544,7 +10521,7 @@ async fn owned_consumer_blob_scenario(policy_deny: bool) {
             "blob_get_head_range_positive",
         )
         .await;
-        let expected = if let Some(_) = range {
+        let expected = if range.is_some() {
             &original[2..=8]
         } else {
             original.as_slice()
@@ -10755,20 +10732,7 @@ async fn owned_consumer_device_flow(mut input: Box<OwnedConsumerDeviceFlow>) {
         // Only after the original GET persists its actual cursor, queue the
         // later genuine Welcome through the same Sidecar's real endpoint
         // replacement: one accepted Remove+Add, with a fresh claim/package.
-        let later = Box::pin(owned_consumer_queue_later_welcome(
-            &input.pool,
-            &input.station,
-            &input.principal,
-            &input.agent,
-            &input.key_event,
-            &input.key_commit,
-            &input.realm,
-            &input.realm_template,
-            &input.delivery.effective_scope,
-            &mut input.controller_group,
-            &mut input.public_tracker,
-        ))
-        .await;
+        let later = Box::pin(owned_consumer_queue_later_welcome(&mut input)).await;
         assert!(later.welcome_id != input.delivery.welcome_id);
         assert!(later.effective_scope == input.delivery.effective_scope);
         assert!(later.commit_event_ref != input.delivery.commit_event_ref);
@@ -10777,47 +10741,32 @@ async fn owned_consumer_device_flow(mut input: Box<OwnedConsumerDeviceFlow>) {
         let _later_cursor =
             Box::pin(owned_consumer_exact_welcome_cursor(&http, &path, &later)).await;
         Box::pin(owned_consumer_device_messages_refusal(
-            &input.pool,
-            controller,
-            &input.endpoint,
+            &input,
             &input.realm,
-            &input.realm_template,
             &http,
             &path,
-            input.policy_deny,
             true,
         ))
         .await;
     } else {
-        Box::pin(owned_consumer_device_messages_scenario(
-            &input.pool,
-            &input.station,
-            &input.principal,
-            &input.agent,
-            &input.endpoint,
-            &input.vault,
-            &input.delivery,
-            &input.realm_template,
-            input.policy_deny,
-        ))
-        .await;
+        Box::pin(owned_consumer_device_messages_scenario(&input)).await;
     }
 }
 
 // Production recipient-private DeviceMessages reads over a real producer-signed
 // Welcome from original KeyPackage claim and accepted MLS Add. This does not
 // synthesize ACK/consume or pretend an exact-token issuer is normal OAuth.
-async fn owned_consumer_device_messages_scenario(
-    pool: &coland_storage_postgres::PgPool,
-    station: &historical_control_source::HistoricalControlStation,
-    principal: &pcr_genesis::PcrGenesisFixture,
-    agent: &AccountId,
-    endpoint: &coland_storage::AgentEndpointGuard,
-    vault: &DeliveryScopeVault,
-    welcome: &arkret_wire::MlsWelcomeDelivery,
-    realm_template: &coland_storage::AuthorityCommitTransaction,
-    policy_deny: bool,
-) {
+async fn owned_consumer_device_messages_scenario(input: &OwnedConsumerDeviceFlow) {
+    let OwnedConsumerDeviceFlow {
+        pool,
+        station,
+        principal,
+        agent,
+        endpoint,
+        vault,
+        delivery: welcome,
+        ..
+    } = input;
     use arkret_models_collaboration::device_messages::{
         DeviceMessagesGetResponseBody, RecipientDelivery,
     };
@@ -10870,30 +10819,26 @@ async fn owned_consumer_device_messages_scenario(
             .is_some_and(|cursor| !cursor.is_empty())
     );
     Box::pin(owned_consumer_device_messages_refusal(
-        pool,
-        controller,
-        endpoint,
-        realm,
-        realm_template,
-        &http,
-        path,
-        policy_deny,
-        false,
+        input, realm, &http, path, false,
     ))
     .await;
 }
 
 async fn owned_consumer_device_messages_refusal(
-    pool: &coland_storage_postgres::PgPool,
-    controller: &AccountId,
-    endpoint: &coland_storage::AgentEndpointGuard,
+    input: &OwnedConsumerDeviceFlow,
     realm: &arkret_wire::RealmId,
-    realm_template: &coland_storage::AuthorityCommitTransaction,
     http: &OwnedConsumerHttpFixture,
     path: &str,
-    policy_deny: bool,
     require_zero_newcut: bool,
 ) {
+    let OwnedConsumerDeviceFlow {
+        pool,
+        endpoint,
+        realm_template,
+        ..
+    } = input;
+    let controller = &input.principal.history.account;
+    let policy_deny = input.policy_deny;
     // Read the actual governing Realm head: MLS sidecar commits are not that
     // stream and cannot be substituted as the next current writer's parent.
     let store = PgAuthorityCommitStore { pool: pool.clone() };
@@ -10946,7 +10891,7 @@ async fn owned_consumer_device_messages_refusal(
         None
     };
     let mut refused = Box::pin(owned_consumer_http_get(
-        &http,
+        http,
         path,
         arkret_wire::ServiceOperationId::SELF_DEVICE_MESSAGES_READ_LIST_V1,
     ))
@@ -11661,13 +11606,15 @@ async fn owned_consumer_remote_barrier_scenario() {
     );
     let remote = Box::new(
         Box::pin(owned_consumer_http_for_endpoint_with_storage(
-            &fixture.pool,
-            &fixture.station,
-            &fixture.controller.history.account,
-            &fixture.head.event.realm_id,
-            &agent.account,
-            &agent.endpoint,
-            &agent._vault,
+            ConsumerEndpointFixture {
+                pool: &fixture.pool,
+                station: &fixture.station,
+                controller: &fixture.controller.history.account,
+                realm: &fixture.head.event.realm_id,
+                agent: &agent.account,
+                endpoint: &agent.endpoint,
+                vault: &agent._vault,
+            },
             None,
             chrono::TimeDelta::hours(1),
             Some(&receiver),
@@ -11805,18 +11752,20 @@ async fn owned_agent_remote_receiver_without_current_governing_barrier_yields_no
 // Remove+Add Commit produces the later signed Welcome without another singleton
 // or MLS Genesis. No delivery row, cursor, ciphertext or proof is fabricated.
 async fn owned_consumer_queue_later_welcome(
-    pool: &coland_storage_postgres::PgPool,
-    station: &historical_control_source::HistoricalControlStation,
-    principal: &std::sync::Arc<pcr_genesis::PcrGenesisFixture>,
-    agent: &AccountId,
-    key_event: &arkret_wire::Event,
-    key_commit: &arkret_wire::RealmCommit,
-    realm_id: &arkret_wire::RealmId,
-    realm_template: &coland_storage::AuthorityCommitTransaction,
-    scope: &arkret_wire::ScopeRef,
-    group: &mut arkret_mls::ArkretMlsGroup,
-    tracker: &mut arkret_mls::MlsPublicGroupTracker,
+    input: &mut OwnedConsumerDeviceFlow,
 ) -> arkret_wire::MlsWelcomeDelivery {
+    let pool = &input.pool;
+    let station = &input.station;
+    let principal = &input.principal;
+    let agent = &input.agent;
+    let key_event = &input.key_event;
+    let key_commit = &input.key_commit;
+    let realm_id = &input.realm;
+    let realm_template = &input.realm_template;
+    let delivery = &input.delivery;
+    let group = &mut input.controller_group;
+    let tracker = &mut input.public_tracker;
+    let scope = &delivery.effective_scope;
     use coland_storage::AuthorityCommitStore;
     let controller = &principal.history.account;
     let station_did = station.did.clone();
@@ -11878,7 +11827,7 @@ async fn owned_consumer_queue_later_welcome(
     head.mls_state = None;
     head.welcomes.clear();
     let at = head.commit.committed_at + chrono::TimeDelta::milliseconds(1);
-    let cut = read(&pool, realm_id, &sidecar, controller)
+    let cut = read(pool, realm_id, sidecar, controller)
         .await
         .unwrap()
         .unwrap();
@@ -12043,10 +11992,10 @@ async fn owned_consumer_queue_later_welcome(
         &claim_id,
         &request_id,
         controller,
-        &agent,
+        agent,
         &method,
         &key_event.event_id,
-        &scope,
+        scope,
         now,
     );
     let ledger = coland_storage::PeerKeyPackageClaimLedgerRecord {
@@ -12085,7 +12034,7 @@ async fn owned_consumer_queue_later_welcome(
     package.state = arkret_models_crypto::MlsKeyPackageState::Claimed;
     package.claim_id = Some(claim_id.to_string());
     let groups = coland_storage_postgres::PgMlsGroupCurrentStore { pool: pool.clone() };
-    let base = groups.current(&scope).await.unwrap().unwrap().value;
+    let base = groups.current(scope).await.unwrap().unwrap().value;
     let binding = MlsGovernanceBindingPayload::sidecar(
         realm_id.clone(),
         sidecar.clone(),
@@ -12149,7 +12098,7 @@ async fn owned_consumer_queue_later_welcome(
             ActorId::account(controller.clone()),
             serde_json::to_value(
                 coland_test_support::mls_content::commit_payload(
-                    &group,
+                    group,
                     base.current_mls_commit_event_ref.clone(),
                     base.current_key_access_revision,
                     &add.commit,
@@ -12270,8 +12219,8 @@ async fn owned_consumer_queue_later_welcome(
         )),
     }];
     request.authority_commit.recipient_queue_capacity = 8;
-    source_candidate(&pool, &mut request).await;
-    let request = Box::pin(ordinary_realm::source_request(&pool, request)).await;
+    source_candidate(pool, &mut request).await;
+    let request = Box::pin(ordinary_realm::source_request(pool, request)).await;
     fixture_commit_step(pool, request.clone()).await.unwrap();
     let accepted = arkret_wire::CommittedEventFullView {
         event: request.authority_commit.event.clone(),
@@ -12527,13 +12476,15 @@ async fn owned_consumer_blob_two_chunk_expiry_scenario() {
     let agent = &fixture.agents[0];
     let storage = std::sync::Arc::new(OwnedConsumerTwoChunkStorage::new());
     let http = Box::pin(owned_consumer_http_for_endpoint_with_storage(
-        &fixture.pool,
-        &fixture.station,
-        &fixture.controller.history.account,
-        &fixture.head.event.realm_id,
-        &agent.account,
-        &agent.endpoint,
-        &agent._vault,
+        ConsumerEndpointFixture {
+            pool: &fixture.pool,
+            station: &fixture.station,
+            controller: &fixture.controller.history.account,
+            realm: &fixture.head.event.realm_id,
+            agent: &agent.account,
+            endpoint: &agent.endpoint,
+            vault: &agent._vault,
+        },
         Some(storage.clone()),
         chrono::TimeDelta::seconds(10),
         None,
@@ -13137,13 +13088,15 @@ async fn build_native_reply_preparation_fixture(
     );
     let agent = &original.agents[0];
     let http = Box::pin(owned_consumer_http_for_endpoint_with_storage(
-        &original.pool,
-        &original.station,
-        &original.controller.history.account,
-        &realm,
-        &agent.account,
-        &agent.endpoint,
-        &agent._vault,
+        ConsumerEndpointFixture {
+            pool: &original.pool,
+            station: &original.station,
+            controller: &original.controller.history.account,
+            realm: &realm,
+            agent: &agent.account,
+            endpoint: &agent.endpoint,
+            vault: &agent._vault,
+        },
         None,
         lifetime,
         None,
@@ -13205,15 +13158,7 @@ fn native_reply_preparation_step(
     fixture: &NativeReplyPreparationFixture,
     input: &coland_storage::AccountContentDeliveryInput,
     deployment: arkret_models_collaboration::governance::agent_participation::ParticipationBits,
-) -> Pin<
-    Box<
-        dyn Future<
-                Output = coland_storage::PersistenceResult<
-                    Box<dyn coland_storage::AccountContentDeliveryGuard>,
-                >,
-            > + Send,
-    >,
-> {
+) -> FixtureStoreFuture<Box<dyn coland_storage::AccountContentDeliveryGuard>> {
     let pool = fixture.original.pool.clone();
     let agent = fixture.original.agents[0].account.clone();
     let controller = fixture.original.controller.history.account.clone();

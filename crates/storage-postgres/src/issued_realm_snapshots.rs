@@ -2322,6 +2322,18 @@ pub(crate) async fn prune_in_connection(
     Ok(i64::try_from(reservations).is_ok_and(|rows| rows >= batch) || issuances >= batch)
 }
 
+fn actor_key(actor: &arkret_wire::ActorId) -> PersistenceResult<String> {
+    match actor {
+        arkret_wire::ActorId::Account { account_id } => account_key(account_id),
+        arkret_wire::ActorId::Realm { .. } => {
+            arkret_canonical::canonical_json_string(actor).map_err(PersistenceError::database)
+        }
+        _ => Err(undisclosable(
+            "Service actors do not receive member snapshots",
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use arkret_wire::{
@@ -2421,7 +2433,7 @@ mod tests {
         );
         let omitted = expected_circles[63].stream_ref.clone();
         let (explicit, limited) =
-            select_window_heads(&realm_id, &heads, Some(&[omitted.clone()])).unwrap();
+            select_window_heads(&realm_id, &heads, Some(std::slice::from_ref(&omitted))).unwrap();
         assert_eq!(explicit.len(), 1);
         assert_eq!(explicit[0].stream_ref, omitted);
         assert!(!limited);
@@ -2871,17 +2883,5 @@ mod tests {
                 .unwrap(),
             Some(handoff),
         );
-    }
-}
-
-fn actor_key(actor: &arkret_wire::ActorId) -> PersistenceResult<String> {
-    match actor {
-        arkret_wire::ActorId::Account { account_id } => account_key(account_id),
-        arkret_wire::ActorId::Realm { .. } => {
-            arkret_canonical::canonical_json_string(actor).map_err(PersistenceError::database)
-        }
-        _ => Err(undisclosable(
-            "Service actors do not receive member snapshots",
-        )),
     }
 }

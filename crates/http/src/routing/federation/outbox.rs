@@ -212,28 +212,27 @@ pub(crate) fn rfc9421_sign(
     state: &AppState,
     headers: reqwest::header::HeaderMap,
     method: &str,
-    target_url: &str,
+    target_url: &reqwest::Url,
+    route: &str,
 ) -> reqwest::header::HeaderMap {
-    let operation = operation_for_canonical_http_request(method, target_url);
-    rfc9421_sign_with_window(state, headers, method, target_url, operation, 300)
+    rfc9421_sign_with_window(state, headers, method, target_url, route, 300)
 }
 
-fn operation_for_canonical_http_request(
-    method: &str,
-    target_url: &str,
-) -> Option<ServiceOperationId> {
-    let url = reqwest::Url::parse(target_url).ok()?;
-    ServiceOperationId::from_http_request(method, url.path())
+fn operation_for_canonical_http_request(method: &str, route: &str) -> Option<ServiceOperationId> {
+    let path = route.split_once('?').map_or(route, |(path, _)| path);
+    ServiceOperationId::from_http_request(method, path)
 }
 
 fn rfc9421_sign_with_window(
     state: &AppState,
     mut headers: reqwest::header::HeaderMap,
     method: &str,
-    target_url: &str,
-    operation: Option<ServiceOperationId>,
+    target_url: &reqwest::Url,
+    route: &str,
     validity_seconds: i64,
 ) -> reqwest::header::HeaderMap {
+    // Operation IDs use protocol routes. The signature binds the deployed URL.
+    let operation = operation_for_canonical_http_request(method, route);
     let created = now_unix_secs();
     let expires = created + validity_seconds;
     let keyid = super::federation_service_signature_key_id(state.service_did().as_str());
@@ -262,12 +261,11 @@ fn rfc9421_sign_with_window(
     );
     let parsed_signature_input =
         parse_signature_input(&signature_input).expect("generated Signature-Input is valid");
-    let authority = authority_from_target_url(target_url);
     let request = SignedRequestParts {
         method: method.to_owned(),
-        target_uri: target_url.to_owned(),
-        authority,
-        path: String::new(),
+        target_uri: target_url.to_string(),
+        authority: target_url[url::Position::BeforeHost..url::Position::AfterPort].to_owned(),
+        path: target_url.path().to_owned(),
         headers: headers
             .iter()
             .filter_map(|(name, value)| {
@@ -302,7 +300,10 @@ pub(crate) async fn relay_signal_once(
     let body =
         arkret_canonical::canonical_json_bytes(request).map_err(|error| error.to_string())?;
     let peer_target = super::resolved_peer_target(state, peer_id, "station", false).await?;
-    let target = format!("{}/_arkret/peer/signal", peer_target.base_url);
+    let route = ServiceOperationId::PeerSignalCommandRelayV1
+        .descriptor()
+        .http_path;
+    let target = format!("{}{route}", peer_target.base_url);
     let (parsed_url, client) = crate::security::validate_http_url_for_egress_with_pinned_client(
         &target,
         "Signal peer relay",
@@ -338,8 +339,7 @@ pub(crate) async fn relay_signal_once(
         "destination-trust-domain",
         &peer_target.trust_domain,
     );
-    let operation = operation_for_canonical_http_request("POST", &target);
-    let headers = rfc9421_sign_with_window(state, headers, "POST", &target, operation, 5);
+    let headers = rfc9421_sign_with_window(state, headers, "POST", &parsed_url, route, 5);
     let response = client
         .post(parsed_url)
         .headers(headers)
@@ -387,7 +387,10 @@ pub(crate) async fn submit_authority_forward(
     body: &[u8],
 ) -> Result<PeerSubmitResponse, String> {
     let peer_target = super::resolved_peer_target(state, peer_id, "station", false).await?;
-    let target = format!("{}/_arkret/peer/events", peer_target.base_url);
+    let route = ServiceOperationId::PeerEventsCommandSubmitV1
+        .descriptor()
+        .http_path;
+    let target = format!("{}{route}", peer_target.base_url);
     let (parsed_url, client) = crate::security::validate_http_url_for_egress_with_pinned_client(
         &target,
         "authority_forward",
@@ -418,7 +421,7 @@ pub(crate) async fn submit_authority_forward(
             "destination-trust-domain",
             &peer_target.trust_domain,
         );
-        let headers = rfc9421_sign(state, headers, "POST", &target);
+        let headers = rfc9421_sign(state, headers, "POST", &parsed_url, route);
         let response = match client
             .post(parsed_url.clone())
             .headers(headers)
@@ -579,10 +582,7 @@ async fn signed_peer_request_to_target(
             reqwest::header::HeaderValue::from_str(key).map_err(|error| error.to_string())?,
         );
     }
-    // The operation uses the canonical route, while the signature binds the deployment URL.
-    let canonical_path = path.split_once('?').map_or(path, |(path, _)| path);
-    let operation = ServiceOperationId::from_http_request("POST", canonical_path);
-    let headers = rfc9421_sign_with_window(state, headers, "POST", &target, operation, 300);
+    let headers = rfc9421_sign(state, headers, "POST", &parsed_url, path);
     let mut response = client
         .post(parsed_url)
         .headers(headers)
@@ -602,18 +602,6 @@ async fn signed_peer_request_to_target(
         status,
         body: bytes,
     })
-}
-
-fn authority_from_target_url(target_url: &str) -> String {
-    let Ok(url) = reqwest::Url::parse(target_url) else {
-        return String::new();
-    };
-    let Some(host) = url.host_str() else {
-        return String::new();
-    };
-    url.port()
-        .map(|port| format!("{host}:{port}"))
-        .unwrap_or_else(|| host.to_owned())
 }
 
 pub(crate) fn insert_header_if_valid(
@@ -640,16 +628,7 @@ pub(crate) fn content_digest_header_value(body: &[u8]) -> String {
 
 /// Truncate a response body for the `last_response_excerpt` column.
 fn excerpt(body: &str) -> String {
-    if body.len() <= RESPONSE_EXCERPT_BYTES {
-        body.to_owned()
-    } else {
-        // Avoid splitting a multi-byte char mid-sequence.
-        let mut end = RESPONSE_EXCERPT_BYTES;
-        while end > 0 && !body.is_char_boundary(end) {
-            end -= 1;
-        }
-        body[..end].to_owned()
-    }
+    body[..body.floor_char_boundary(RESPONSE_EXCERPT_BYTES)].to_owned()
 }
 
 fn peer_event_application_failure(
@@ -1457,7 +1436,13 @@ impl FederationDispatcher {
         );
         // A transport retry keeps the body and the key but always re-signs:
         // the signature window is short-lived and the old one has expired.
-        let headers = rfc9421_sign(&self.state, headers, "POST", &url);
+        let headers = rfc9421_sign(
+            &self.state,
+            headers,
+            "POST",
+            &parsed_url,
+            &row.delivery.endpoint,
+        );
 
         let response = client
             .post(parsed_url)
@@ -2724,26 +2709,22 @@ mod tests {
 
     #[test]
     fn excerpt_truncates_at_one_kib_on_char_boundary() {
-        let body = "a".repeat(2048);
-        let trimmed = excerpt(&body);
-        assert_eq!(trimmed.len(), RESPONSE_EXCERPT_BYTES);
+        let prefix = "a".repeat(RESPONSE_EXCERPT_BYTES - 1);
+        assert_eq!(excerpt(&format!("{prefix}é")), prefix);
+        assert_eq!(excerpt(&format!("{prefix}ab")), format!("{prefix}a"));
+        assert_eq!(excerpt("short"), "short");
     }
-}
-#[test]
-fn canonical_http_request_selects_exact_operation_version() {
-    assert_eq!(
-        operation_for_canonical_http_request(
-            "POST",
-            "https://peer.example/_arkret/peer/events?ignored=yes",
-        )
-        .map(arkret_wire::ServiceOperationId::as_str),
-        Some(arkret_wire::ServiceOperationId::PEER_EVENTS_COMMAND_SUBMIT_V1)
-    );
-    assert_eq!(
-        operation_for_canonical_http_request(
-            "GET",
-            "https://peer.example/_private/not-a-canonical-route",
-        ),
-        None
-    );
+
+    #[test]
+    fn canonical_http_request_selects_exact_operation_version() {
+        assert_eq!(
+            operation_for_canonical_http_request("POST", "/_arkret/peer/events?ignored=yes")
+                .map(arkret_wire::ServiceOperationId::as_str),
+            Some(arkret_wire::ServiceOperationId::PEER_EVENTS_COMMAND_SUBMIT_V1)
+        );
+        assert_eq!(
+            operation_for_canonical_http_request("GET", "/_private/not-a-canonical-route"),
+            None
+        );
+    }
 }

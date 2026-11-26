@@ -1290,8 +1290,9 @@ pub(super) async fn recovery_session_proof_submit(
     let now = chrono::Utc::now();
     let updated = RecoverySessionServiceState {
         state: SessionState::Verified,
-        proof_payload: Some(serde_json::to_value(&payload)
-            .map_err(|error| AppError::internal(format!("recovery proof submit serialize: {error}")))?),
+        proof_payload: Some(serde_json::to_value(&payload).map_err(|error| {
+            AppError::internal(format!("recovery proof submit serialize: {error}"))
+        })?),
         updated_at: now,
         ..record
     };

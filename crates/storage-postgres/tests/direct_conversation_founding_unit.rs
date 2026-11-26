@@ -184,32 +184,6 @@ fn agent_provision_event(
     device_authorization_history::sign_event(event, method.clone(), seed)
 }
 
-fn agent_control_event(
-    controller_method: &DidUrl,
-    signing_seed: [u8; 32],
-    controller: &AccountId,
-    agent: &AccountId,
-    agent_pcr: &RealmId,
-    authorization_ref: &str,
-    payload: serde_json::Value,
-    at: chrono::DateTime<chrono::Utc>,
-) -> arkret_wire::Event {
-    let mut event = arkret_wire::test_support::raw_event_for_actor_at(
-        EventKind::AgentKeyAuthorize.as_str(),
-        arkret_wire::ScopeRef::Realm {
-            realm_id: agent_pcr.clone(),
-        },
-        ActorId::account(agent.clone()),
-        payload,
-        at,
-    )
-    .unwrap();
-    event.executed_by = Some(ActorId::account(controller.clone()));
-    event.authorization_ref =
-        Some(arkret_wire::AuthorizationRef::new(authorization_ref.to_owned()).unwrap());
-    device_authorization_history::sign_event(event, controller_method.clone(), signing_seed)
-}
-
 fn fixture_signature(
     issuer: &str,
     at: chrono::DateTime<chrono::Utc>,
@@ -553,8 +527,7 @@ fn authored(
     kind: EventKind,
     scope_ref: arkret_wire::ScopeRef,
     actor: ActorId,
-    method: &DidUrl,
-    signing_seed: [u8; 32],
+    pair: &Pair,
     payload: serde_json::Value,
     semantic_refs: Vec<arkret_wire::SemanticRef>,
     at: chrono::DateTime<chrono::Utc>,
@@ -568,7 +541,11 @@ fn authored(
     )
     .unwrap();
     event.semantic_refs = semantic_refs;
-    device_authorization_history::sign_event(event, method.clone(), signing_seed)
+    device_authorization_history::sign_event(
+        event,
+        pair.founder_method.clone(),
+        pair.founder_signing_seed,
+    )
 }
 
 /// Knobs a refusal case turns on an otherwise exact founding unit.
@@ -614,8 +591,7 @@ async fn founding_unit(
         EventKind::RealmCreate,
         arkret_wire::ScopeRef::RealmGenesis,
         shape.author.clone(),
-        &pair.founder_method,
-        pair.founder_signing_seed,
+        pair,
         serde_json::json!({"object":{
             "schema":"ak.schema.realm_genesis.v1",
             "purpose":"direct_conversation",
@@ -654,8 +630,7 @@ async fn founding_unit(
             EventKind::MemberState,
             scope.clone(),
             shape.author.clone(),
-            &pair.founder_method,
-            pair.founder_signing_seed,
+            pair,
             payload,
             Vec::new(),
             at,
@@ -667,8 +642,7 @@ async fn founding_unit(
         EventKind::StrandCreate,
         scope.clone(),
         shape.author.clone(),
-        &pair.founder_method,
-        pair.founder_signing_seed,
+        pair,
         serde_json::json!({"object":{
             "schema":"ak.schema.strand.v1",
             "realm_id":realm_id,
@@ -2331,10 +2305,8 @@ async fn controller_owned_agent_founding_reads_provision_and_runtime_key_at_the_
     );
     assert_eq!(footprint(&pool, &realm_of(&no_key)).await, [0; 5]);
 
-    let key_event = agent_control_event(
-        &controller_method,
-        controller_seed,
-        &controller,
+    let key_event = sidecar_agent::agent_control_event(
+        &controller_fixture.history,
         &agent,
         &agent_pcr,
         &delegation,
@@ -4409,7 +4381,7 @@ async fn participant_authority_scenario() {
     })
     .await;
     let basis = boxed_source(|| async {
-        let basis = {
+        {
             #[derive(diesel::QueryableByName)]
             struct BasisRow {
                 #[diesel(sql_type = diesel::sql_types::Jsonb)]
@@ -4424,8 +4396,7 @@ async fn participant_authority_scenario() {
         .await
         .unwrap()
         .authorization_basis
-        };
-        basis
+        }
     })
     .await;
     // The canonical basis is the round's accepted request and accept heads.
@@ -4821,8 +4792,6 @@ async fn participant_authority_scenario() {
         head,
         &binding_ref,
         &add_ref,
-        &founder,
-        &peer,
         &facts.main_strand_id,
     ))
     .await;
@@ -4928,9 +4897,8 @@ async fn participant_authority_scenario() {
     ))
     .await;
     uow.commit_event(founder_message.clone()).await.unwrap();
-    let head = founder_message.authority_commit.clone();
 
-    head
+    founder_message.authority_commit.clone()
     }).await;
     boxed_source(|| async {
         // Membership repair stays on the same stable Realm.  A joined
@@ -5628,8 +5596,6 @@ async fn exercise_flat_topics(
     mut head: AuthorityCommitTransaction,
     binding: &arkret_wire::EventId,
     group: &arkret_wire::EventId,
-    founder: &ActorId,
-    peer: &ActorId,
     main: &arkret_wire::StrandId,
 ) -> AuthorityCommitTransaction {
     use arkret_models_collaboration::events_payloads::{
@@ -5656,6 +5622,8 @@ async fn exercise_flat_topics(
         diesel::sql_query("SELECT jsonb_build_object('strands',(SELECT jsonb_agg(to_jsonb(s) ORDER BY strand_id) FROM strand_current_states s WHERE realm_id=$1),'spaces',(SELECT jsonb_agg(to_jsonb(s) ORDER BY space_id) FROM space_current_states s WHERE realm_id=$1),'parents',(SELECT jsonb_agg(to_jsonb(s) ORDER BY space_id) FROM space_parent_current_states s WHERE realm_id=$1),'positions',(SELECT jsonb_agg(to_jsonb(s) ORDER BY strand_id) FROM strand_position_current_states s WHERE realm_id=$1)) AS value")
             .bind::<Text,_>(realm.as_str()).get_result::<ValueRow>(&mut *conn).await.unwrap().value
     }
+    let founder = &pair.founder_actor();
+    let peer = &pair.peer_actor();
     let realm = head.event.realm_id.clone();
     let before_group = count(
         pool,

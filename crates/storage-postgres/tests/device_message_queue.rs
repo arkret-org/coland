@@ -409,12 +409,7 @@ async fn postgres_device_message_queue_round_trips_closed_envelope_across_restar
         pool: restarted.clone(),
     };
     let listed = store
-        .list_after(
-            &device_b.principal_id.to_string(),
-            &device_b.device_id,
-            0,
-            10,
-        )
+        .list_after(device_b.principal_id.as_ref(), &device_b.device_id, 0, 10)
         .await
         .unwrap();
     assert_eq!(listed.len(), 1);
@@ -544,12 +539,7 @@ async fn postgres_device_message_queue_fails_closed_on_target_shaped_row() {
     );
     assert!(matches!(
         store
-            .list_after(
-                &device_b.principal_id.to_string(),
-                &device_b.device_id,
-                0,
-                10
-            )
+            .list_after(device_b.principal_id.as_ref(), &device_b.device_id, 0, 10)
             .await
             .unwrap_err(),
         PersistenceError::SchemaViolation(_)
@@ -1694,13 +1684,15 @@ fn agent_message_send_gate_scenario() -> std::pin::Pin<Box<impl std::future::Fut
         };
         let (_scope_vault, scope_evidence) = scenario_future(|| {
             agent_scope_custody::retain_delivery_scope_with_runtime_seed(
-                &pool,
-                &station,
-                &agent.controller,
-                &agent.agent_account,
-                &accepted_key.event,
-                &agent.requested_scope,
-                &endpoint,
+                agent_scope_custody::DeliveryScopeFixture {
+                    pool: &pool,
+                    station: &station,
+                    principal: &agent.controller,
+                    agent: &agent.agent_account,
+                    key_event: &accepted_key.event,
+                    scope: &agent.requested_scope,
+                    endpoint: &endpoint,
+                },
                 false,
                 &AGENT_RUNTIME_SEED,
             )

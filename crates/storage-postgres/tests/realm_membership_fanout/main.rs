@@ -17,12 +17,7 @@ mod device_authorization_history;
 mod historical_human;
 #[path = "../support/hydration.rs"]
 mod hydration;
-#[path = "../support/ordinary_realm.rs"]
-#[expect(
-    dead_code,
-    reason = "This integration binary uses only its subset of the shared Realm fixture."
-)]
-mod ordinary_realm;
+use historical_human::ordinary_realm;
 #[path = "../../../test-support/src/pcr_genesis.rs"]
 #[allow(dead_code)]
 mod pcr_genesis;
@@ -6951,7 +6946,7 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
                     } else {
                         let incoming = case_replica(&leave, false);
                         let digest = arkret_canonical::sha256_digest(
-                            &arkret_canonical::canonical_json_bytes(&incoming.event).unwrap(),
+                            arkret_canonical::canonical_json_bytes(&incoming.event).unwrap(),
                         );
                         let receipt = coland_storage::IdempotencyRecord {
                             authenticated_actor: arkret_wire::ActorId::service(
@@ -7668,7 +7663,7 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
                         );
                     }
                     let digest = arkret_canonical::sha256_digest(
-                        &arkret_canonical::canonical_json_bytes(&incoming.event).unwrap(),
+                        arkret_canonical::canonical_json_bytes(&incoming.event).unwrap(),
                     );
                     let receipt = coland_storage::IdempotencyRecord {
                         authenticated_actor: arkret_wire::ActorId::service(

@@ -1195,9 +1195,7 @@ mod tests {
         let not_onboarded =
             handoff_unavailable("Gateway origin is not onboarded", "https://push.example");
         assert!(
-            register_codes
-                .iter()
-                .any(|code| *code == OperationSpecificError::Code(not_onboarded.code)),
+            register_codes.contains(&OperationSpecificError::Code(not_onboarded.code)),
             "register must report a registered push Gateway failure"
         );
         assert_ne!(not_onboarded.code, ErrorCode::DependencyMissing);

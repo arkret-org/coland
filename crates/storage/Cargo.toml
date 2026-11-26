@@ -15,7 +15,6 @@ test-support = ["arkret-event-draft/test-support", "arkret-wire/test-support"]
 
 [dependencies]
 arkret-signatures = { workspace = true, features = ["collaboration"] }
-arkret.workspace = true
 arkret-canonical.workspace = true
 arkret-event-draft.workspace = true
 arkret-identifiers.workspace = true
@@ -26,17 +25,14 @@ arkret-models-identity.workspace = true
 arkret-models-integration.workspace = true
 arkret-policy.workspace = true
 arkret-schema.workspace = true
-arkret-state.workspace = true
 arkret-wire.workspace = true
 async-trait = { workspace = true }
 base64 = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
-chrono-tz = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 coland-domain = { workspace = true }
 arkret-deployment-contracts = { workspace = true }
-subtle = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros"] }
 uuid = { workspace = true, features = ["v4", "v7", "serde"] }

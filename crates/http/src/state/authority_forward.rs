@@ -309,23 +309,21 @@ pub(crate) async fn admit_forwarded_event(
     }
     refuse_bare_mls_commit(event)?;
     super::authority_port::refuse_actor_private_event(&event.kind)?;
-    if event.kind == arkret_wire::EventKind::RealmGovernanceStationChange {
-        if let Some(origin) = state
+    if event.kind == arkret_wire::EventKind::RealmGovernanceStationChange
+        && let Some(origin) = state
             .persistence()
             .principal_resolution_for_realm(&event.realm_id)
             .await?
-        {
-            if matches!(
-                arkret_wire::GenesisGovernance::from_genesis(&origin.genesis_event)
-                    .map_err(wire_refusal)?,
-                arkret_wire::GenesisGovernance::Organization
-            ) {
-                return super::authority_organization_pcr_governance_change::admit_forwarded(
-                    state, peer, request, &origin,
-                )
-                .await;
-            }
-        }
+        && matches!(
+            arkret_wire::GenesisGovernance::from_genesis(&origin.genesis_event)
+                .map_err(wire_refusal)?,
+            arkret_wire::GenesisGovernance::Organization
+        )
+    {
+        return super::authority_organization_pcr_governance_change::admit_forwarded(
+            state, peer, request, &origin,
+        )
+        .await;
     }
     if request.is_native_pcr_candidate()
         && state

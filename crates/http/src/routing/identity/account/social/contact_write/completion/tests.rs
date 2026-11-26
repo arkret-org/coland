@@ -46,7 +46,7 @@ fn confirmed_contact_receipt_uses_historical_key_after_rotation_and_keystore_reo
     );
     let rotation = prepare_service_rotation(&ServiceRotationInput {
         did: did.as_str(),
-        previous_entries: &[inception.log_entry.clone()],
+        previous_entries: std::slice::from_ref(&inception.log_entry),
         state: &document,
         current_update_seed: &inception.next_update_key_seed,
         next_update_public_key_multibase: &following_multibase,

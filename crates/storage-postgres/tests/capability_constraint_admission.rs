@@ -86,7 +86,7 @@ fn discussion<'a>(
         let strand_id = opened.strand_id.clone();
         let default = opened.head;
         let join = by(
-            &pool,
+            pool,
             &default.authority_commit,
             arkret_wire::EventKind::MemberState,
             member,
@@ -165,7 +165,7 @@ fn grant<'a>(
                 .remove("constraints");
         }
         by(
-            &pool,
+            pool,
             previous,
             arkret_wire::EventKind::CapabilityGrant,
             &founder_actor(),
@@ -184,7 +184,7 @@ fn message<'a>(
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = EventCommitRequest> + Send + 'a>> {
     Box::pin(async move {
         by(
-            &pool,
+            pool,
             previous,
             arkret_wire::EventKind::MessageCreate,
             author,

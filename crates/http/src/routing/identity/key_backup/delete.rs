@@ -566,89 +566,6 @@ fn ensure_recovery_unlock_session_eligible(
     Ok(())
 }
 
-#[cfg(test)]
-mod recovery_unlock_session_tests {
-    use super::*;
-
-    fn account(principal: &str, station: &str) -> arkret_wire::AccountId {
-        arkret_wire::AccountId::new(
-            arkret_wire::DidCoreId::new(principal.to_owned()).unwrap(),
-            arkret_wire::DidCoreId::new(station.to_owned()).unwrap(),
-        )
-    }
-
-    #[test]
-    fn recovery_unlock_delete_requires_the_exact_verified_live_session() {
-        let owner = account(
-            "ak:did_core:web:alice.example",
-            "ak:did_core:web:station.example",
-        );
-        let other = account(
-            "ak:did_core:web:bob.example",
-            "ak:did_core:web:station.example",
-        );
-        let created_at = "2026-09-27T00:00:00.000Z".parse().unwrap();
-        let expires_at = "2026-09-27T00:05:00.000Z".parse().unwrap();
-        let proof_at = "2026-09-27T00:01:00.000Z".parse().unwrap();
-        let check =
-            |account_id: &arkret_wire::AccountId, lifecycle, transaction_id, proof_created_at| {
-                ensure_recovery_unlock_session_eligible(
-                    &owner.principal_id,
-                    &owner.station_id,
-                    lifecycle,
-                    transaction_id,
-                    created_at,
-                    expires_at,
-                    account_id,
-                    proof_created_at,
-                )
-            };
-        check(
-            &owner,
-            coland_storage::RecoverySessionLifecycle::Verified,
-            None,
-            proof_at,
-        )
-        .unwrap();
-        assert!(
-            check(
-                &other,
-                coland_storage::RecoverySessionLifecycle::Verified,
-                None,
-                proof_at,
-            )
-            .is_err()
-        );
-        assert!(
-            check(
-                &owner,
-                coland_storage::RecoverySessionLifecycle::Pending,
-                None,
-                proof_at,
-            )
-            .is_err()
-        );
-        assert!(
-            check(
-                &owner,
-                coland_storage::RecoverySessionLifecycle::Verified,
-                Some("ak:security_transaction:consumed"),
-                proof_at,
-            )
-            .is_err()
-        );
-        assert!(
-            check(
-                &owner,
-                coland_storage::RecoverySessionLifecycle::Verified,
-                None,
-                "2026-09-27T00:05:00.001Z".parse().unwrap(),
-            )
-            .is_err()
-        );
-    }
-}
-
 /// `device_quorum`: deduplicate by `device_id`, verify every signature over the
 /// same transcript, and require the deduplicated valid count to reach the
 /// principal's currently accepted recovery-policy `min_device_count` — which the request's
@@ -802,4 +719,87 @@ pub(super) async fn ensure_key_backup_delete_allowed(
         backup,
         &owned_backups,
     )
+}
+
+#[cfg(test)]
+mod recovery_unlock_session_tests {
+    use super::*;
+
+    fn account(principal: &str, station: &str) -> arkret_wire::AccountId {
+        arkret_wire::AccountId::new(
+            arkret_wire::DidCoreId::new(principal.to_owned()).unwrap(),
+            arkret_wire::DidCoreId::new(station.to_owned()).unwrap(),
+        )
+    }
+
+    #[test]
+    fn recovery_unlock_delete_requires_the_exact_verified_live_session() {
+        let owner = account(
+            "ak:did_core:web:alice.example",
+            "ak:did_core:web:station.example",
+        );
+        let other = account(
+            "ak:did_core:web:bob.example",
+            "ak:did_core:web:station.example",
+        );
+        let created_at = "2026-09-27T00:00:00.000Z".parse().unwrap();
+        let expires_at = "2026-09-27T00:05:00.000Z".parse().unwrap();
+        let proof_at = "2026-09-27T00:01:00.000Z".parse().unwrap();
+        let check =
+            |account_id: &arkret_wire::AccountId, lifecycle, transaction_id, proof_created_at| {
+                ensure_recovery_unlock_session_eligible(
+                    &owner.principal_id,
+                    &owner.station_id,
+                    lifecycle,
+                    transaction_id,
+                    created_at,
+                    expires_at,
+                    account_id,
+                    proof_created_at,
+                )
+            };
+        check(
+            &owner,
+            coland_storage::RecoverySessionLifecycle::Verified,
+            None,
+            proof_at,
+        )
+        .unwrap();
+        assert!(
+            check(
+                &other,
+                coland_storage::RecoverySessionLifecycle::Verified,
+                None,
+                proof_at,
+            )
+            .is_err()
+        );
+        assert!(
+            check(
+                &owner,
+                coland_storage::RecoverySessionLifecycle::Pending,
+                None,
+                proof_at,
+            )
+            .is_err()
+        );
+        assert!(
+            check(
+                &owner,
+                coland_storage::RecoverySessionLifecycle::Verified,
+                Some("ak:security_transaction:consumed"),
+                proof_at,
+            )
+            .is_err()
+        );
+        assert!(
+            check(
+                &owner,
+                coland_storage::RecoverySessionLifecycle::Verified,
+                None,
+                "2026-09-27T00:05:00.001Z".parse().unwrap(),
+            )
+            .is_err()
+        );
+    }
 }

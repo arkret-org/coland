@@ -302,7 +302,7 @@ pub(crate) async fn agent_controller_account(
         .agent_pairings()
         .controller_account(&record.id)
         .await
-        .map_err(|error| crate::state::actor_private_refusal(error))?
+        .map_err(crate::state::actor_private_refusal)?
         .ok_or_else(|| {
             failed_precondition(
                 "Agent accepted controller Account binding is missing",

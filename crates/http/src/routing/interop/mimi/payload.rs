@@ -343,77 +343,6 @@ fn mimi_provider_directory_endpoints(
         .collect())
 }
 
-#[cfg(test)]
-mod directory_endpoint_tests {
-    #[test]
-    fn registered_root_relative_routes_preserve_the_service_mount_prefix() {
-        for (base, prefix) in [
-            ("https://station.example/", ""),
-            ("https://station.example/tenant/", "/tenant"),
-        ] {
-            let rows = super::mimi_provider_directory_endpoints(base, &Default::default()).unwrap();
-            assert_eq!(rows.len(), 6);
-            assert_eq!(
-                rows[0].relative_path,
-                format!("{prefix}/_arkret/open/mimi/consent/request")
-            );
-            assert_eq!(
-                rows[2].relative_path,
-                format!("{prefix}/_arkret/open/mimi/key-material")
-            );
-            for row in rows {
-                let url = url::Url::parse(base)
-                    .unwrap()
-                    .join(&row.relative_path)
-                    .unwrap();
-                assert_eq!(
-                    url.origin().ascii_serialization(),
-                    "https://station.example"
-                );
-                assert!(
-                    url.path()
-                        .starts_with(&format!("{prefix}/_arkret/open/mimi/"))
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn exact_public_asset_configuration_adds_only_the_registered_proxy_capability() {
-        let references = std::collections::BTreeSet::from([arkret_wire::BlobRef::from_bytes(
-            b"deployment-public native fixture",
-        )]);
-        for base in [
-            "https://station.example/",
-            "https://station.example/tenant/",
-        ] {
-            let empty =
-                super::mimi_provider_directory_endpoints(base, &Default::default()).unwrap();
-            let configured = super::mimi_provider_directory_endpoints(base, &references).unwrap();
-            assert_eq!(configured.len(), empty.len() + 1);
-            let added = configured
-                .iter()
-                .filter(|row| row.endpoint_id == "proxy_download")
-                .collect::<Vec<_>>();
-            assert_eq!(added.len(), 1);
-            assert_eq!(
-                added[0].relative_path,
-                format!(
-                    "{}/_arkret/open/mimi/proxy-download",
-                    url::Url::parse(base).unwrap().path().trim_end_matches('/')
-                )
-            );
-            assert_eq!(
-                configured
-                    .into_iter()
-                    .filter(|row| row.endpoint_id != "proxy_download")
-                    .collect::<Vec<_>>(),
-                empty
-            );
-        }
-    }
-}
-
 pub(super) fn mimi_base_url(state: &AppState) -> String {
     format!(
         "{}/_arkret/open/mimi",
@@ -728,5 +657,76 @@ pub(super) fn mimi_plaintext_detected(value: &Value) -> bool {
         }),
         Value::Array(values) => values.iter().any(mimi_plaintext_detected),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod directory_endpoint_tests {
+    #[test]
+    fn registered_root_relative_routes_preserve_the_service_mount_prefix() {
+        for (base, prefix) in [
+            ("https://station.example/", ""),
+            ("https://station.example/tenant/", "/tenant"),
+        ] {
+            let rows = super::mimi_provider_directory_endpoints(base, &Default::default()).unwrap();
+            assert_eq!(rows.len(), 6);
+            assert_eq!(
+                rows[0].relative_path,
+                format!("{prefix}/_arkret/open/mimi/consent/request")
+            );
+            assert_eq!(
+                rows[2].relative_path,
+                format!("{prefix}/_arkret/open/mimi/key-material")
+            );
+            for row in rows {
+                let url = url::Url::parse(base)
+                    .unwrap()
+                    .join(&row.relative_path)
+                    .unwrap();
+                assert_eq!(
+                    url.origin().ascii_serialization(),
+                    "https://station.example"
+                );
+                assert!(
+                    url.path()
+                        .starts_with(&format!("{prefix}/_arkret/open/mimi/"))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn exact_public_asset_configuration_adds_only_the_registered_proxy_capability() {
+        let references = std::collections::BTreeSet::from([arkret_wire::BlobRef::from_bytes(
+            b"deployment-public native fixture",
+        )]);
+        for base in [
+            "https://station.example/",
+            "https://station.example/tenant/",
+        ] {
+            let empty =
+                super::mimi_provider_directory_endpoints(base, &Default::default()).unwrap();
+            let configured = super::mimi_provider_directory_endpoints(base, &references).unwrap();
+            assert_eq!(configured.len(), empty.len() + 1);
+            let added = configured
+                .iter()
+                .filter(|row| row.endpoint_id == "proxy_download")
+                .collect::<Vec<_>>();
+            assert_eq!(added.len(), 1);
+            assert_eq!(
+                added[0].relative_path,
+                format!(
+                    "{}/_arkret/open/mimi/proxy-download",
+                    url::Url::parse(base).unwrap().path().trim_end_matches('/')
+                )
+            );
+            assert_eq!(
+                configured
+                    .into_iter()
+                    .filter(|row| row.endpoint_id != "proxy_download")
+                    .collect::<Vec<_>>(),
+                empty
+            );
+        }
     }
 }

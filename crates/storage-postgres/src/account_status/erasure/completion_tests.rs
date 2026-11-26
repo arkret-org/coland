@@ -455,7 +455,7 @@ async fn physical_completion_failure_rolls_back_then_cold_reopen_replays_origina
     assert_eq!(completed.package, replay.package);
     assert!(
         crate::pcr_private_authority::accepted_governance(
-            &mut *fixture.pool.get().await.unwrap(),
+            &mut fixture.pool.get().await.unwrap(),
             &fixture.controller.history.events[0].realm_id
         )
         .await

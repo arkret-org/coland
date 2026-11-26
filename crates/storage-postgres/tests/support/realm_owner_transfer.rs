@@ -41,6 +41,14 @@ pub fn now() -> DateTime<Utc> {
     arkret_canonical::normalize_timestamp_canonical(Utc::now())
 }
 
+#[derive(Clone)]
+struct StationSigner {
+    log_entry: Value,
+    method: DidUrl,
+    seed: [u8; 32],
+    did: Did,
+}
+
 pub struct NativeOwnerTransfer {
     pub pool: PgPool,
     pub store: PgAuthorityCommitStore,
@@ -51,10 +59,7 @@ pub struct NativeOwnerTransfer {
     pub component: RealmOwnerTransferAcceptance,
     pub w1: AccountDeviceSignerEvidence,
     accepted_predecessor: Box<AuthorityCommitTransaction>,
-    c_log_entry: Value,
-    c_method: DidUrl,
-    c_seed: [u8; 32],
-    c_did: Did,
+    station: StationSigner,
 }
 
 impl NativeOwnerTransfer {
@@ -97,9 +102,9 @@ impl NativeOwnerTransfer {
         witness(
             &self.pool,
             &self.component,
-            &self.c_log_entry,
-            &self.c_method,
-            &self.c_seed,
+            &self.station.log_entry,
+            &self.station.method,
+            &self.station.seed,
         )
         .await
     }
@@ -107,7 +112,11 @@ impl NativeOwnerTransfer {
         let discussion = ordinary_realm::case_future(|| {
             ordinary_realm::open_discussion_unit(
                 &self.pool,
-                ordinary_realm::bootstrap_unit_for_account(label, &self.successor, &self.c_did),
+                ordinary_realm::bootstrap_unit_for_account(
+                    label,
+                    &self.successor,
+                    &self.station.did,
+                ),
             )
         })
         .await;
@@ -129,11 +138,8 @@ impl NativeOwnerTransfer {
             head.clone(),
             author.clone(),
             successor.clone(),
-            &self.c_did,
             successor_fixture_label,
-            self.c_log_entry.clone(),
-            self.c_method.clone(),
-            self.c_seed,
+            self.station.clone(),
         )
         .await
     }
@@ -146,7 +152,7 @@ impl NativeOwnerTransfer {
         label: &str,
     ) -> (AccountId, AuthorityCommitTransaction) {
         let member = ordinary_realm::case_future(|| {
-            human_profile::admit_for_station_did(&self.pool, self.c_did.clone(), label)
+            human_profile::admit_for_station_did(&self.pool, self.station.did.clone(), label)
         })
         .await;
         account(&self.pool, &member).await;
@@ -254,11 +260,8 @@ async fn request(
     head: AuthorityCommitTransaction,
     author: AccountId,
     successor: AccountId,
-    c_did: &Did,
     successor_label: &str,
-    c_log_entry: Value,
-    c_method: DidUrl,
-    c_seed: [u8; 32],
+    station: StationSigner,
 ) -> NativeOwnerTransfer {
     let realm = head.event.realm_id.clone();
     let intent = RealmOwnerTransferAcceptanceIntent {
@@ -277,7 +280,7 @@ async fn request(
             },
         },
     };
-    let signer = human_profile::fixture_for_did(c_did.clone(), successor_label);
+    let signer = human_profile::fixture_for_did(station.did.clone(), successor_label);
     assert_eq!(signer.history.account, successor);
     let acceptance = sign_realm_owner_transfer_acceptance(
         &intent,
@@ -287,7 +290,14 @@ async fn request(
     )
     .unwrap();
     let component = RealmOwnerTransferAcceptance { intent, acceptance };
-    let w1 = witness(&pool, &component, &c_log_entry, &c_method, &c_seed).await;
+    let w1 = witness(
+        &pool,
+        &component,
+        &station.log_entry,
+        &station.method,
+        &station.seed,
+    )
+    .await;
     let mut payload =
         serde_json::to_value(&component.intent.payload_without_successor_acceptance).unwrap();
     payload["successor_acceptance"] = serde_json::to_value(&component.acceptance).unwrap();
@@ -314,10 +324,7 @@ async fn request(
         component,
         w1,
         accepted_predecessor: Box::new(head),
-        c_log_entry,
-        c_method,
-        c_seed,
-        c_did: c_did.clone(),
+        station,
     }
 }
 
@@ -365,11 +372,13 @@ pub async fn prepared(pool: &PgPool, label: &str) -> NativeOwnerTransfer {
         head,
         author,
         successor,
-        &did,
         &successor_label,
-        inception.log_entry.clone(),
-        DidUrl::new(inception.did_key_id.clone()).unwrap(),
-        inception.did_key_seed,
+        StationSigner {
+            did,
+            log_entry: inception.log_entry.clone(),
+            method: DidUrl::new(inception.did_key_id.clone()).unwrap(),
+            seed: inception.did_key_seed,
+        },
     )
     .await
 }

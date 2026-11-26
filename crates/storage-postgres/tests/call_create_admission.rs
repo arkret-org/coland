@@ -1,8 +1,6 @@
 //! Real PostgreSQL Call genesis and capability admission. These UoW fixtures
 //! are structural TCB inputs; HTTP tests separately prove producer signatures.
-#[path = "support/human_profile.rs"]
-#[allow(dead_code)]
-mod human_profile;
+use ordinary_realm::human_profile;
 #[path = "support/ordinary_realm.rs"]
 #[allow(dead_code)]
 mod ordinary_realm;

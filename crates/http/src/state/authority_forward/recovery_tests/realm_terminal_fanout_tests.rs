@@ -336,8 +336,20 @@ async fn send_replication(
             value.parse().unwrap(),
         );
     }
-    let mut headers =
-        crate::routing::federation::outbox::rfc9421_sign(source, headers, "POST", &url);
+    let (url, client) = crate::security::validate_http_url_for_egress_with_pinned_client(
+        &url,
+        "terminal replication test",
+        source.config().development_mode,
+        std::time::Duration::from_secs(20),
+    )
+    .unwrap();
+    let mut headers = crate::routing::federation::outbox::rfc9421_sign(
+        source,
+        headers,
+        "POST",
+        &url,
+        "/_arkret/peer/events",
+    );
     if corrupt_signature {
         let mut signature = headers["signature"].to_str().unwrap().as_bytes().to_vec();
         let index = signature.iter().position(|byte| *byte == b':').unwrap() + 1;
@@ -347,13 +359,6 @@ async fn send_replication(
             reqwest::header::HeaderValue::from_bytes(&signature).unwrap(),
         );
     }
-    let (url, client) = crate::security::validate_http_url_for_egress_with_pinned_client(
-        &url,
-        "terminal replication test",
-        source.config().development_mode,
-        std::time::Duration::from_secs(20),
-    )
-    .unwrap();
     let response = client
         .post(url)
         .headers(headers)

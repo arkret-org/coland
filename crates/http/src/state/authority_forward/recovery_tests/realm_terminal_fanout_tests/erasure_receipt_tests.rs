@@ -82,7 +82,6 @@ async fn signed_request(
             value.parse().unwrap(),
         );
     }
-    let headers = outbox::rfc9421_sign(source, headers, method, &url);
     let (url, client) = crate::security::validate_http_url_for_egress_with_pinned_client(
         &url,
         "receipt rail test",
@@ -90,6 +89,7 @@ async fn signed_request(
         std::time::Duration::from_secs(20),
     )
     .unwrap();
+    let headers = outbox::rfc9421_sign(source, headers, method, &url, path);
     let response = client
         .request(reqwest::Method::from_bytes(method.as_bytes()).unwrap(), url)
         .headers(headers)

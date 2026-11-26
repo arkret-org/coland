@@ -723,10 +723,10 @@ pub(crate) async fn proxy_peer_keys_query(
     )
     .await
     .map_err(|_| AppError::not_found("peer device directory is unavailable"))?;
-    let target = format!(
-        "{}/_arkret/peer/keys/query",
-        route.base_url.trim_end_matches('/')
-    );
+    let path = arkret_wire::ServiceOperationId::PeerKeysReadLookupV1
+        .descriptor()
+        .http_path;
+    let target = format!("{}{path}", route.base_url.trim_end_matches('/'));
     let body = arkret_canonical::canonical_json_bytes(request)
         .map_err(|error| AppError::internal(format!("canonical peer keys request: {error}")))?;
     let (url, client) = crate::security::validate_http_url_for_egress_with_pinned_client(
@@ -753,14 +753,11 @@ pub(crate) async fn proxy_peer_keys_query(
             state.config().trust_domain.to_string(),
         ),
         ("destination-trust-domain", route.trust_domain),
-        (
-            "arkret-operation",
-            arkret_wire::ServiceOperationId::PEER_KEYS_READ_LOOKUP_V1.to_owned(),
-        ),
     ] {
         crate::routing::federation::outbox::insert_header_if_valid(&mut headers, name, &value);
     }
-    let headers = crate::routing::federation::outbox::rfc9421_sign(state, headers, "POST", &target);
+    let headers =
+        crate::routing::federation::outbox::rfc9421_sign(state, headers, "POST", &url, path);
     let mut response = client
         .post(url)
         .headers(headers)

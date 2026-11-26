@@ -1439,8 +1439,8 @@ pub(crate) async fn pending_signals_for_subscriber(
             }
             delivered.push(record.envelope);
         }
-        if highest > watermark {
-            if let Err(error) = state
+        if highest > watermark
+            && let Err(error) = state
                 .deliveries()
                 .advance_signal_watermark(
                     account_id,
@@ -1449,9 +1449,8 @@ pub(crate) async fn pending_signals_for_subscriber(
                     highest,
                 )
                 .await
-            {
-                tracing::warn!(%error,"Signal subscriber watermark is unavailable");
-            }
+        {
+            tracing::warn!(%error,"Signal subscriber watermark is unavailable");
         }
     }
     delivered

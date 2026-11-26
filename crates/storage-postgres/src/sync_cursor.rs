@@ -483,123 +483,6 @@ impl From<CursorRevocationRow> for CursorRevocation {
     }
 }
 
-#[cfg(test)]
-mod account_summary_query_tests {
-    use diesel_async::SimpleAsyncConnection;
-
-    use super::*;
-
-    /// An immutable cursor cannot be rewritten through another store instance.
-    #[tokio::test]
-    async fn cursor_issuance_remains_immutable_across_store_restart() {
-        let database = crate::test_database::TestDatabase::lease().await;
-        let store = PgSyncCursorStore {
-            pool: database.pool(),
-        };
-        let station_id = "ak:did_core:web:origin.example".parse().unwrap();
-        let observed_at = Utc::now();
-        let restarted = PgSyncCursorStore {
-            pool: database.pool(),
-        };
-        let mut cursor = SyncCursorRecord {
-            handle: "immutable-cursor-test".into(),
-            binding_subject: None,
-            device_id: None,
-            session_id: None,
-            service_id: station_id,
-            filter_digest: None,
-            purpose: "stream".into(),
-            positions: Some(serde_json::json!({"page": 0})),
-            target: None,
-            issued_at_ms: observed_at.timestamp_millis(),
-            expires_at_ms: (observed_at + chrono::Duration::seconds(300)).timestamp_millis(),
-        };
-        store.upsert(&cursor).await.unwrap();
-        cursor.positions = Some(serde_json::json!({"page": 1}));
-        assert!(restarted.upsert(&cursor).await.is_err());
-        assert_eq!(
-            restarted
-                .get(&cursor.handle)
-                .await
-                .unwrap()
-                .unwrap()
-                .positions,
-            Some(serde_json::json!({"page": 0}))
-        );
-    }
-
-    #[tokio::test]
-    async fn frozen_pages_keep_scan_keys_and_recheck_current_permission() {
-        let database = crate::test_database::TestDatabase::lease().await;
-        let pool = database.pool();
-        let mut conn = pg_conn(&pool).await.unwrap();
-        let actor = arkret_wire::ActorId::account(arkret_wire::AccountId::new(
-            "ak:did_core:web:exact.example".parse().unwrap(),
-            "ak:did_core:web:station.example".parse().unwrap(),
-        ))
-        .canonical_key()
-        .unwrap();
-        let other = arkret_wire::ActorId::account(arkret_wire::AccountId::new(
-            "ak:did_core:web:other.example".parse().unwrap(),
-            "ak:did_core:web:station.example".parse().unwrap(),
-        ))
-        .canonical_key()
-        .unwrap();
-        let fixture = "INSERT INTO account_summary_current
-            (actor_key, realm_id, revision, membership, title, available) VALUES
-            ('exact-account', 'a', 4, 'knock', NULL, TRUE),
-            ('exact-account', 'b', 5, NULL, NULL, TRUE),
-            ('other-account', 'secret', 6, 'join', 'secret', TRUE);
-            INSERT INTO account_summary_versions
-            (actor_key, realm_id, revision, activity_position, valid_until, membership, title, invalidated) VALUES
-            ('exact-account', 'a', 1, 1, 4, 'join', 'old private title', FALSE),
-            ('exact-account', 'b', 2, 2, 5, 'join', 'revoked title', FALSE),
-            ('exact-account', 'a', 4, 4, NULL, 'knock', NULL, TRUE),
-            ('exact-account', 'b', 5, 5, NULL, NULL, NULL, TRUE),
-            ('other-account', 'secret', 6, 6, NULL, 'join', 'secret', FALSE);"
-            .replace("exact-account", &actor).replace("other-account", &other);
-        conn.batch_execute(&fixture).await.unwrap();
-        drop(conn);
-        let store = PgSyncCursorStore { pool };
-        let first = store
-            .account_summary_page(&actor, 2, None, 2)
-            .await
-            .unwrap();
-        assert_eq!(
-            first.iter().map(|row| row.key.revision).collect::<Vec<_>>(),
-            vec![5, 4]
-        );
-        let second = store
-            .account_summary_page(&actor, 2, Some(&first[1].key), 2)
-            .await
-            .unwrap();
-        assert_eq!(
-            second
-                .iter()
-                .map(|row| row.key.revision)
-                .collect::<Vec<_>>(),
-            vec![2, 1]
-        );
-        assert!(second[0].current_membership.is_none());
-        assert_eq!(second[1].current_membership.as_deref(), Some("knock"));
-        assert_eq!(second[1].membership.as_deref(), Some("join"));
-        let tail = store
-            .account_summary_page(&actor, 2, Some(&second[1].key), 2)
-            .await
-            .unwrap();
-        assert!(tail.is_empty());
-        let changes = store.account_summary_changes(&actor, 2, 1).await.unwrap();
-        assert_eq!(changes.len(), 1);
-        assert_eq!(changes[0].key.revision, 4);
-        assert_eq!(
-            store.account_summary_changes(&actor, 4, 1).await.unwrap()[0]
-                .key
-                .revision,
-            5
-        );
-    }
-}
-
 async fn lock_cursor_owner(
     conn: &mut super::AsyncPgConnection,
     record: &SyncCursorRecord,
@@ -740,4 +623,121 @@ pub(crate) async fn get_in_connection(
         .optional()
         .map(|row| row.map(SyncCursorRecord::from))
         .map_err(PersistenceError::database)
+}
+
+#[cfg(test)]
+mod account_summary_query_tests {
+    use diesel_async::SimpleAsyncConnection;
+
+    use super::*;
+
+    /// An immutable cursor cannot be rewritten through another store instance.
+    #[tokio::test]
+    async fn cursor_issuance_remains_immutable_across_store_restart() {
+        let database = crate::test_database::TestDatabase::lease().await;
+        let store = PgSyncCursorStore {
+            pool: database.pool(),
+        };
+        let station_id = "ak:did_core:web:origin.example".parse().unwrap();
+        let observed_at = Utc::now();
+        let restarted = PgSyncCursorStore {
+            pool: database.pool(),
+        };
+        let mut cursor = SyncCursorRecord {
+            handle: "immutable-cursor-test".into(),
+            binding_subject: None,
+            device_id: None,
+            session_id: None,
+            service_id: station_id,
+            filter_digest: None,
+            purpose: "stream".into(),
+            positions: Some(serde_json::json!({"page": 0})),
+            target: None,
+            issued_at_ms: observed_at.timestamp_millis(),
+            expires_at_ms: (observed_at + chrono::Duration::seconds(300)).timestamp_millis(),
+        };
+        store.upsert(&cursor).await.unwrap();
+        cursor.positions = Some(serde_json::json!({"page": 1}));
+        assert!(restarted.upsert(&cursor).await.is_err());
+        assert_eq!(
+            restarted
+                .get(&cursor.handle)
+                .await
+                .unwrap()
+                .unwrap()
+                .positions,
+            Some(serde_json::json!({"page": 0}))
+        );
+    }
+
+    #[tokio::test]
+    async fn frozen_pages_keep_scan_keys_and_recheck_current_permission() {
+        let database = crate::test_database::TestDatabase::lease().await;
+        let pool = database.pool();
+        let mut conn = pg_conn(&pool).await.unwrap();
+        let actor = arkret_wire::ActorId::account(arkret_wire::AccountId::new(
+            "ak:did_core:web:exact.example".parse().unwrap(),
+            "ak:did_core:web:station.example".parse().unwrap(),
+        ))
+        .canonical_key()
+        .unwrap();
+        let other = arkret_wire::ActorId::account(arkret_wire::AccountId::new(
+            "ak:did_core:web:other.example".parse().unwrap(),
+            "ak:did_core:web:station.example".parse().unwrap(),
+        ))
+        .canonical_key()
+        .unwrap();
+        let fixture = "INSERT INTO account_summary_current
+            (actor_key, realm_id, revision, membership, title, available) VALUES
+            ('exact-account', 'a', 4, 'knock', NULL, TRUE),
+            ('exact-account', 'b', 5, NULL, NULL, TRUE),
+            ('other-account', 'secret', 6, 'join', 'secret', TRUE);
+            INSERT INTO account_summary_versions
+            (actor_key, realm_id, revision, activity_position, valid_until, membership, title, invalidated) VALUES
+            ('exact-account', 'a', 1, 1, 4, 'join', 'old private title', FALSE),
+            ('exact-account', 'b', 2, 2, 5, 'join', 'revoked title', FALSE),
+            ('exact-account', 'a', 4, 4, NULL, 'knock', NULL, TRUE),
+            ('exact-account', 'b', 5, 5, NULL, NULL, NULL, TRUE),
+            ('other-account', 'secret', 6, 6, NULL, 'join', 'secret', FALSE);"
+            .replace("exact-account", &actor).replace("other-account", &other);
+        conn.batch_execute(&fixture).await.unwrap();
+        drop(conn);
+        let store = PgSyncCursorStore { pool };
+        let first = store
+            .account_summary_page(&actor, 2, None, 2)
+            .await
+            .unwrap();
+        assert_eq!(
+            first.iter().map(|row| row.key.revision).collect::<Vec<_>>(),
+            vec![5, 4]
+        );
+        let second = store
+            .account_summary_page(&actor, 2, Some(&first[1].key), 2)
+            .await
+            .unwrap();
+        assert_eq!(
+            second
+                .iter()
+                .map(|row| row.key.revision)
+                .collect::<Vec<_>>(),
+            vec![2, 1]
+        );
+        assert!(second[0].current_membership.is_none());
+        assert_eq!(second[1].current_membership.as_deref(), Some("knock"));
+        assert_eq!(second[1].membership.as_deref(), Some("join"));
+        let tail = store
+            .account_summary_page(&actor, 2, Some(&second[1].key), 2)
+            .await
+            .unwrap();
+        assert!(tail.is_empty());
+        let changes = store.account_summary_changes(&actor, 2, 1).await.unwrap();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].key.revision, 4);
+        assert_eq!(
+            store.account_summary_changes(&actor, 4, 1).await.unwrap()[0]
+                .key
+                .revision,
+            5
+        );
+    }
 }

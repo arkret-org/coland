@@ -232,7 +232,7 @@ async fn signed_root_index_keeps_exact_items_and_refuses_wrong_root_or_deleted_b
     assert!(
         crate::content_root_packages::require_original_binding(
             &mut conn,
-            &[packet.backup_id.clone()],
+            std::slice::from_ref(&packet.backup_id),
             &packet.actor_id,
             &Hash::new(arkret_canonical::sha256_digest(b"wrong-root")).unwrap(),
             context
@@ -354,7 +354,7 @@ async fn signed_root_index_keeps_exact_items_and_refuses_wrong_root_or_deleted_b
     );
     crate::content_root_packages::require_original_binding(
         &mut conn,
-        &[packet.backup_id.clone()],
+        std::slice::from_ref(&packet.backup_id),
         &packet.actor_id,
         &original.roots[0].0,
         &original.roots[0].1,

@@ -2798,7 +2798,7 @@ async fn commit_prepared_event_authority(
         .await?;
 
     let scope_profile = if crate::applet_scope_profiles::is_profile(event) {
-        let Some(source) = managed_device_source(&request) else {
+        let Some(source) = managed_device_source(request) else {
             return Err(PersistenceError::Conflict(
                 "actor_profile_or_accountability_unit_required".into(),
             )
@@ -2905,7 +2905,7 @@ async fn commit_prepared_event_authority(
     })
     .await?;
 
-    crate::boxed_future(|| prepare_parent_membership_transaction(conn, &request)).await?;
+    crate::boxed_future(|| prepare_parent_membership_transaction(conn, request)).await?;
     crate::boxed_future(|| {
         crate::sidecar_current_states::admit_in_connection(
             conn,
@@ -3227,7 +3227,7 @@ async fn commit_prepared_event_effects(
         crate::boxed_future(|| {
             commit_event_current_states_in_connection(
                 conn,
-                &request,
+                request,
                 realm_organization_proof,
                 event_approvals,
                 audit_unit,
@@ -4174,7 +4174,7 @@ mod agent_draft_consumption_tests {
     ) -> Result<coland_storage::ActorPrivateAccountDataOutcome, PersistenceError> {
         let admission = coland_storage::ActorPrivateAccountDataAdmission {
             canonical_event_digest: arkret_canonical::sha256_bytes(
-                &arkret_canonical::canonical_json_bytes(&event).unwrap(),
+                arkret_canonical::canonical_json_bytes(&event).unwrap(),
             )
             .to_vec(),
             accepted_at: event.created_at,

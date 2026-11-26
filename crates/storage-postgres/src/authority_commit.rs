@@ -5478,14 +5478,12 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
                     "temporarily_unavailable: accepted forward requires original result recovery".into()))?;
                 return Ok(Box::new(decode_json(body,"accepted frozen peer request")?));
             }
-            if event.kind==arkret_wire::EventKind::MessageCreate && event.executed_by.is_none() {
-                if let P::AuthorityForwardEvent(forward)=request {
-                    if let Some(evidence)=&forward.producer_agent_evidence {
+            if event.kind==arkret_wire::EventKind::MessageCreate && event.executed_by.is_none()
+                && let P::AuthorityForwardEvent(forward)=request
+                    && let Some(evidence)=&forward.producer_agent_evidence {
                         let session=agent_session.ok_or_else(||invalid("originating Agent session missing"))?;
                         crate::agent_session_authority::require_forwarded_message_source(conn,event,evidence,session,chrono::Utc::now()).await?;
                     }
-                }
-            }
             // The same unaccepted business Event may refresh only registered
             // dynamic evidence even after a timeout left status=forwarding.
             sql_query("UPDATE authority_forward_attempts SET peer_request_json=$2,status='forwarding',reason_code=NULL,attempted_at=$3 WHERE event_pk=(SELECT pk FROM canonical_events WHERE id=$1) AND terminal_outcome_json IS NULL")

@@ -3,9 +3,7 @@ mod accepted_pcr_account;
 #[path = "../../../test-support/src/device_authorization_history.rs"]
 #[allow(dead_code)]
 mod device_authorization_history;
-#[path = "../support/human_profile.rs"]
-#[allow(dead_code)]
-mod human_profile;
+use ordinary_realm::human_profile;
 #[path = "../support/hydration.rs"]
 mod hydration;
 mod ordinary_bootstrap_fault_cases;

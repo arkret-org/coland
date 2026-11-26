@@ -130,9 +130,7 @@ pub(crate) async fn install_in_connection(
 }
 
 #[cfg(test)]
-#[path = "../tests/support/ordinary_realm.rs"]
-#[allow(dead_code)]
-mod recovery_fixture;
+use crate::historical_human::ordinary_realm as recovery_fixture;
 
 #[cfg(test)]
 mod tests {

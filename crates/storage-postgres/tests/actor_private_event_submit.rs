@@ -60,7 +60,7 @@ fn signed(kind: EventKind, actor: &AccountId, payload: serde_json::Value, offset
 }
 
 fn digest(event: &Event) -> Vec<u8> {
-    arkret_canonical::sha256_bytes(&arkret_canonical::canonical_json_bytes(event).unwrap()).to_vec()
+    arkret_canonical::sha256_bytes(arkret_canonical::canonical_json_bytes(event).unwrap()).to_vec()
 }
 
 fn submission(
@@ -415,7 +415,7 @@ async fn action_request_and_rejection_are_create_once_and_the_target_state_is_te
     // An expired request is refused before any write.
     let expired = action_request("request-2", 1, 4);
     let mut expired = expired;
-    expired.accepted_at = expired.accepted_at + chrono::Duration::seconds(1);
+    expired.accepted_at += chrono::Duration::seconds(1);
     assert!(matches!(
         refused(store.submit(&expired).await.unwrap()),
         ActorPrivateEventRefusal::FailedPrecondition(_)
@@ -483,7 +483,7 @@ async fn draft_proposal_creates_one_available_pending_intent_without_a_realm_com
         ActorPrivateEventRefusal::DuplicateConflict(_)
     ));
     let mut expired = draft_propose("draft-2", 1, 3);
-    expired.accepted_at = expired.accepted_at + chrono::Duration::seconds(1);
+    expired.accepted_at += chrono::Duration::seconds(1);
     assert!(matches!(
         refused(store.submit(&expired).await.unwrap()),
         ActorPrivateEventRefusal::FailedPrecondition(_)

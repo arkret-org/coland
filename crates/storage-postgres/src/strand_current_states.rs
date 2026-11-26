@@ -7,9 +7,7 @@ use horme::{OptionalExtension as _, RunQueryDsl};
 use serde_json::Value;
 
 #[cfg(test)]
-#[path = "../tests/support/ordinary_realm.rs"]
-#[allow(dead_code)]
-mod signed_scope_test_realm;
+use crate::historical_human::ordinary_realm as signed_scope_test_realm;
 
 #[derive(diesel::QueryableByName)]
 struct StrandCurrentRow {

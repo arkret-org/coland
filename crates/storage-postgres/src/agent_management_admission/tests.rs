@@ -20,7 +20,7 @@ fn publish_uses_exact_controller_exceptions_and_is_independent_of_serve() {
     let restriction = policy(None, vec!["publish"], "deny");
     assert!(
         publish(
-            &[restriction.clone()],
+            std::slice::from_ref(&restriction),
             &account("controller"),
             &account("agent")
         )
@@ -745,7 +745,7 @@ fn serve_restricts_public_action_paths_and_preserves_private_sidecar_execution()
     let actions = ["ak.message.create", "ak.reaction.add", "ak.realm.owner"];
     assert_eq!(
         check_signed_execution(
-            &[restriction.clone()],
+            std::slice::from_ref(&restriction),
             &actions,
             &target,
             &OperationFacts::default(),
@@ -1007,7 +1007,7 @@ fn authorization_exact_selectors_and_every_action_preserve_priority_intersection
         run(
             &[restriction.clone()],
             &["ak.message.create".into()],
-            &[other.clone()]
+            std::slice::from_ref(&other)
         )
         .is_ok()
     );
@@ -1015,7 +1015,7 @@ fn authorization_exact_selectors_and_every_action_preserve_priority_intersection
         run(
             &[restriction.clone()],
             &["ak.reaction.add".into()],
-            &[exact.clone()]
+            std::slice::from_ref(&exact)
         )
         .is_ok()
     );

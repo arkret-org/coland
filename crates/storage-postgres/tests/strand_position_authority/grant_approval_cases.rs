@@ -323,14 +323,14 @@ async fn message_create_approval_transaction(pool: PgPool, setup: Box<GrantSetup
 }
 
 async fn prepare_grant_setup(pool: &PgPool) -> GrantSetup {
-    let opened = Box::pin(open_discussion(&pool, "grant-approval-roster")).await;
+    let opened = Box::pin(open_discussion(pool, "grant-approval-roster")).await;
     let uow = PgEventCommitUnitOfWork::new(pool.clone());
     let mut head = opened.head.authority_commit.clone();
     let realm = head.event.realm_id.clone();
     let actor = head.event.actor_id.clone();
     let at = head.commit.committed_at;
     let board = Box::pin(ordinary_realm::source_request(
-        &pool,
+        pool,
         next_request(
             &head,
             arkret_wire::EventKind::SpaceCreate,
@@ -344,7 +344,7 @@ async fn prepare_grant_setup(pool: &PgPool) -> GrantSetup {
     uow.commit_event(board.clone()).await.unwrap();
     head = board.authority_commit;
     let list = Box::pin(ordinary_realm::source_request(
-        &pool,
+        pool,
         next_request(
             &head,
             arkret_wire::EventKind::SpaceCreate,
@@ -369,7 +369,7 @@ async fn prepare_grant_setup(pool: &PgPool) -> GrantSetup {
     let mut roster = Vec::new();
     for seed in [81, 82] {
         Box::pin(ordinary_realm::human_profile::admit(
-            &pool,
+            pool,
             &ordinary_realm::station(),
             &approval_account_label(seed),
         ))
@@ -381,7 +381,7 @@ async fn prepare_grant_setup(pool: &PgPool) -> GrantSetup {
             .bind::<Text,_>(realm.as_str()).bind::<Text,_>(approver.to_string()).bind::<Text,_>(head.commit.commit_id.as_str())
             .bind::<BigInt,_>(head.commit.stream_position as i64).bind::<diesel::sql_types::Timestamptz,_>(at).execute(&mut conn).await.unwrap();
         drop(conn);
-        let grant = Box::pin(ordinary_realm::source_request(&pool, next_request(
+        let grant = Box::pin(ordinary_realm::source_request(pool, next_request(
             &head,
             arkret_wire::EventKind::CapabilityGrant,
             &founder(),
@@ -394,7 +394,7 @@ async fn prepare_grant_setup(pool: &PgPool) -> GrantSetup {
         uow.commit_event(grant.clone()).await.unwrap();
         head = grant.authority_commit;
     }
-    let requirement = Box::pin(ordinary_realm::source_request(&pool, next_request(
+    let requirement = Box::pin(ordinary_realm::source_request(pool, next_request(
         &head,
         arkret_wire::EventKind::CapabilityGrant,
         &founder(),
@@ -419,7 +419,7 @@ async fn prepare_grant_setup(pool: &PgPool) -> GrantSetup {
         ("destination_review", true, 1, list_id.to_string()),
     ] {
         let config = Box::pin(ordinary_realm::source_request(
-            &pool,
+            pool,
             next_request(
                 &head,
                 arkret_wire::EventKind::PolicyAction,
@@ -435,7 +435,7 @@ async fn prepare_grant_setup(pool: &PgPool) -> GrantSetup {
         head = config.authority_commit;
     }
     let command_at = at + chrono::TimeDelta::seconds(120);
-    let command = Box::pin(ordinary_realm::source_request(&pool, next_request(
+    let command = Box::pin(ordinary_realm::source_request(pool, next_request(
         &head,
         arkret_wire::EventKind::StrandMove,
         &founder(),
@@ -511,7 +511,7 @@ async fn grant_approval_roster_transaction(pool: PgPool, setup: Box<GrantSetup>)
     // These signatures are inside the timeout but precede respectively issued_at
     // and the temporal not_before. Neither failure consumes their nonces.
     let early = Box::pin(ordinary_realm::source_request(&pool, next_request(
-        &head,
+        head,
         arkret_wire::EventKind::StrandMove,
         &founder(),
         json!({"board_space_id":board_id,"strand_id":opened.strand_id,"target_space_id":list_id,"rank":"a"}),

@@ -1,12 +1,9 @@
 //! Actual projection persistence must preserve idempotency across PG precision.
 
-#[path = "../../tests/support/ordinary_realm.rs"]
-#[allow(dead_code)]
-mod ordinary_realm;
-
 use coland_storage::{ProjectionEventAppendOutcome, ProjectionEventRecord, ProjectionEventStore};
 
 use super::PgProjectionEventStore;
+use crate::historical_human::ordinary_realm;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hydration_does_not_overwrite_a_concurrent_realm_projection() {

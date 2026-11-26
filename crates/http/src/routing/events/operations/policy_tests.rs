@@ -1533,9 +1533,13 @@ async fn act_on_behalf_agent_selection_and_grant_do_not_replace_accepted_current
     insert_approved_agent_action(&state, &message);
 
     assert_eq!(
-        validate_agent_reply_participation(&state, &[message.clone()], covering_committed_at())
-            .await
-            .unwrap_err(),
+        validate_agent_reply_participation(
+            &state,
+            std::slice::from_ref(&message),
+            covering_committed_at()
+        )
+        .await
+        .unwrap_err(),
         "agent_act_on_behalf_not_permitted"
     );
     assert_eq!(

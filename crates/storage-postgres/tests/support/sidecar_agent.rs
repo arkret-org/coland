@@ -227,9 +227,7 @@ pub(super) fn agent_provision_event(
 }
 
 pub(super) fn agent_control_event(
-    controller_method: &DidUrl,
-    signing_seed: [u8; 32],
-    controller: &AccountId,
+    controller: &device_authorization_history::DeviceHistoryFixture,
     agent: &AccountId,
     agent_pcr: &RealmId,
     authorization_ref: &str,
@@ -246,10 +244,14 @@ pub(super) fn agent_control_event(
         at,
     )
     .unwrap();
-    event.executed_by = Some(ActorId::account(controller.clone()));
+    event.executed_by = Some(ActorId::account(controller.account.clone()));
     event.authorization_ref =
         Some(arkret_wire::AuthorizationRef::new(authorization_ref.to_owned()).unwrap());
-    device_authorization_history::sign_event(event, controller_method.clone(), signing_seed)
+    device_authorization_history::sign_event(
+        event,
+        controller.device_verification_method.clone(),
+        controller.founding_device_signing_seed,
+    )
 }
 
 pub(super) fn agent_key_authorization(

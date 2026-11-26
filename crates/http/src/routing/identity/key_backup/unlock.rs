@@ -507,6 +507,41 @@ pub(super) fn history_unlock_error(error: coland_services::ServiceError) -> AppE
     }
 }
 
+/// The confirmed pointer a current-device unlock is authorized against: the
+/// released envelope must belong to the active `secret_storage` series and
+/// must not have expired. The consuming transaction rereads this pointer at
+/// its own PCR cut.
+pub(super) async fn unlock_active_basis(
+    state: &AppState,
+    account: &arkret_wire::AccountId,
+    backup: &Value,
+) -> Result<coland_storage::KeyBackupPointerBasis, AppError> {
+    use arkret_models_crypto::BackupActiveSeriesPointer;
+    let pointers = super::listing::active_pointers(state, account).await?;
+    let typed: KeyBackup = serde_json::from_value(backup.clone())
+        .map_err(|error| AppError::internal(error.to_string()))?;
+    let pointer = &pointers.secret_storage;
+    if !matches!(pointer,BackupActiveSeriesPointer::Active{active_series_id,..} if active_series_id==&typed.series_id)
+        || typed
+            .expires_at
+            .flatten()
+            .is_some_and(|expires_at| expires_at <= Utc::now())
+    {
+        return Err(backup_revision_stale(
+            "the envelope is not in the active series or has expired",
+        ));
+    }
+    Ok(coland_storage::KeyBackupPointerBasis {
+        account_id: pointers.account_id,
+        secret_storage: pointers.secret_storage,
+    })
+}
+
+pub(super) fn backup_revision_stale(detail: &str) -> AppError {
+    crate::app_error!(FailedPrecondition, detail)
+        .with_reason_code(arkret_wire::ReasonCode::BACKUP_REVISION_STALE)
+}
+
 #[cfg(test)]
 mod tests {
     use ed25519_dalek::{Signer as _, SigningKey, Verifier as _};
@@ -613,39 +648,4 @@ mod tests {
             &format!("{did}#other")
         ));
     }
-}
-
-/// The confirmed pointer a current-device unlock is authorized against: the
-/// released envelope must belong to the active `secret_storage` series and
-/// must not have expired. The consuming transaction rereads this pointer at
-/// its own PCR cut.
-pub(super) async fn unlock_active_basis(
-    state: &AppState,
-    account: &arkret_wire::AccountId,
-    backup: &Value,
-) -> Result<coland_storage::KeyBackupPointerBasis, AppError> {
-    use arkret_models_crypto::BackupActiveSeriesPointer;
-    let pointers = super::listing::active_pointers(state, account).await?;
-    let typed: KeyBackup = serde_json::from_value(backup.clone())
-        .map_err(|error| AppError::internal(error.to_string()))?;
-    let pointer = &pointers.secret_storage;
-    if !matches!(pointer,BackupActiveSeriesPointer::Active{active_series_id,..} if active_series_id==&typed.series_id)
-        || typed
-            .expires_at
-            .flatten()
-            .is_some_and(|expires_at| expires_at <= Utc::now())
-    {
-        return Err(backup_revision_stale(
-            "the envelope is not in the active series or has expired",
-        ));
-    }
-    Ok(coland_storage::KeyBackupPointerBasis {
-        account_id: pointers.account_id,
-        secret_storage: pointers.secret_storage,
-    })
-}
-
-pub(super) fn backup_revision_stale(detail: &str) -> AppError {
-    crate::app_error!(FailedPrecondition, detail)
-        .with_reason_code(arkret_wire::ReasonCode::BACKUP_REVISION_STALE)
 }

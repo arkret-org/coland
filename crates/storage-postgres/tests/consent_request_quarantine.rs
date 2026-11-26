@@ -60,16 +60,17 @@ fn input(
     requester: &AccountId,
     scope: ConsentRequestScope,
 ) -> ConsentRequestQuarantineInput {
-    let mut quota_constraints = NewSourceQuotaConstraints::default();
-    quota_constraints.default_source_count_per_window = Some(1);
-    quota_constraints.max_source_count_per_window = Some(1);
     ConsentRequestQuarantineInput {
         holder: holder.clone(),
         acceptor_service_id: holder.station_id.clone(),
         requester: requester.clone(),
         consent_scope: scope,
         received_at: Utc::now(),
-        quota_constraints,
+        quota_constraints: NewSourceQuotaConstraints {
+            default_source_count_per_window: Some(1),
+            max_source_count_per_window: Some(1),
+            ..Default::default()
+        },
     }
 }
 

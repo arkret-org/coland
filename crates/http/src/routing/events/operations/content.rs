@@ -130,12 +130,9 @@ pub fn validate_canonical_json_value_inner(
             for (key, value) in object {
                 if key.ends_with("_at")
                     && let Some(s) = value.as_str()
+                    && arkret_canonical::validate_timestamp_canonical(s).is_err()
                 {
-                    if arkret_canonical::validate_timestamp_canonical(s).is_err() {
-                        return Err(
-                            "timestamp must use canonical RFC 3339 UTC fixed-millisecond form",
-                        );
-                    }
+                    return Err("timestamp must use canonical RFC 3339 UTC fixed-millisecond form");
                 }
             }
         }

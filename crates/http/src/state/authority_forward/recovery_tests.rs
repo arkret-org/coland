@@ -4,14 +4,11 @@
 //! Box the admission/recovery phases separately so signed multi-Station
 //! regression futures fit the ordinary test-thread stack in debug builds.
 mod circle_current_coverage_tests;
-#[path = "../../../../storage-postgres/tests/support/historical_human.rs"]
-mod historical_human;
+use crate::historical_human;
 mod mls_original_outcome_tests;
 mod realm_terminal_fanout_tests;
 mod realm_terminal_peer_tests;
-#[path = "../../../../storage-postgres/tests/support/sql_fault_matrix.rs"]
-#[allow(dead_code)]
-mod sql_fault_matrix;
+use crate::sql_fault_matrix;
 mod test_material_evidence_tests;
 
 use std::io::{Read, Write};
@@ -1533,7 +1530,7 @@ fn seal_service_commit(commit: &mut arkret_wire::RealmCommit, governor: &AppStat
     let body =
         arkret_canonical::canonical::unsigned_value(commit, &["commit_id", "signature"]).unwrap();
     commit.commit_id = arkret_wire::RealmCommitId::from_digest(arkret_canonical::sha256_bytes(
-        &arkret_canonical::canonical_json_bytes(&body).unwrap(),
+        arkret_canonical::canonical_json_bytes(&body).unwrap(),
     ));
     commit.signature = arkret_signatures::detached_object::sign_detached_object(
         &arkret_canonical::canonical::unsigned_value(commit, &["signature"]).unwrap(),

@@ -85,13 +85,13 @@ struct WipSetup {
 }
 
 async fn prepare_wip_setup(pool: &PgPool) -> WipSetup {
-    let opened = Box::pin(open_discussion(&pool, "list-wip-approval")).await;
+    let opened = Box::pin(open_discussion(pool, "list-wip-approval")).await;
     let uow = PgEventCommitUnitOfWork::new(pool.clone());
     let realm = opened.head.authority_commit.event.realm_id.clone();
     let actor = opened.head.authority_commit.event.actor_id.clone();
     let at = opened.head.authority_commit.commit.committed_at;
     let board = Box::pin(ordinary_realm::source_request(
-        &pool,
+        pool,
         next_request(
             &opened.head.authority_commit,
             arkret_wire::EventKind::SpaceCreate,
@@ -104,7 +104,7 @@ async fn prepare_wip_setup(pool: &PgPool) -> WipSetup {
     let board_id = arkret_wire::SpaceId::from_event_id(&board.authority_commit.event.event_id);
     uow.commit_event(board.clone()).await.unwrap();
     let list = Box::pin(ordinary_realm::source_request(
-        &pool,
+        pool,
         next_request(
             &board.authority_commit,
             arkret_wire::EventKind::SpaceCreate,
@@ -124,7 +124,7 @@ async fn prepare_wip_setup(pool: &PgPool) -> WipSetup {
     .await;
     let list_id = arkret_wire::SpaceId::from_event_id(&list.authority_commit.event.event_id);
     uow.commit_event(list.clone()).await.unwrap();
-    let second = Box::pin(ordinary_realm::source_request(&pool, next_request(
+    let second = Box::pin(ordinary_realm::source_request(pool, next_request(
         &list.authority_commit,
         arkret_wire::EventKind::StrandCreate,
         &founder(),
@@ -133,7 +133,7 @@ async fn prepare_wip_setup(pool: &PgPool) -> WipSetup {
     ))).await;
     let second_id = arkret_wire::StrandId::from_event_id(&second.authority_commit.event.event_id);
     uow.commit_event(second.clone()).await.unwrap();
-    let first = Box::pin(ordinary_realm::source_request(&pool, next_request(
+    let first = Box::pin(ordinary_realm::source_request(pool, next_request(
         &second.authority_commit,
         arkret_wire::EventKind::StrandMove,
         &founder(),
@@ -165,7 +165,7 @@ async fn qualify_wip_review(pool: &PgPool, setup: &WipSetup) -> coland_storage::
         stream_position: setup.list.authority_commit.commit.stream_position,
     };
     let uow = PgEventCommitUnitOfWork::new(pool.clone());
-    let review = Box::pin(ordinary_realm::source_request(&pool, next_request(
+    let review = Box::pin(ordinary_realm::source_request(pool, next_request(
         &first.authority_commit,
         arkret_wire::EventKind::StrandMove,
         &founder(),
@@ -173,7 +173,7 @@ async fn qualify_wip_review(pool: &PgPool, setup: &WipSetup) -> coland_storage::
         at,
     ))).await;
     Box::pin(ordinary_realm::human_profile::admit(
-        &pool,
+        pool,
         &ordinary_realm::station(),
         &approval_account_label(43),
     ))
@@ -200,17 +200,14 @@ async fn qualify_wip_review(pool: &PgPool, setup: &WipSetup) -> coland_storage::
         unqualified.to_string().contains("approval_required"),
         "unexpected unqualified-vote failure: {unqualified:?}"
     );
-    assert_eq!(
-        count(&pool, &realm, "event_approval_private_audit").await,
-        0
-    );
+    assert_eq!(count(pool, &realm, "event_approval_private_audit").await, 0);
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query("INSERT INTO member_state_current_states(realm_id,member_id,membership,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,'join',$3,$4,'{\"membership\":\"join\"}'::jsonb,$5)")
         .bind::<Text,_>(realm.as_str()).bind::<Text,_>(approver.to_string())
         .bind::<Text,_>(first.authority_commit.commit.commit_id.as_str()).bind::<BigInt,_>(first.authority_commit.commit.stream_position as i64)
         .bind::<diesel::sql_types::Timestamptz,_>(at).execute(&mut conn).await.unwrap();
     drop(conn);
-    let grant = Box::pin(ordinary_realm::source_request(&pool, next_request(
+    let grant = Box::pin(ordinary_realm::source_request(pool, next_request(
         &first.authority_commit,
         arkret_wire::EventKind::CapabilityGrant,
         &founder(),
@@ -220,7 +217,7 @@ async fn qualify_wip_review(pool: &PgPool, setup: &WipSetup) -> coland_storage::
     uow.commit_event(grant.clone()).await.unwrap();
     // This exact-resource grant has a valid registered kind restriction, but
     // its board allowance cannot authorize a vote over the actual List.
-    let incomplete_review = Box::pin(ordinary_realm::source_request(&pool, next_request(
+    let incomplete_review = Box::pin(ordinary_realm::source_request(pool, next_request(
         &grant.authority_commit,
         arkret_wire::EventKind::StrandMove,
         &founder(),
@@ -234,8 +231,8 @@ async fn qualify_wip_review(pool: &PgPool, setup: &WipSetup) -> coland_storage::
         "wip-nonce-128-bit-fixture-approval",
     );
     let before_incomplete = (
-        count(&pool, &realm, "canonical_events").await,
-        count(&pool, &realm, "realm_commits").await,
+        count(pool, &realm, "canonical_events").await,
+        count(pool, &realm, "realm_commits").await,
     );
     let incomplete = uow
         .commit_event_batch(batch(incomplete_review, incomplete_proof))
@@ -248,15 +245,12 @@ async fn qualify_wip_review(pool: &PgPool, setup: &WipSetup) -> coland_storage::
     assert_eq!(
         before_incomplete,
         (
-            count(&pool, &realm, "canonical_events").await,
-            count(&pool, &realm, "realm_commits").await,
+            count(pool, &realm, "canonical_events").await,
+            count(pool, &realm, "realm_commits").await,
         )
     );
-    assert_eq!(
-        count(&pool, &realm, "event_approval_private_audit").await,
-        0
-    );
-    let grant = Box::pin(ordinary_realm::source_request(&pool, next_request(
+    assert_eq!(count(pool, &realm, "event_approval_private_audit").await, 0);
+    let grant = Box::pin(ordinary_realm::source_request(pool, next_request(
         &grant.authority_commit,
         arkret_wire::EventKind::CapabilityGrant,
         &founder(),
@@ -264,14 +258,14 @@ async fn qualify_wip_review(pool: &PgPool, setup: &WipSetup) -> coland_storage::
         at,
     ))).await;
     uow.commit_event(grant.clone()).await.unwrap();
-    let review = Box::pin(ordinary_realm::source_request(&pool, next_request(
+
+    Box::pin(ordinary_realm::source_request(pool, next_request(
         &grant.authority_commit,
         arkret_wire::EventKind::StrandMove,
         &founder(),
         json!({"board_space_id":board_id,"strand_id":second_id,"target_space_id":list_id,"rank":"b"}),
         at,
-    ))).await;
-    review
+    ))).await
 }
 
 #[tokio::test]

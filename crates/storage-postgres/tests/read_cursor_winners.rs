@@ -64,7 +64,7 @@ fn with_event(
     let cursor = serde_json::from_value(serde_json::to_value(&event.payload).unwrap()).unwrap();
     ReadCursorAdvance {
         canonical_event_digest: arkret_canonical::sha256_bytes(
-            &arkret_canonical::canonical_json_bytes(&event).unwrap(),
+            arkret_canonical::canonical_json_bytes(&event).unwrap(),
         )
         .to_vec(),
         accepted_at: event.created_at,

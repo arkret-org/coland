@@ -641,13 +641,11 @@ pub(crate) async fn governed_content_intent(
             &scope,
         )
         .await?
-        {
-            if (action == CapabilityActionId::MessageCreate && !bits.message_creation_allowed)
+            && ((action == CapabilityActionId::MessageCreate && !bits.message_creation_allowed)
                 || (action == CapabilityActionId::ReactionAdd && !bits.reaction_addition_allowed)
-                || (action == CapabilityActionId::ReactionRemove && !bits.reaction_removal_allowed)
-            {
-                return Err(denied());
-            }
+                || (action == CapabilityActionId::ReactionRemove && !bits.reaction_removal_allowed))
+        {
+            return Err(denied());
         }
     }
     let strand_ids: Vec<_> = intent.strand_id.clone().into_iter().collect();
@@ -4753,6 +4751,7 @@ mod operation_fact_tests {
             direct_conversation: None,
             selected_grant: Some(child_id),
             native_operation: Some((CapabilityActionId::MessageCreate, target.clone())),
+            forwarded_message_source: None,
         };
         complete_current_revisions(&mut cut);
         assert_eq!(cut.effective_grants(at).unwrap().count(), 1);

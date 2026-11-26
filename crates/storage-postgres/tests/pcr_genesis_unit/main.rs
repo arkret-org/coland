@@ -665,7 +665,8 @@ fn unrelated_commit_id() -> RealmCommitId {
 async fn misbound_genesis_commit_chain_is_rejected_with_no_durable_write() {
     let (pool, station) = contract_store().await;
     let store = PgAuthorityCommitStore { pool: pool.clone() };
-    let cases: [(&str, fn(&mut PcrGenesisCommitUnit)); 7] = [
+    type GenesisMutation = fn(&mut PcrGenesisCommitUnit);
+    let cases: [(&str, GenesisMutation); 7] = [
         (
             "authorize commit does not chain to the create commit",
             |unit| {
@@ -1809,7 +1810,7 @@ fn station_successor(
     let identity =
         arkret_canonical::canonical::unsigned_value(&commit, &["commit_id", "signature"]).unwrap();
     commit.commit_id = RealmCommitId::from_digest(arkret_canonical::sha256_bytes(
-        &arkret_canonical::canonical_json_bytes(&identity).unwrap(),
+        arkret_canonical::canonical_json_bytes(&identity).unwrap(),
     ));
     let unsigned = arkret_canonical::canonical::unsigned_value(&commit, &["signature"]).unwrap();
     commit.signature = arkret_signatures::detached_object::sign_detached_object(
@@ -5803,7 +5804,7 @@ fn station_genesis_commit(
     let identity =
         arkret_canonical::canonical::unsigned_value(&commit, &["commit_id", "signature"]).unwrap();
     commit.commit_id = RealmCommitId::from_digest(arkret_canonical::sha256_bytes(
-        &arkret_canonical::canonical_json_bytes(&identity).unwrap(),
+        arkret_canonical::canonical_json_bytes(&identity).unwrap(),
     ));
     let unsigned = arkret_canonical::canonical::unsigned_value(&commit, &["signature"]).unwrap();
     commit.signature = arkret_signatures::detached_object::sign_detached_object(
@@ -6078,34 +6079,6 @@ async fn agent_pcr_genesis_requires_its_provision_declaration() {
         AgentPcrGenesisAdmissionOutcome::Duplicate(stored) if stored == commit
     ));
     assert_eq!(agent_pcr_footprint(&pool, &agent_pcr).await, created);
-}
-
-/// One controller-executed Event in the Agent's PCR.
-fn agent_control_event(
-    controller_method: &DidUrl,
-    signing_seed: [u8; 32],
-    executed_by: &arkret_wire::AccountId,
-    agent: &arkret_wire::AccountId,
-    agent_pcr: &RealmId,
-    authorization_ref: &str,
-    kind: EventKind,
-    payload: serde_json::Value,
-    at: chrono::DateTime<chrono::Utc>,
-) -> arkret_wire::Event {
-    let mut event = arkret_wire::test_support::raw_event_for_actor_at(
-        kind.as_str(),
-        arkret_wire::ScopeRef::Realm {
-            realm_id: agent_pcr.clone(),
-        },
-        arkret_wire::ActorId::account(agent.clone()),
-        payload,
-        at,
-    )
-    .unwrap();
-    event.executed_by = Some(arkret_wire::ActorId::account(executed_by.clone()));
-    event.authorization_ref =
-        Some(arkret_wire::AuthorizationRef::new(authorization_ref.to_owned()).unwrap());
-    device_history_fixture::sign_event(event, controller_method.clone(), signing_seed)
 }
 
 fn agent_key_authorization(
@@ -6491,17 +6464,20 @@ async fn agent_key_and_lifecycle_commit_only_through_the_control_unit() {
                    signing_seed: [u8; 32],
                    kind: EventKind,
                    payload: serde_json::Value| {
-        agent_control_event(
-            signer_method,
-            signing_seed,
-            executed_by,
-            &agent,
-            &agent_pcr,
-            &delegation,
-            kind,
+        let mut event = arkret_wire::test_support::raw_event_for_actor_at(
+            kind.as_str(),
+            arkret_wire::ScopeRef::Realm {
+                realm_id: agent_pcr.clone(),
+            },
+            arkret_wire::ActorId::account(agent.clone()),
             payload,
             t0,
         )
+        .unwrap();
+        event.executed_by = Some(arkret_wire::ActorId::account(executed_by.clone()));
+        event.authorization_ref =
+            Some(arkret_wire::AuthorizationRef::new(delegation.clone()).unwrap());
+        device_history_fixture::sign_event(event, signer_method.clone(), signing_seed)
     };
     let admit = async |event: &arkret_wire::Event, previous: &arkret_wire::RealmCommit| {
         let transaction = tx(

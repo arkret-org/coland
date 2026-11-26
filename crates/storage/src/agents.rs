@@ -20,15 +20,15 @@ pub struct AgentScopeEncryptedEvidence {
     pub ciphertext: arkret_wire::Base64UrlString,
 }
 
+type AgentScopeCustodyValidator = dyn Fn(&AgentScopeCustodyRef, &AgentScopeEncryptedEvidence) -> PersistenceResult<()>
+    + Send
+    + Sync;
+
 #[derive(Clone)]
 pub struct PreparedAgentScopeCustody {
     pub reference: AgentScopeCustodyRef,
     pub evidence: AgentScopeEncryptedEvidence,
-    validator: std::sync::Arc<
-        dyn Fn(&AgentScopeCustodyRef, &AgentScopeEncryptedEvidence) -> PersistenceResult<()>
-            + Send
-            + Sync,
-    >,
+    validator: std::sync::Arc<AgentScopeCustodyValidator>,
 }
 impl std::fmt::Debug for PreparedAgentScopeCustody {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -39,11 +39,7 @@ impl PreparedAgentScopeCustody {
     pub fn new(
         reference: AgentScopeCustodyRef,
         evidence: AgentScopeEncryptedEvidence,
-        validator: std::sync::Arc<
-            dyn Fn(&AgentScopeCustodyRef, &AgentScopeEncryptedEvidence) -> PersistenceResult<()>
-                + Send
-                + Sync,
-        >,
+        validator: std::sync::Arc<AgentScopeCustodyValidator>,
     ) -> Self {
         Self {
             reference,

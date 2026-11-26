@@ -114,115 +114,58 @@ pub(crate) fn bind_native_pairing_approval(
     *payload = serde_json::to_value(key).unwrap();
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct DeliveryScopeFixture<'a> {
+    pub(crate) pool: &'a coland_storage_postgres::PgPool,
+    pub(crate) station: &'a historical_control_source::HistoricalControlStation,
+    pub(crate) principal: &'a device_authorization_history::DeviceHistoryFixture,
+    pub(crate) agent: &'a arkret_wire::AccountId,
+    pub(crate) key_event: &'a arkret_wire::Event,
+    pub(crate) scope: &'a arkret_models_collaboration::events_payloads::agent::AgentKeyScope,
+    pub(crate) endpoint: &'a coland_storage::AgentEndpointGuard,
+}
+
 pub(crate) async fn retain_delivery_scope(
-    pool: &coland_storage_postgres::PgPool,
-    station: &historical_control_source::HistoricalControlStation,
-    principal: &device_authorization_history::DeviceHistoryFixture,
-    agent: &arkret_wire::AccountId,
-    key_event: &arkret_wire::Event,
-    scope: &arkret_models_collaboration::events_payloads::agent::AgentKeyScope,
-    endpoint: &coland_storage::AgentEndpointGuard,
+    fixture: DeliveryScopeFixture<'_>,
 ) -> (
     DeliveryScopeVault,
     coland_storage::VerifiedAgentScopeEvidence,
 ) {
-    retain_delivery_scope_for_runtime(
-        pool, station, principal, agent, key_event, scope, endpoint, false,
-    )
-    .await
+    retain_delivery_scope_for_runtime(fixture, false).await
 }
 
 pub(crate) async fn retain_delivery_scope_for_runtime(
-    pool: &coland_storage_postgres::PgPool,
-    station: &historical_control_source::HistoricalControlStation,
-    principal: &device_authorization_history::DeviceHistoryFixture,
-    agent: &arkret_wire::AccountId,
-    key_event: &arkret_wire::Event,
-    scope: &arkret_models_collaboration::events_payloads::agent::AgentKeyScope,
-    endpoint: &coland_storage::AgentEndpointGuard,
+    fixture: DeliveryScopeFixture<'_>,
     activate_runtime: bool,
 ) -> (
     DeliveryScopeVault,
     coland_storage::VerifiedAgentScopeEvidence,
 ) {
-    retain_delivery_scope_with_runtime_seed(
-        pool,
-        station,
-        principal,
-        agent,
-        key_event,
-        scope,
-        endpoint,
-        activate_runtime,
-        &[0x61; 32],
-    )
-    .await
+    retain_delivery_scope_with_runtime_seed(fixture, activate_runtime, &[0x61; 32]).await
 }
 
 pub(crate) async fn retain_delivery_scope_with_runtime_seed(
-    pool: &coland_storage_postgres::PgPool,
-    station: &historical_control_source::HistoricalControlStation,
-    principal: &device_authorization_history::DeviceHistoryFixture,
-    agent: &arkret_wire::AccountId,
-    key_event: &arkret_wire::Event,
-    scope: &arkret_models_collaboration::events_payloads::agent::AgentKeyScope,
-    endpoint: &coland_storage::AgentEndpointGuard,
+    fixture: DeliveryScopeFixture<'_>,
     activate_runtime: bool,
     runtime_seed: &[u8; 32],
 ) -> (
     DeliveryScopeVault,
     coland_storage::VerifiedAgentScopeEvidence,
 ) {
-    retain_delivery_scope_with_receipt_probe(
-        pool,
-        station,
-        principal,
-        agent,
-        key_event,
-        scope,
-        endpoint,
-        activate_runtime,
-        runtime_seed,
-        false,
-    )
-    .await
+    retain_delivery_scope_with_receipt_probe(fixture, activate_runtime, runtime_seed, false).await
 }
 
 pub(crate) async fn retain_delivery_scope_for_receipt_probe(
-    pool: &coland_storage_postgres::PgPool,
-    station: &historical_control_source::HistoricalControlStation,
-    principal: &device_authorization_history::DeviceHistoryFixture,
-    agent: &arkret_wire::AccountId,
-    key_event: &arkret_wire::Event,
-    scope: &arkret_models_collaboration::events_payloads::agent::AgentKeyScope,
-    endpoint: &coland_storage::AgentEndpointGuard,
+    fixture: DeliveryScopeFixture<'_>,
 ) -> (
     DeliveryScopeVault,
     coland_storage::VerifiedAgentScopeEvidence,
 ) {
-    retain_delivery_scope_with_receipt_probe(
-        pool,
-        station,
-        principal,
-        agent,
-        key_event,
-        scope,
-        endpoint,
-        true,
-        &[0x61; 32],
-        true,
-    )
-    .await
+    retain_delivery_scope_with_receipt_probe(fixture, true, &[0x61; 32], true).await
 }
 
 async fn prepare_delivery_scope_custody(
-    pool: &coland_storage_postgres::PgPool,
-    station: &historical_control_source::HistoricalControlStation,
-    principal: &device_authorization_history::DeviceHistoryFixture,
-    agent: &arkret_wire::AccountId,
-    key_event: &arkret_wire::Event,
-    scope: &arkret_models_collaboration::events_payloads::agent::AgentKeyScope,
-    endpoint: &coland_storage::AgentEndpointGuard,
+    fixture: DeliveryScopeFixture<'_>,
     activate_runtime: bool,
     runtime_seed: &[u8; 32],
 ) -> Box<(
@@ -232,6 +175,15 @@ async fn prepare_delivery_scope_custody(
     coland_storage::AgentPrincipalRecord,
     Option<coland_storage::AgentRuntimeActivation>,
 )> {
+    let DeliveryScopeFixture {
+        pool,
+        station,
+        principal,
+        agent,
+        key_event,
+        scope,
+        endpoint,
+    } = fixture;
     use std::sync::Arc;
 
     use arkret_models_collaboration::agent_scope::{
@@ -454,7 +406,7 @@ async fn prepare_delivery_scope_custody(
     .unwrap();
     let reference = prepared.reference.clone();
     let request_digest =
-        arkret_canonical::sha256_digest(&arkret_canonical::canonical_json_bytes(&body).unwrap());
+        arkret_canonical::sha256_digest(arkret_canonical::canonical_json_bytes(&body).unwrap());
     let intent = coland_storage::AgentPairingCommitIntent {
         agent_id: agent.principal_id.to_string(),
         approval_request_id: approval_request_id.clone(),
@@ -527,41 +479,19 @@ async fn prepare_delivery_scope_custody(
 /// Return the original verified producer/PoP and prepared ciphertext before
 /// the first receipt transaction. No receipt or runtime activation is accepted.
 pub(crate) async fn prepare_delivery_scope_for_disconnect(
-    pool: &coland_storage_postgres::PgPool,
-    station: &historical_control_source::HistoricalControlStation,
-    principal: &device_authorization_history::DeviceHistoryFixture,
-    agent: &arkret_wire::AccountId,
-    key_event: &arkret_wire::Event,
-    scope: &arkret_models_collaboration::events_payloads::agent::AgentKeyScope,
-    endpoint: &coland_storage::AgentEndpointGuard,
+    fixture: DeliveryScopeFixture<'_>,
 ) -> Box<(
     DeliveryScopeVault,
     coland_storage::AgentPairingCommitIntent,
     coland_storage::AgentRuntimeActivation,
 )> {
-    let (vault, _body, intent, _record, activation) = *Box::pin(prepare_delivery_scope_custody(
-        pool,
-        station,
-        principal,
-        agent,
-        key_event,
-        scope,
-        endpoint,
-        true,
-        &[0x61; 32],
-    ))
-    .await;
+    let (vault, _body, intent, _record, activation) =
+        *Box::pin(prepare_delivery_scope_custody(fixture, true, &[0x61; 32])).await;
     Box::new((vault, intent, activation.unwrap()))
 }
 
 async fn retain_delivery_scope_with_receipt_probe(
-    pool: &coland_storage_postgres::PgPool,
-    station: &historical_control_source::HistoricalControlStation,
-    principal: &device_authorization_history::DeviceHistoryFixture,
-    agent: &arkret_wire::AccountId,
-    key_event: &arkret_wire::Event,
-    scope: &arkret_models_collaboration::events_payloads::agent::AgentKeyScope,
-    endpoint: &coland_storage::AgentEndpointGuard,
+    fixture: DeliveryScopeFixture<'_>,
     activate_runtime: bool,
     runtime_seed: &[u8; 32],
     receipt_probe: bool,
@@ -569,17 +499,19 @@ async fn retain_delivery_scope_with_receipt_probe(
     DeliveryScopeVault,
     coland_storage::VerifiedAgentScopeEvidence,
 ) {
+    let DeliveryScopeFixture {
+        pool,
+        principal,
+        agent,
+        key_event,
+        endpoint,
+        ..
+    } = fixture;
     use coland_storage::AgentStore as _;
     use diesel::sql_types::{Jsonb, Text, Timestamptz};
     use diesel_async::RunQueryDsl as _;
     let (vault, body, intent, mut record, activation) = *Box::pin(prepare_delivery_scope_custody(
-        pool,
-        station,
-        principal,
-        agent,
-        key_event,
-        scope,
-        endpoint,
+        fixture,
         activate_runtime,
         runtime_seed,
     ))

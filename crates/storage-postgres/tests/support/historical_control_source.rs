@@ -148,8 +148,11 @@ impl HistoricalControlStation {
             stored_at: now,
         };
         stored.validate().unwrap();
-        arkret_identity::verify_did_webvh_v1_chain(&self.did, &[self.inception.log_entry.clone()])
-            .unwrap();
+        arkret_identity::verify_did_webvh_v1_chain(
+            &self.did,
+            std::slice::from_ref(&self.inception.log_entry),
+        )
+        .unwrap();
         persistence.service_identity().put(stored).await.unwrap();
         persistence
             .webvh()
@@ -179,10 +182,10 @@ impl HistoricalControlStation {
             .committed_event(&transaction.event.event_id)
             .await
             .unwrap()
+            && original.event == transaction.event
+            && original.commit == transaction.commit
         {
-            if original.event == transaction.event && original.commit == transaction.commit {
-                return;
-            }
+            return;
         }
         assert_eq!(
             coland_storage::DeviceRevocationStore::pcr_device_admission(

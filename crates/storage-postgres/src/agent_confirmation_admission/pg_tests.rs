@@ -166,9 +166,9 @@ async fn seed(f: &Fixture, conn: &mut AsyncPgConnection) {
 }
 fn message(f: &Fixture) -> Event {
     event(
-        &f,
+        f,
         EventKind::MessageCreate,
-        &agent(&f),
+        &agent(f),
         json!({"strand_id":arkret_wire::StrandId::from_event_id(&arkret_wire::EventId::from_digest(arkret_canonical::DigestSuite::Sha256,[31;32])),"track_name":"discussion","content":{"kind":"ak.content.text","format":"plain","body":"requested publication"}}),
         10,
     )
@@ -179,13 +179,13 @@ async fn request(f: &Fixture, pool: &PgPool, target: &Event) {
     } else {
         "ak.message.create"
     };
-    let payload = json!({"request_id":"request-1","agent_id":agent(&f).principal_id,"controller_account_id":owner(&f),"proposed_action":action,
-        "target":{"kind":"realm","realm_id":realm(&f)},"request_canonical_digest":arkret_canonical::canonical_sha256(target).unwrap(),
-        "expires_at":arkret_canonical::format_timestamp_canonical(at(&f)+chrono::TimeDelta::seconds(120)),"created_at":arkret_canonical::format_timestamp_canonical(at(&f)+chrono::TimeDelta::seconds(1))});
+    let payload = json!({"request_id":"request-1","agent_id":agent(f).principal_id,"controller_account_id":owner(f),"proposed_action":action,
+        "target":{"kind":"realm","realm_id":realm(f)},"request_canonical_digest":arkret_canonical::canonical_sha256(target).unwrap(),
+        "expires_at":arkret_canonical::format_timestamp_canonical(at(f)+chrono::TimeDelta::seconds(120)),"created_at":arkret_canonical::format_timestamp_canonical(at(f)+chrono::TimeDelta::seconds(1))});
     let source = event(
-        &f,
+        f,
         EventKind::AgentActionRequest,
-        &agent(&f),
+        &agent(f),
         payload.clone(),
         1,
     );
@@ -196,7 +196,7 @@ async fn request(f: &Fixture, pool: &PgPool, target: &Event) {
         .to_vec(),
         accepted_at: source.created_at,
         event: source,
-        owner: owner(&f),
+        owner: owner(f),
         producer_guard: None,
         effect: ActorPrivateEventEffect::AgentActionRequest(
             serde_json::from_value(payload).unwrap(),
@@ -217,17 +217,17 @@ fn approval(f: &Fixture, target: &Event, id: &str, nonce: &str) -> Event {
         "ak.message.create"
     };
     event(
-        &f,
+        f,
         EventKind::AgentActionApprove,
-        &owner(&f),
-        json!({"approval_id":id,"request_id":"request-1","agent_id":agent(&f).principal_id,"proposed_action":action,
-        "target":{"kind":"realm","realm_id":realm(&f)},"approved_event_id":target.event_id,"approval_nonce":nonce,
-        "expires_at":arkret_canonical::format_timestamp_canonical(at(&f)+chrono::TimeDelta::seconds(10))}),
+        &owner(f),
+        json!({"approval_id":id,"request_id":"request-1","agent_id":agent(f).principal_id,"proposed_action":action,
+        "target":{"kind":"realm","realm_id":realm(f)},"approved_event_id":target.event_id,"approval_nonce":nonce,
+        "expires_at":arkret_canonical::format_timestamp_canonical(at(f)+chrono::TimeDelta::seconds(10))}),
         2,
     )
 }
 async fn install(f: &Fixture, conn: &mut AsyncPgConnection, confirmation: &Event, position: u64) {
-    let source = commit(&f, confirmation, position);
+    let source = commit(f, confirmation, position);
     history(conn, confirmation, &source).await;
     commit_confirmation(conn, confirmation, &source)
         .await

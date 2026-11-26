@@ -114,7 +114,7 @@ async fn removed_key_history_case() {
             arkret_canonical::canonical_json_bytes(&retained["value"]).unwrap(),
             b"{\"entries\":[]}",
         );
-        if end % 8_192 == 0 || end == HISTORICAL_KEYS {
+        if end.is_multiple_of(8_192) || end == HISTORICAL_KEYS {
             eprintln!("[reaction-history] removed_keys={end} current_entries=0");
         }
     }

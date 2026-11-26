@@ -287,6 +287,89 @@ async fn page(
     Ok(page)
 }
 
+/// Frozen heads cannot advance, and a stricter current floor cannot be relaxed.
+fn select_page(
+    realm: &RealmId,
+    frozen: &[RealmStreamView],
+    live: &[RealmStreamView],
+    after: usize,
+    limit: usize,
+    byte_limit: usize,
+) -> Result<(RealmStreamPage, usize), AppError> {
+    if after > frozen.len() {
+        return Err(invalid_cursor());
+    }
+    let visible = live
+        .iter()
+        .map(|row| (&row.stream_ref, row))
+        .collect::<BTreeMap<_, _>>();
+    let mut page = RealmStreamPage {
+        realm_id: realm.clone(),
+        streams: Vec::new(),
+        next_cursor: None,
+        has_more: false,
+    };
+    // Reserve the bounded opaque cursor and response envelope before adding rows.
+    let mut bytes = 1024;
+    let mut next = after;
+    for (index, original) in frozen.iter().enumerate().skip(after) {
+        let Some(current) = visible.get(&original.stream_ref) else {
+            next = index + 1;
+            continue;
+        };
+        if current.next_position < original.next_position
+            || (current.next_position == original.next_position
+                && current.head_commit_ref != original.head_commit_ref)
+        {
+            return Err(unavailable());
+        }
+        let mut row = original.clone();
+        match (&original.readable_floor, &current.readable_floor) {
+            (Some(old), Some(now)) => {
+                if now.oldest_position >= original.next_position {
+                    next = index + 1;
+                    continue;
+                }
+                if now.oldest_position == old.oldest_position
+                    && now.floor_commit_id != old.floor_commit_id
+                {
+                    return Err(unavailable());
+                }
+                if now.oldest_position > old.oldest_position {
+                    row.readable_floor = Some(now.clone());
+                }
+            }
+            (None, Some(now)) => {
+                if now.oldest_position >= original.next_position {
+                    next = index + 1;
+                    continue;
+                }
+                row.readable_floor = Some(now.clone());
+            }
+            (None, None) => {}
+            (Some(_), None) => return Err(unavailable()),
+        }
+        let size = arkret_canonical::canonical_json_bytes(&row)
+            .map_err(internal)?
+            .len()
+            + 1;
+        if page.streams.len() == limit || bytes + size > byte_limit {
+            if page.streams.is_empty() {
+                return Err(crate::app_error!(
+                    PayloadTooLarge,
+                    "one stream row exceeds the page budget"
+                ));
+            }
+            page.has_more = true;
+            break;
+        }
+        page.streams.push(row);
+        bytes += size;
+        next = index + 1;
+    }
+    Ok((page, next))
+}
+
 #[cfg(test)]
 mod tests {
     use arkret_wire::{CommitStreamRef, ReadableFloor, ReadableFloorReason};
@@ -371,87 +454,4 @@ mod tests {
         live[0].next_position = 9;
         assert!(select_page(&realm, &rows, &live, 0, 500, PAGE_BYTES).is_err());
     }
-}
-
-/// Frozen heads cannot advance, and a stricter current floor cannot be relaxed.
-fn select_page(
-    realm: &RealmId,
-    frozen: &[RealmStreamView],
-    live: &[RealmStreamView],
-    after: usize,
-    limit: usize,
-    byte_limit: usize,
-) -> Result<(RealmStreamPage, usize), AppError> {
-    if after > frozen.len() {
-        return Err(invalid_cursor());
-    }
-    let visible = live
-        .iter()
-        .map(|row| (&row.stream_ref, row))
-        .collect::<BTreeMap<_, _>>();
-    let mut page = RealmStreamPage {
-        realm_id: realm.clone(),
-        streams: Vec::new(),
-        next_cursor: None,
-        has_more: false,
-    };
-    // Reserve the bounded opaque cursor and response envelope before adding rows.
-    let mut bytes = 1024;
-    let mut next = after;
-    for (index, original) in frozen.iter().enumerate().skip(after) {
-        let Some(current) = visible.get(&original.stream_ref) else {
-            next = index + 1;
-            continue;
-        };
-        if current.next_position < original.next_position
-            || (current.next_position == original.next_position
-                && current.head_commit_ref != original.head_commit_ref)
-        {
-            return Err(unavailable());
-        }
-        let mut row = original.clone();
-        match (&original.readable_floor, &current.readable_floor) {
-            (Some(old), Some(now)) => {
-                if now.oldest_position >= original.next_position {
-                    next = index + 1;
-                    continue;
-                }
-                if now.oldest_position == old.oldest_position
-                    && now.floor_commit_id != old.floor_commit_id
-                {
-                    return Err(unavailable());
-                }
-                if now.oldest_position > old.oldest_position {
-                    row.readable_floor = Some(now.clone());
-                }
-            }
-            (None, Some(now)) => {
-                if now.oldest_position >= original.next_position {
-                    next = index + 1;
-                    continue;
-                }
-                row.readable_floor = Some(now.clone());
-            }
-            (None, None) => {}
-            (Some(_), None) => return Err(unavailable()),
-        }
-        let size = arkret_canonical::canonical_json_bytes(&row)
-            .map_err(internal)?
-            .len()
-            + 1;
-        if page.streams.len() == limit || bytes + size > byte_limit {
-            if page.streams.is_empty() {
-                return Err(crate::app_error!(
-                    PayloadTooLarge,
-                    "one stream row exceeds the page budget"
-                ));
-            }
-            page.has_more = true;
-            break;
-        }
-        page.streams.push(row);
-        bytes += size;
-        next = index + 1;
-    }
-    Ok((page, next))
 }

@@ -393,19 +393,6 @@ pub(crate) async fn export_floor_in_connection(
                 .await?
                 .ok()
         }
-        CommitStreamRef::Circle { circle_id, .. } if governs => {
-            crate::account_stream_scan::caller_circle_floor_in_connection(
-                conn, realm, circle_id, actor,
-            )
-            .await?
-        }
-        CommitStreamRef::Circle { circle_id, .. } => {
-            crate::account_stream_scan::replica_circle_floor_in_connection(
-                conn, realm, circle_id, actor,
-            )
-            .await?
-            .ok()
-        }
         CommitStreamRef::Sidecar { sidecar_id, .. } if governs => {
             crate::sidecar_authority_cut::caller_floor_in_connection(conn, realm, sidecar_id, actor)
                 .await?
@@ -1109,7 +1096,6 @@ async fn delivery_source_in_connection(
 async fn require_delivery_policy_in_connection(
     conn: &mut AsyncPgConnection,
     realm: &arkret_wire::RealmId,
-    circle: Option<&arkret_wire::CircleId>,
     controller: &AccountId,
     agent: &AccountId,
     operation: AgentPolicyOperation,
@@ -1121,7 +1107,7 @@ async fn require_delivery_policy_in_connection(
         return Ok(());
     }
     crate::agent_management_admission::require_content_snapshot_in_connection(
-        conn, realm, circle, controller, agent, operation, action, resources, at,
+        conn, realm, controller, agent, operation, action, resources, at,
     )
     .await
 }
@@ -1193,33 +1179,13 @@ pub(crate) async fn require_owned_content_sources_in_connection(
             cut.require_content_read_constraints(event, at, source.clone(), action)?;
         }
     }
-    let direct = direct_delivery_in_connection(conn, &first.realm_id).await?;
-    let mut policies_by_circle = std::collections::BTreeMap::new();
+    if direct_delivery_in_connection(conn, &first.realm_id).await? { return Ok(()); }
+    let policies = crate::policy_current_states::read_scoped_agent_management_policy_snapshot_in_connection(conn, &first.realm_id).await?;
     for event in events {
         let resources = crate::agent_management_admission::event_content_resources(event)?;
-        let circle = match &event.scope_ref {
-            arkret_wire::ScopeRef::Circle { circle_id, .. } => Some(circle_id.clone()),
-            _ => None,
-        };
-        if direct {
-            continue;
-        }
-        // Every source still has its own resource/operation decision. The
-        // accepted policy history is shared only by this Realm/Circle at this
-        // same held transaction cut, including proof of policy absence.
-        if !policies_by_circle.contains_key(&circle) {
-            let policies = crate::policy_current_states::read_scoped_agent_management_policy_snapshot_in_connection(
-                conn, &first.realm_id, circle.as_ref(),
-            )
-            .await?;
-            policies_by_circle.insert(circle.clone(), policies);
-        }
-        let policies = policies_by_circle
-            .get(&circle)
-            .expect("policy cut was read");
         for operation in [AgentPolicyOperation::Read, AgentPolicyOperation::Deliver] {
             crate::agent_management_admission::require_content_policy(
-                policies,
+                &policies,
                 &event.realm_id,
                 owner,
                 account,
@@ -1710,90 +1676,18 @@ async fn acquire_remote_watch_delivery(
                 "remote Watch Strand is no longer active".to_owned(),
             ));
         }
-        let expected_circle = match &head.stream_ref {
-            arkret_wire::CommitStreamRef::Circle { circle_id, .. } => Some(circle_id.as_str()),
-            _ => None,
-        };
         if strand.source_stream_ref.as_ref()
             != Some(&serde_json::to_value(&head.stream_ref).map_err(PersistenceError::database)?)
             || strand
                 .value
-                .get("scope_circle_id")
-                .and_then(serde_json::Value::as_str)
-                != expected_circle
+                .get("scope_circle_id").is_some_and(|scope| !scope.is_null())
         {
             return Err(unavailable(
                 "remote Watch Strand scope or lifecycle conflicts with observed current",
             ));
         }
     }
-    if let arkret_wire::CommitStreamRef::Circle { circle_id, .. } = &head.stream_ref {
-        // Only an exact proved Circle cut can contradict this fresh remote
-        // witness. A missing parent cache is unknown, not observed withdrawal.
-        let selector = arkret_wire::CurrentSelector::CircleMemberState {
-            circle_id: circle_id.clone(),
-            member_actor_id: actor.clone(),
-        };
-        let evidence = crate::replica_authorization::exact_current_evidence(
-            held.connection(),
-            &head.stream_ref,
-            &[selector],
-        )
-        .await?;
-        let mut revoked = false;
-        if let Some((observed, rows)) = evidence.filter(|(observed, _)| observed == head) {
-            let _ = observed;
-            let arkret_wire::CurrentState::Value { value, .. } = &rows[0];
-            let member: arkret_wire::CircleMemberStateValue =
-                serde_json::from_value(value.clone()).map_err(PersistenceError::database)?;
-            revoked = member.membership != arkret_wire::MembershipState::Join;
-            if !revoked {
-                let parent_stream = arkret_wire::CommitStreamRef::Realm {
-                    realm_id: request.realm_id.clone(),
-                };
-                let parent_selector = arkret_wire::CurrentSelector::MemberState {
-                    actor_id: actor.clone(),
-                };
-                if let Some((_, parents)) = crate::replica_authorization::exact_current_evidence(
-                    held.connection(),
-                    &parent_stream,
-                    &[parent_selector],
-                )
-                .await?
-                {
-                    let arkret_wire::CurrentState::Value {
-                        revision, value, ..
-                    } = &parents[0];
-                    let parent: arkret_wire::MemberStateValue =
-                        serde_json::from_value(value.clone())
-                            .map_err(PersistenceError::database)?;
-                    let bound = member.parent_membership_revision.as_ref().ok_or_else(|| {
-                        unavailable("joined Circle witness has no parent binding")
-                    })?;
-                    if revision.stream_position > bound.stream_position {
-                        // These two coordinates belong to the same Realm
-                        // stream. A later accepted parent revision ends this
-                        // exact older parent-bound Circle membership.
-                        revoked = true;
-                    } else if revision.stream_position == bound.stream_position
-                        && (revision.commit_id != bound.commit_id
-                            || parent.membership != arkret_wire::MembershipState::Join)
-                    {
-                        return Err(unavailable(
-                            "observed parent conflicts with the Circle witness binding",
-                        ));
-                    }
-                    // An older local parent (including an old leave before
-                    // the signed rejoin) is unknown, not observed withdrawal.
-                }
-            }
-        }
-        if revoked && audited.is_none() {
-            return Err(PersistenceError::NotFound(
-                "remote Watch Circle withdrawal has been observed".to_owned(),
-            ));
-        }
-    }
+
     let watch_source = crate::object_projection_reads::current_source_sql(
         "w",
         "jsonb_build_object('kind','strand_watch','strand_id',w.strand_id,'watcher_actor_id',w.watcher_actor_id::jsonb)",
@@ -1833,9 +1727,7 @@ async fn acquire_remote_watch_delivery(
         object_kind: Some("strand".to_owned()),
         ..Default::default()
     };
-    if let arkret_wire::CommitStreamRef::Circle { circle_id, .. } = &head.stream_ref {
-        facts.circle_id = Some(circle_id.to_string());
-    }
+
     validate_private_delivery_credentials(
         &mut held,
         account,
@@ -1925,7 +1817,7 @@ pub(crate) async fn acquire_native_message_reply_preparation(
         || source.event.realm_id != source.commit.realm_id
         || !matches!(
             source.event.scope_ref,
-            arkret_wire::ScopeRef::Realm { .. } | arkret_wire::ScopeRef::Circle { .. }
+            arkret_wire::ScopeRef::Realm { .. }
         )
         || input.credential_expires_at.is_none()
         || input.agent_session_scope.is_none()
@@ -2033,14 +1925,6 @@ async fn revalidate_committed_events_in_connection(
                     )
                     .await?
                 }
-                arkret_wire::CommitStreamRef::Circle { circle_id, .. } => {
-                    Box::pin(
-                        crate::account_stream_scan::caller_circle_floor_in_connection(
-                            &mut *conn, realm, circle_id, recipient,
-                        ),
-                    )
-                    .await?
-                }
                 arkret_wire::CommitStreamRef::Sidecar { sidecar_id, .. } => {
                     if !Box::pin(crate::sidecar_access::participant_in_connection(
                         &mut *conn, realm, sidecar_id, recipient,
@@ -2119,14 +2003,10 @@ async fn revalidate_committed_events_in_connection(
                 }
                 let resources =
                     crate::agent_management_admission::event_content_resources(&full.event)?;
-                let circle = match &full.event.scope_ref {
-                    arkret_wire::ScopeRef::Circle { circle_id, .. } => Some(circle_id),
-                    _ => None,
-                };
+
                 Box::pin(require_delivery_policy_in_connection(
                     &mut *conn,
                     realm,
-                    circle,
                     controller_account,
                     account,
                     AgentPolicyOperation::Deliver,
@@ -2139,15 +2019,11 @@ async fn revalidate_committed_events_in_connection(
             CommittedEventView::Withheld(_) => {
                 let resources =
                     crate::agent_management_admission::event_content_resources(&accepted.event)?;
-                let circle = match &accepted.event.scope_ref {
-                    arkret_wire::ScopeRef::Circle { circle_id, .. } => Some(circle_id),
-                    _ => None,
-                };
+
                 for operation in [AgentPolicyOperation::Read, AgentPolicyOperation::Deliver] {
                     Box::pin(require_delivery_policy_in_connection(
                         &mut *conn,
                         realm,
-                        circle,
                         controller_account,
                         account,
                         operation,
@@ -2267,13 +2143,6 @@ async fn native_reply_time_proof_in_connection(
         crate::policy_current_states::read_scoped_agent_management_policies_in_connection(
             &mut *conn,
             realm,
-            target
-                .circle_id
-                .as_ref()
-                .or(match &reply.source.event.scope_ref {
-                    arkret_wire::ScopeRef::Circle { circle_id, .. } => Some(circle_id),
-                    _ => None,
-                }),
         ),
     )
     .await?;
@@ -2396,7 +2265,6 @@ async fn revalidate_projection_inputs_in_connection(
                 Box::pin(require_delivery_policy_in_connection(
                     conn,
                     realm,
-                    None,
                     owner,
                     account,
                     operation,
@@ -2449,7 +2317,6 @@ async fn revalidate_projection_inputs_in_connection(
             Box::pin(require_delivery_policy_in_connection(
                 &mut *conn,
                 &export.realm_id,
-                None,
                 owner,
                 account,
                 operation,
@@ -2973,15 +2840,11 @@ async fn revalidate_content_inputs_in_connection(
         if !resources.contains(&resource) {
             resources.push(resource);
         }
-        let circle = match &full.event.scope_ref {
-            arkret_wire::ScopeRef::Circle { circle_id, .. } => Some(circle_id),
-            _ => None,
-        };
+
         for operation in [AgentPolicyOperation::Read, AgentPolicyOperation::Deliver] {
             Box::pin(require_delivery_policy_in_connection(
                 &mut *conn,
                 &realm,
-                circle,
                 owner,
                 account,
                 operation,
@@ -3184,14 +3047,10 @@ async fn revalidate_content_inputs_in_connection(
             .as_account_id()
             .ok_or_else(|| unavailable("controller is not an Account"))?;
         let resources = crate::agent_management_admission::event_content_resources(&full.event)?;
-        let circle = match &welcome.effective_scope {
-            arkret_wire::ScopeRef::Circle { circle_id, .. } => Some(circle_id),
-            _ => None,
-        };
+
         Box::pin(require_delivery_policy_in_connection(
             &mut *conn,
             &welcome.realm_id,
-            circle,
             owner,
             account,
             AgentPolicyOperation::Deliver,

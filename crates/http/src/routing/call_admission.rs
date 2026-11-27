@@ -462,7 +462,6 @@ pub(crate) async fn fresh_admission(
             .ok_or_else(|| unavailable("holder Call scope is unavailable"))?;
         if current.scope_ref != request.invitation.scope_ref || matches!(current.lifecycle,arkret_models_collaboration::events_payloads::call::CallLifecycleState::Ended|arkret_models_collaboration::events_payloads::call::CallLifecycleState::Missed|arkret_models_collaboration::events_payloads::call::CallLifecycleState::Cancelled|arkret_models_collaboration::events_payloads::call::CallLifecycleState::Failed) {return Err(AppError::capability_denied("holder Call scope or lifecycle changed"));}
         let resource = match &current.scope_ref {
-            arkret_wire::ScopeRef::Circle { circle_id, .. } => circle_id.as_str(),
             _ => current.scope_ref.realm_id().as_str(),
         };
         for action in [

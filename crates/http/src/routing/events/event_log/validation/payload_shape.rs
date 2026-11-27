@@ -10,7 +10,7 @@ use super::super::*;
 /// (spec/v1/artifacts/registry/forbidden-wire-fields.json, zh/models/sidecar.md
 /// §7.2.1): the Agent Sidecar exchange binding, exchange control plaintext,
 /// and `exchange_id` are legal only inside MLS-encrypted payload/metadata of
-/// Sidecar-backing-Circle-scoped events. Any plaintext occurrence on the
+/// Sidecar events. Any plaintext occurrence on the
 /// submitted wire — the key `sidecar_exchange_binding`, the key `exchange_id`,
 /// or a string value equal to one of the two Sidecar schema ids — is a
 /// hard-reject `schema_violation`. `ak.agent.sidecar.exchange.control` needs

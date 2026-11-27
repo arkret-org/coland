@@ -2,7 +2,7 @@
 //!
 //! Producer Events are queued without ordering metadata. Only the current
 //! governance Station may atomically append a [`RealmCommit`], mark the Event
-//! committed, and enqueue any MLS Welcome deliveries. Each Realm, Circle and
+//! committed, and enqueue any MLS Welcome deliveries. Each Realm and
 //! Sidecar stream advances independently.
 
 use arkret_wire::{
@@ -81,7 +81,7 @@ pub enum MemberCommittedEventRead {
     PendingAnchor,
     /// The Commit is not on the Realm stream of an ordinary Realm, whose
     /// visibility this typed current decides (a principal-control Realm, or a
-    /// Circle or Sidecar stream).
+    /// Sidecar stream).
     OutsideOrdinaryRealmStream,
 }
 
@@ -674,7 +674,7 @@ impl DirectConversationFoundingCommitUnit {
         let discussion = strand
             .tracks
             .get(arkret_models_collaboration::objects::profiles::STRAND_TRACK_NAME_DISCUSSION);
-        if strand.scope_circle_id.is_some()
+        if strand.realm_id != plan.realm_id
             || discussion
                 .is_none_or(|track| track.is_primary != Some(true) || track.enabled == Some(false))
         {
@@ -1388,13 +1388,6 @@ pub enum AcceptedDeviceAuthorizationOutcome {
 /// stream it does not govern (`federation.md` §4.1.1).
 #[derive(Clone, Debug, PartialEq)]
 pub enum CommittedReplicaRole {
-    /// The exact governor-accepted result of this hosted Account's own
-    /// Circle leave. The store must prove its frozen original submission,
-    /// parent Realm revision and canonical opening join in the same cut.
-    /// This does not authorize ordinary replication or any read surface.
-    AcceptedOwnCircleLeave {
-        member_account_id: arkret_wire::AccountId,
-    },
     /// A hosted member's own verified join (its `ak.member.state{join}` or
     /// its directed `ak.invite.accept`). While no hosted member is joined it
     /// opens the held stream -- or re-opens the stream this Station still
@@ -1512,7 +1505,6 @@ pub struct ReplicaBootstrapInstall {
 pub struct SignalScopeAuthorityQuery<'a> {
     pub scope: &'a arkret_wire::ScopeRef,
     pub authority_commit_id: &'a RealmCommitId,
-    pub parent_realm_authority_commit_id: Option<&'a RealmCommitId>,
     pub sender: &'a arkret_wire::ActorId,
     pub signal_class: arkret_wire::SignalClass,
     pub sent_at: DateTime<Utc>,
@@ -2433,45 +2425,6 @@ pub trait AuthorityCommitStore: Send + Sync {
         Ok(false)
     }
 
-    async fn circle_views_for_actor(
-        &self,
-        realm_id: &arkret_wire::RealmId,
-        actor: &arkret_wire::ActorId,
-    ) -> PersistenceResult<Vec<arkret_models_collaboration::governance::circle::CircleView>> {
-        let _ = (realm_id, actor);
-        Ok(Vec::new())
-    }
-
-    async fn circle_reads_for_actor(
-        &self,
-        realm_id: &arkret_wire::RealmId,
-        actor: &arkret_wire::ActorId,
-    ) -> PersistenceResult<Vec<arkret_models_collaboration::governance::circle::CircleReadView>>
-    {
-        let _ = (realm_id, actor);
-        Ok(Vec::new())
-    }
-
-    async fn circle_view_for_actor(
-        &self,
-        circle_id: &arkret_wire::CircleId,
-        actor: &arkret_wire::ActorId,
-    ) -> PersistenceResult<Option<arkret_models_collaboration::governance::circle::CircleView>>
-    {
-        let _ = (circle_id, actor);
-        Ok(None)
-    }
-
-    async fn circle_read_for_actor(
-        &self,
-        circle_id: &arkret_wire::CircleId,
-        actor: &arkret_wire::ActorId,
-    ) -> PersistenceResult<Option<arkret_models_collaboration::governance::circle::CircleReadView>>
-    {
-        let _ = (circle_id, actor);
-        Ok(None)
-    }
-
     async fn replica_authorization_head(
         &self,
         stream: &CommitStreamRef,
@@ -3117,8 +3070,8 @@ pub trait AuthorityCommitStore: Send + Sync {
         Ok(current)
     }
 
-    /// Governance generation and current heads for every independent Realm,
-    /// Circle, and Sidecar stream at one durable cut, sorted by `stream_ref`.
+    /// Governance generation and current heads for every independent Realm and
+    /// Sidecar stream at one durable cut, sorted by `stream_ref`.
     async fn realm_stream_heads(
         &self,
         realm_id: &arkret_wire::RealmId,

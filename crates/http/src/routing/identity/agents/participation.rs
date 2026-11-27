@@ -5,7 +5,6 @@ use super::*;
 pub(super) fn participation_scope_kind(scope: &ParticipationScope) -> &'static str {
     match scope {
         ParticipationScope::Realm { .. } => "realm",
-        ParticipationScope::Circle { .. } => "circle",
         ParticipationScope::Strand { .. } => "strand",
     }
 }

@@ -99,8 +99,6 @@ async fn fanout_basis_reads_committed_membership_strand_and_watch_currents() {
         .expect("the discussion Strand has a committed current value");
     assert_eq!(strand.realm_id, realm_id);
     assert!(strand.active);
-    assert!(strand.scope_circle_id.is_none());
-    assert!(strand.circle_members.is_empty());
     assert!(basis.watch_levels.is_empty(), "no watch was ever written");
     assert!(basis.active_assignees.is_empty());
 

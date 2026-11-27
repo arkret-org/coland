@@ -8,7 +8,7 @@ use crate::state::AppState;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ResolvedAgentParticipation {
     pub(crate) effective: ParticipationBits,
-    /// True when a required policy layer (deployment/Realm/Circle/Strand
+    /// True when a required policy layer (deployment/Realm/Strand
     /// ceiling) could not be resolved and was folded to all-false; the wire
     /// reason for the resulting rejection is
     /// `agent_participation_ceiling_unresolved`, distinct from a resolved
@@ -18,10 +18,6 @@ pub(crate) struct ResolvedAgentParticipation {
 
 pub(crate) fn realm_scope_key(realm_id: &str) -> String {
     format!("realm:{realm_id}")
-}
-
-pub(crate) fn circle_scope_key(realm_id: &str, circle_id: &str) -> String {
-    format!("circle:{realm_id}:{circle_id}")
 }
 
 pub(crate) fn strand_scope_key(realm_id: &str, strand_id: &str) -> String {
@@ -46,21 +42,6 @@ pub(crate) fn participation_from_value(row: &Value) -> ParticipationBits {
 }
 
 #[cfg(test)]
-fn projected_strand_circle_id(state: &AppState, strand_id: &str) -> Option<Option<String>> {
-    {
-        let projection = state.projections().snapshot();
-        {
-            projection.strands.get(strand_id).map(|strand| {
-                strand
-                    .scope_circle_id
-                    .clone()
-                    .filter(|scope| scope.starts_with("ak:circle:"))
-            })
-        }
-    }
-}
-
-#[cfg(test)]
 pub(crate) fn scope_keys_for_message(
     state: &AppState,
     realm_id: &str,
@@ -73,9 +54,8 @@ pub(crate) fn scope_keys_for_message(
     if !strand_id.starts_with("ak:strand:") {
         return Some(keys);
     }
-    if let Some(circle_id) = projected_strand_circle_id(state, strand_id)? {
-        keys.push(circle_scope_key(realm_id, &circle_id));
-    }
+    let projection = state.projections().snapshot();
+    if projection.strands.get(strand_id)?.realm_id != realm_id { return None; }
     keys.push(strand_scope_key(realm_id, strand_id));
     Some(keys)
 }
@@ -148,19 +128,14 @@ pub(crate) async fn resolve_agent_participation_for_scope_keys(
 
 #[cfg(test)]
 mod tests {
-    use super::{circle_scope_key, realm_scope_key, strand_scope_key};
+    use super::{realm_scope_key, strand_scope_key};
 
     const REALM_ID: &str = "ak:realm:AfF-hFqRoMbajXkPapH-xaq0xwK-UKt2ph2zTs9JZRAO";
-    const CIRCLE_ID: &str = "ak:circle:AfUeGRE3CFApB-5spxARHjovex9S5j5RWL8mAUSkpOMS";
     const STRAND_ID: &str = "ak:strand:AYbepLWCNKm2SxJt1JgbGtBjKrwf_iGhnjreRy4TZj09";
 
     #[test]
     fn scope_keys_preserve_complete_event_derived_tokens() {
         assert_eq!(realm_scope_key(REALM_ID), format!("realm:{REALM_ID}"));
-        assert_eq!(
-            circle_scope_key(REALM_ID, CIRCLE_ID),
-            format!("circle:{REALM_ID}:{CIRCLE_ID}")
-        );
         assert_eq!(
             strand_scope_key(REALM_ID, STRAND_ID),
             format!("strand:{REALM_ID}:{STRAND_ID}")

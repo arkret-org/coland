@@ -140,7 +140,6 @@ pub(crate) async fn publish_basis(
         crate::policy_current_states::read_scoped_applet_management_policies_in_connection(
             conn,
             &event.realm_id,
-            scope.circle_id(),
         )
         .await?;
     let mut resources = vec![PolicyResourceSelector {
@@ -148,13 +147,6 @@ pub(crate) async fn publish_basis(
         realm_id: Some(event.realm_id.clone()),
         resource_ref: Some(event.realm_id.to_string()),
     }];
-    if let Some(circle) = scope.circle_id() {
-        resources.push(PolicyResourceSelector {
-            kind: PolicyResourceKind::Object,
-            realm_id: Some(event.realm_id.clone()),
-            resource_ref: Some(circle.to_string()),
-        });
-    }
     let service = arkret_wire::ActorId::service(registration.service_id.clone());
     let decision = arkret_policy::applet_management::select_applet_management(
         Some(&policies),
@@ -308,7 +300,7 @@ pub(crate) async fn prepare_control(
         && (intent.effective_scope.realm_id() != &event.realm_id
             || !matches!(
                 intent.effective_scope,
-                ScopeRef::Realm { .. } | ScopeRef::Circle { .. }
+                ScopeRef::Realm { .. }
             ))
     {
         return Err(denied(
@@ -402,10 +394,6 @@ pub(crate) async fn admit_control(
             ScopeRef::Realm { realm_id } => {
                 arkret_wire::WireResourceSelector::realm(realm_id.clone())
             }
-            ScopeRef::Circle {
-                realm_id,
-                circle_id,
-            } => arkret_wire::WireResourceSelector::circle(realm_id.clone(), circle_id.clone()),
             _ => return Err(denied("invalid public Profile scope").into()),
         };
         let registration = crate::managed_message_actor::registration(conn, event).await?;
@@ -413,7 +401,7 @@ pub(crate) async fn admit_control(
             applet_id: event.applet_id.as_ref().map(ToString::to_string),
             registration_epoch: Some(registration.registration_epoch.to_string()),
             executed_by: Some(event.actor_id.clone()),
-            circle_id: scope.circle_id().map(ToString::to_string),
+
             ..Default::default()
         };
         governance = crate::approval_admission::require_governance(
@@ -553,13 +541,7 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        let other = ScopeRef::Circle {
-            realm_id: realm,
-            circle_id: arkret_wire::CircleId::from_event_id(&arkret_wire::EventId::from_digest(
-                arkret_canonical::DigestSuite::Sha256,
-                [132; 32],
-            )),
-        };
+        let other = ScopeRef::realm(arkret_wire::RealmId::from_event_id(&arkret_wire::EventId::from_digest(arkret_canonical::DigestSuite::Sha256, [132;32])));
         renamed.profile_fields.insert(
             "applet_interaction".into(),
             json!({"effective_scope":other,"mode":"public"}),

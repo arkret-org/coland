@@ -1,5 +1,5 @@
 // Included in realm_native_fixture. The caller supplies two genuinely accepted
-// Devices from the existing Circle runtime: content reader and Realm-join-only.
+// Devices from the existing Realm runtime: content reader and Realm-join-only.
 // No Account/PCR surrogate or newly asserted receiver authority is constructed.
 
 fn native_read_refusal(
@@ -20,7 +20,7 @@ fn native_read_refusal(
 
 async fn realm_native_read_boundaries(
     fixture: &Fixture,
-    circle: &arkret_bridge_runtime::managed_device::ManagedDevice,
+    reader: &arkret_bridge_runtime::managed_device::ManagedDevice,
     parent: &arkret_bridge_runtime::managed_device::ManagedDevice,
     event_id: &EventId,
 ) {
@@ -33,21 +33,21 @@ async fn realm_native_read_boundaries(
         StreamScanDirection, StreamScanRequestBody,
     };
 
-    assert!(matches!(circle.effective_scope(), ScopeRef::Circle { .. }));
+    assert!(matches!(reader.effective_scope(), ScopeRef::Realm { .. }));
     assert_eq!(
         parent.effective_scope(),
         &ScopeRef::Realm {
             realm_id: fixture.realm.clone()
         }
     );
-    assert_eq!(circle.actor_id, parent.actor_id);
-    assert_ne!(circle.device_id, parent.device_id);
-    assert!(circle.actor_id.as_account_id().is_none());
+    assert_eq!(reader.actor_id, parent.actor_id);
+    assert_ne!(reader.device_id, parent.device_id);
+    assert!(reader.actor_id.as_account_id().is_none());
     let authority = fixture
         .state
         .test_persistence()
         .device_revocations()
-        .applet_managed_device_authority(&circle.actor_id, &circle.device_id, chrono::Utc::now())
+        .applet_managed_device_authority(&reader.actor_id, &reader.device_id, chrono::Utc::now())
         .await
         .unwrap()
         .unwrap();
@@ -60,7 +60,7 @@ async fn realm_native_read_boundaries(
         .unwrap()
         .unwrap();
     assert!(authority.scopes.permits(
-        circle.effective_scope(),
+        reader.effective_scope(),
         &[arkret_wire::CapabilityActionId::EventRead]
     ));
     assert!(parent_authority.scopes.permits(
@@ -71,11 +71,7 @@ async fn realm_native_read_boundaries(
         parent.effective_scope(),
         &[arkret_wire::CapabilityActionId::EventRead]
     ));
-    assert!(
-        !parent_authority
-            .scopes
-            .contains_scope(circle.effective_scope())
-    );
+    assert!(parent_authority.scopes.contains_scope(reader.effective_scope()));
 
     let original = fixture
         .state
@@ -85,14 +81,14 @@ async fn realm_native_read_boundaries(
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(&original.event.scope_ref, circle.effective_scope());
-    assert_eq!(original.event.actor_id, circle.actor_id);
+    assert_eq!(&original.event.scope_ref, reader.effective_scope());
+    assert_eq!(original.event.actor_id, reader.actor_id);
     let before = boxed_step(|| native_business_footprint(fixture)).await;
-    let view = boxed_step(|| circle.client().committed_event_get(event_id))
+    let view = boxed_step(|| reader.client().committed_event_get(event_id))
         .await
         .unwrap();
     let CommittedEventView::Full(full) = &view else {
-        panic!("own Circle original must be genuinely Full")
+        panic!("own Realm original must be genuinely Full")
     };
     assert_eq!(full.event, original.event);
     assert_eq!(full.commit, original.commit);
@@ -105,15 +101,15 @@ async fn realm_native_read_boundaries(
     };
     let selector = SignerKeyQuerySelector::HistoricalRealmDevice {
         sender_kind: RealmDeviceSignerKind::RealmDevice,
-        actor_id: circle.actor_id.clone(),
-        device_id: circle.device_id.clone(),
+        actor_id: reader.actor_id.clone(),
+        device_id: reader.device_id.clone(),
         verification_method: proof.verification_method.clone(),
         committed_event_ref: reference,
     };
     let current = SignerKeyQuerySelector::CurrentRealmDevice {
         sender_kind: RealmDeviceSignerKind::RealmDevice,
-        actor_id: circle.actor_id.clone(),
-        device_id: circle.device_id.clone(),
+        actor_id: reader.actor_id.clone(),
+        device_id: reader.device_id.clone(),
         verification_method: proof.verification_method.clone(),
     };
     let mut wrong_coordinate = selector.clone();
@@ -130,11 +126,11 @@ async fn realm_native_read_boundaries(
             .unwrap(),
         realm_id: fixture.realm.clone(),
         recipient_account_id: None,
-        recipient_actor_id: Some(circle.actor_id.clone()),
+        recipient_actor_id: Some(reader.actor_id.clone()),
         queries: vec![selector.clone(), current, wrong_coordinate],
     };
     query.validate().unwrap();
-    let keys = boxed_step(|| circle.client().signer_keys_query(&query))
+    let keys = boxed_step(|| reader.client().signer_keys_query(&query))
         .await
         .unwrap();
     keys.validate_for_request(&query).unwrap();
@@ -203,25 +199,25 @@ async fn realm_native_read_boundaries(
     )));
     assert_ne!(
         wrong_recipient.recipient_actor_id.as_ref(),
-        Some(&circle.actor_id)
+        Some(&reader.actor_id)
     );
     wrong_recipient.validate().unwrap();
     native_read_refusal(
-        boxed_step(|| circle.client().signer_keys_query(&wrong_recipient))
+        boxed_step(|| reader.client().signer_keys_query(&wrong_recipient))
             .await
             .unwrap_err(),
         404,
         ErrorCode::NotFound,
     );
 
-    let stream = CommitStreamRef::from_scope(circle.effective_scope(), None).unwrap();
+    let stream = CommitStreamRef::from_scope(reader.effective_scope(), None).unwrap();
     let mut request = StreamScanRequestBody {
         realm_id: fixture.realm.clone(),
         stream_ref: stream.clone(),
         direction: StreamScanDirection::After(None),
         limit: 1,
     };
-    let first = boxed_step(|| circle.client().scan_commit_stream(&request))
+    let first = boxed_step(|| reader.client().scan_commit_stream(&request))
         .await
         .unwrap();
     first.validate_for_request(&request).unwrap();
@@ -230,7 +226,7 @@ async fn realm_native_read_boundaries(
     assert_eq!(floor.floor_reason, ReadableFloorReason::MembershipJoin);
     assert!(
         floor.oldest_position > 0,
-        "actual native Circle join must have a real private prefix"
+        "actual native Realm join must have a real private prefix"
     );
     let join = fixture
         .state
@@ -242,8 +238,8 @@ async fn realm_native_read_boundaries(
         .unwrap();
     assert_eq!(join.commit.stream_ref, stream);
     assert_eq!(join.commit.stream_position, floor.oldest_position);
-    assert_eq!(join.event.kind, EventKind::CircleMemberState);
-    assert_eq!(join.event.payload["member_id"], json!(circle.actor_id));
+    assert_eq!(join.event.kind, EventKind::MemberState);
+    assert_eq!(join.event.payload["member_id"], json!(reader.actor_id));
     assert_eq!(join.event.payload["membership"], "join");
     let predecessor = fixture
         .state
@@ -257,7 +253,7 @@ async fn realm_native_read_boundaries(
     assert!(predecessor.commit.stream_position < floor.oldest_position);
     // Check actual prefix visibility through the registered resource route.
     match boxed_step(|| {
-        circle
+        reader
             .client()
             .committed_event_get(&predecessor.event.event_id)
     })
@@ -276,9 +272,9 @@ async fn realm_native_read_boundaries(
     let mut page = first;
     let mut pages = 1;
     while page.truncated {
-        assert!(pages < 128, "bounded real Circle stream did not terminate");
+        assert!(pages < 128, "bounded real Realm stream did not terminate");
         request.direction = StreamScanDirection::After(Some(previous.stream_position));
-        page = boxed_step(|| circle.client().scan_commit_stream(&request))
+        page = boxed_step(|| reader.client().scan_commit_stream(&request))
             .await
             .unwrap();
         page.validate_for_request(&request).unwrap();
@@ -303,7 +299,7 @@ async fn realm_native_read_boundaries(
         "scan must reach the supplied accepted native Message"
     );
     request.direction = StreamScanDirection::Before(Some(floor.oldest_position));
-    let below = boxed_step(|| circle.client().scan_commit_stream(&request))
+    let below = boxed_step(|| reader.client().scan_commit_stream(&request))
         .await
         .unwrap();
     below.validate_for_request(&request).unwrap();
@@ -311,9 +307,6 @@ async fn realm_native_read_boundaries(
     assert_eq!(below.readable_floor.as_ref(), Some(&floor));
 
     for wrong_stream in [
-        CommitStreamRef::Realm {
-            realm_id: fixture.realm.clone(),
-        },
         CommitStreamRef::RealmControl {
             realm_id: fixture.realm.clone(),
         },
@@ -325,7 +318,7 @@ async fn realm_native_read_boundaries(
             limit: 1,
         };
         native_read_refusal(
-            boxed_step(|| circle.client().scan_commit_stream(&request))
+            boxed_step(|| reader.client().scan_commit_stream(&request))
                 .await
                 .unwrap_err(),
             403,
@@ -345,7 +338,7 @@ async fn realm_native_read_boundaries(
     );
     native_read_refusal(
         boxed_step(|| {
-            circle
+            reader
                 .client()
                 .committed_event_get(&parent.authorization_event_id)
         })
@@ -354,27 +347,8 @@ async fn realm_native_read_boundaries(
         404,
         ErrorCode::NotFound,
     );
-    let realm_original = fixture.authority_event_ref.as_ref().unwrap();
-    assert!(
-        fixture
-            .state
-            .test_persistence()
-            .authority_commits()
-            .committed_event(realm_original)
-            .await
-            .unwrap()
-            .is_some()
-    );
-    native_read_refusal(
-        boxed_step(|| circle.client().committed_event_get(realm_original))
-            .await
-            .unwrap_err(),
-        404,
-        ErrorCode::NotFound,
-    );
-
     // This independently signed Device can join the parent Realm, but has no
-    // EventRead or Circle scope. None of these calls may borrow its sibling's
+    // EventRead. None of these calls may borrow its sibling's
     // business authority merely because actor_id and host are equal.
     native_read_refusal(
         boxed_step(|| parent.client().committed_event_get(event_id))

@@ -1,7 +1,7 @@
 //! Arkret v1 protocol-compliant ID generation.
 //!
 //! Producer-allocated typed IDs use RFC 9562 UUIDv7 tokens. Event-derived IDs
-//! (`event`, `realm`, `space`, `circle`, `strand`, and peers) instead retain
+//! (`event`, `realm`, `space`, `strand`, and peers) instead retain
 //! the complete 264-bit, 44-character Event token and must never pass through
 //! the UUID persistence helpers in this module.
 //!
@@ -22,7 +22,7 @@ use uuid::Uuid;
 /// [`arkret_identifiers::new_prefixed_uuid7`] so the canonical lowercase UUIDv7 wire
 /// form is produced by the single shared primitive.
 /// Generators exist only for producer-allocated kinds. The event-derived kinds
-/// (`realm`, `space`, `event`, `relation`, `circle`, `strand`, `message`,
+/// (`realm`, `space`, `event`, `relation`, `strand`, `message`,
 /// `morph`, `view`, `actor_profile`) have no generator at all: their ids come
 /// from the create Event, so a server that minted one would be naming an object
 /// no receiver can agree with (spec `zh/models/common-fields.md` section 6.0).

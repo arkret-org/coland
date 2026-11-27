@@ -242,22 +242,6 @@ pub(crate) fn event_operation_id(envelope: &Value, event_id: &str) -> Option<Ope
     .ok()
 }
 
-/// Resolve the Event's producer-signed `scope_ref` for read-path visibility.
-pub(crate) fn effective_scope_for_envelope(envelope: &Value) -> Option<String> {
-    let scope = envelope.get("scope_ref")?.as_object()?;
-    match scope.get("kind").and_then(Value::as_str) {
-        Some("circle") => scope
-            .get("circle_id")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned),
-        Some("realm") => scope
-            .get("realm_id")
-            .and_then(Value::as_str)
-            .map(|realm_id| format!("realm:{realm_id}")),
-        _ => None,
-    }
-}
-
 /// Strict accepted-envelope materialization for canonical scans. Privacy views
 /// are applied by the caller; signed payloads must never be rewritten in place.
 #[cfg(test)]
@@ -414,6 +398,9 @@ pub(crate) async fn event_visible_to_session(
     let Some(session_actor) = session_actor_id(state, session) else {
         return false;
     };
+    let Some(scope) = record.envelope.get("scope_ref")
+        .and_then(|raw| serde_json::from_value::<arkret_wire::ScopeRef>(raw.clone()).ok())
+    else { return false; };
     if session_actor.to_string() == record.actor_id {
         return true;
     }
@@ -466,6 +453,7 @@ pub(crate) async fn event_visible_to_session(
     }
     match canonical_realm_id_for_record(record) {
         Some(realm_id) => {
+            if !matches!(scope, arkret_wire::ScopeRef::Realm { .. } | arkret_wire::ScopeRef::RealmGenesis) { return false; }
             // Agent PCR Events are authored as the Agent Actor, while the
             // delegated human controller owns the device key that signs the
             // accepted Seal. The controller must be able to resolve the exact
@@ -483,7 +471,7 @@ pub(crate) async fn event_visible_to_session(
                 .flatten()
                 .is_some()
             {
-                return circle_event_visible_to_session(state, record, session);
+                return true;
             }
             // The genesis and reanchor anchors remain visible to current
             // members. Other history follows the signed scope and join cut;
@@ -500,36 +488,10 @@ pub(crate) async fn event_visible_to_session(
                 )
                 .await
             };
-            realm_visible && circle_event_visible_to_session(state, record, session)
+            realm_visible
         }
         None => false,
     }
-}
-
-fn circle_event_visible_to_session(
-    state: &AppState,
-    record: &AcceptedEvent,
-    session: &SessionRecord,
-) -> bool {
-    let Some(scope_circle_id) = effective_scope_for_envelope(&record.envelope)
-        .filter(|scope| scope.starts_with("ak:circle:"))
-    else {
-        return true;
-    };
-    let Some(session_actor) = session_actor_id(state, session) else {
-        return false;
-    };
-    if record.actor_id == session_actor.to_string() {
-        return true;
-    }
-    state
-        .projections()
-        .snapshot()
-        .circle_scope_visible_to_actor_at(
-            &scope_circle_id,
-            &session_actor.to_string(),
-            record.received_at,
-        )
 }
 
 #[cfg(test)]
@@ -560,18 +522,16 @@ mod refs_limit_tests {
         };
         let mut record = visibility_record(
             arkret_wire::event_kind_str::MESSAGE_CREATE,
-            json!({"scope_ref": {"kind": "circle", "circle_id": "ak:circle:fixture"}}),
+            json!({"scope_ref": {"kind": "realm_genesis"}}),
         );
         record.actor_id = session_actor_id(&state, &session).unwrap().to_string();
         assert!(event_visible_to_session(&state, &record, &session).await);
-        assert!(circle_event_visible_to_session(&state, &record, &session));
         record.actor_id = arkret_wire::ActorId::account(arkret_wire::AccountId::new(
             arkret_wire::DidCoreId::new(session.actor.clone()).unwrap(),
             arkret_wire::DidCoreId::new("ak:did_core:web:other-station.example").unwrap(),
         ))
         .to_string();
         assert!(!event_visible_to_session(&state, &record, &session).await);
-        assert!(!circle_event_visible_to_session(&state, &record, &session));
     }
 
     fn semantic_refs_object(refs: serde_json::Value) -> serde_json::Map<String, Value> {

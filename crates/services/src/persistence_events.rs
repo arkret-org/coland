@@ -600,16 +600,6 @@ impl crate::events::AppletPort for PersistenceEventReader {
 
 #[async_trait::async_trait]
 impl crate::events::ProjectionWritePort for PersistenceProjectionWriter {
-    async fn store_circle_projection(
-        &self,
-        record: &crate::events::CircleProjectionRecord,
-        members: &[crate::events::CircleMemberProjectionRecord],
-    ) -> crate::ServiceResult<()> {
-        let circles = self.persistence.circle_projections();
-        circles.put(record).await?;
-        circles.put_members(&record.circle_id, members).await?;
-        Ok(())
-    }
 
     async fn store_morph_projection(
         &self,
@@ -618,7 +608,7 @@ impl crate::events::ProjectionWritePort for PersistenceProjectionWriter {
         let record = coland_storage::MorphProjectionRecord {
             morph_id: record.morph_id.clone(),
             realm_id: record.realm_id.clone(),
-            scope_circle_id: record.scope_circle_id.clone(),
+
             morph_kind: record.morph_kind.clone(),
             title: record.title.clone(),
             fields: encode_mls_contract(&record.fields, "Morph fields")?,

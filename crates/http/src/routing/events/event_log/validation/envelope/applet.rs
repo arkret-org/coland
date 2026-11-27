@@ -29,26 +29,21 @@ mod managed_actor_scope_selection_tests {
         let realm = arkret_wire::ScopeRef::Realm {
             realm_id: realm_id.clone(),
         };
-        let circle = arkret_wire::ScopeRef::Circle {
-            realm_id: realm_id.clone(),
-            circle_id: arkret_wire::CircleId::new(
-                "ak:circle:AXTOWXiR0H0NRFksL2Dt7uYvlaNckYIqkzsoMPPxW5MH".to_owned(),
-            )
-            .unwrap(),
-        };
+        let other_id = arkret_wire::RealmId::new("ak:realm:AQpwDm7ZXVTjUWCnaqcmxxZ49Y8CpzFJ-vLzmvCjBXfw").unwrap();
+        let other = arkret_wire::ScopeRef::realm(other_id.clone());
         assert!(!managed_actor_installation_selects_event(
             &realm,
             realm_id.as_str(),
-            Some(&circle),
-            realm_id.as_str(),
+            Some(&other),
+            other_id.as_str(),
             false,
             "ak:realm:pcr"
         ));
         assert!(managed_actor_installation_selects_event(
-            &circle,
-            realm_id.as_str(),
-            Some(&circle),
-            realm_id.as_str(),
+            &other,
+            other_id.as_str(),
+            Some(&other),
+            other_id.as_str(),
             false,
             "ak:realm:pcr"
         ));

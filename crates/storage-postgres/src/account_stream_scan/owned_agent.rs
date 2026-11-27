@@ -43,7 +43,7 @@ impl ProjectReadAuthority {
         let realm = &request.scan.realm_id;
         if !matches!(
             request.scan.stream_ref,
-            CommitStreamRef::Realm { .. } | CommitStreamRef::Circle { .. }
+            CommitStreamRef::Realm { .. }
         ) {
             return Err(denied());
         }
@@ -57,7 +57,7 @@ impl ProjectReadAuthority {
             controller_join_event_id: pair.controller_commit.event_ref.clone(),
             agent_join_event_id: pair.agent_commit.event_ref.clone(),
         };
-        let policies = crate::policy_current_states::read_scoped_agent_management_policy_snapshot_in_connection(conn, realm, None).await?;
+        let policies = crate::policy_current_states::read_scoped_agent_management_policy_snapshot_in_connection(conn, realm).await?;
         let resources = vec![vec![PolicyResourceSelector {
             kind: PolicyResourceKind::Realm,
             realm_id: Some(realm.clone()),
@@ -159,7 +159,7 @@ pub(crate) async fn acquire(
     let realm = &request.scan.realm_id;
     if !matches!(
         request.scan.stream_ref,
-        CommitStreamRef::Realm { .. } | CommitStreamRef::Circle { .. }
+        CommitStreamRef::Realm { .. }
     ) {
         return Err(denied());
     }
@@ -214,15 +214,6 @@ pub(crate) async fn acquire(
         CommitStreamRef::Realm { .. } => {
             crate::account_stream_scan::caller_realm_floor_in_connection(conn, realm, &agent_actor)
                 .await?
-        }
-        CommitStreamRef::Circle { circle_id, .. } => {
-            crate::account_stream_scan::caller_circle_floor_in_connection(
-                conn,
-                realm,
-                circle_id,
-                &agent_actor,
-            )
-            .await?
         }
         _ => return Err(denied()),
     }

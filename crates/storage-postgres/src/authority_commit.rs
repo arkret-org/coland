@@ -780,7 +780,7 @@ pub(crate) const SNAPSHOT_CURRENT_SQL: &str = "SELECT result.*, \
                 current_commit_id, current_stream_position, value \
            FROM realm_bootstrap_current_states WHERE realm_id = $1 \
          UNION ALL \
-         SELECT 'scope_read_receipt_policy'::text AS selector_kind, scope_ref AS selector_subject, \
+         SELECT 'scope_read_receipt_policy'::text AS selector_kind, NULL::jsonb AS selector_subject, \
                 current_commit_id, current_stream_position, value \
            FROM scope_read_receipt_policy_current_states WHERE realm_id = $1 \
          UNION ALL \
@@ -847,15 +847,6 @@ pub(crate) const SNAPSHOT_CURRENT_SQL: &str = "SELECT result.*, \
                 jsonb_build_object('kind','agent_sidecar_exchange_controls','sidecar_id',sidecar_id,'source_context_ref',context_ref) AS selector_subject, \
                 current_commit_id,current_stream_position,value \
            FROM sidecar_exchange_controls_current_states WHERE realm_id=$1 \
-         UNION ALL \
-         SELECT 'circle'::text AS selector_kind, to_jsonb(circle_id) AS selector_subject, \
-                current_commit_id, current_stream_position, value \
-           FROM circle_current_states WHERE realm_id = $1 AND circle_current_row_proved(realm_id,jsonb_build_object('kind','circle','circle_id',circle_id),source_stream_ref,current_commit_id,current_stream_position,value) \
-         UNION ALL \
-         SELECT 'circle_member_state'::text AS selector_kind, \
-                jsonb_build_object('kind','circle_member_state','circle_id',circle_id,'member_actor_id',member_id::jsonb) AS selector_subject, \
-                current_commit_id, current_stream_position, value \
-           FROM circle_member_state_current_states WHERE realm_id = $1 AND circle_current_row_proved(realm_id,jsonb_build_object('kind','circle_member_state','circle_id',circle_id,'member_actor_id',member_id::jsonb),source_stream_ref,current_commit_id,current_stream_position,value) \
          UNION ALL \
          SELECT 'call_state'::text AS selector_kind, to_jsonb(call_id) AS selector_subject, \
                 current_commit_id, current_stream_position, value \
@@ -1065,9 +1056,7 @@ pub(crate) async fn realm_state_snapshot_material_in_connection(
                 ("sidecar_context" | "agent_sidecar_exchange_controls", Some(selector)) => serde_json::from_value(selector).map_err(PersistenceError::database)?,
                 ("realm_join_rule", None) => arkret_wire::CurrentSelector::RealmJoinRule,
                 ("realm_history_access", None) => arkret_wire::CurrentSelector::RealmHistoryAccess,
-                ("scope_read_receipt_policy", Some(scope_ref)) => arkret_wire::CurrentSelector::ScopeReadReceiptPolicy {
-                    scope_ref: decode_json(scope_ref, "receipt policy scope")?,
-                },
+                ("scope_read_receipt_policy", None) => arkret_wire::CurrentSelector::ScopeReadReceiptPolicy,
                 ("realm_discovery", None) => arkret_wire::CurrentSelector::RealmDiscovery,
                 ("realm_alias", None) => arkret_wire::CurrentSelector::RealmAlias,
                 ("realm_plaintext_visible_services", None) => {
@@ -1094,13 +1083,6 @@ pub(crate) async fn realm_state_snapshot_material_in_connection(
                     .map_err(|error| PersistenceError::Internal(format!("stored member identity selector is invalid: {error}")))?,
                 ("actor_profile", Some(id)) => arkret_wire::CurrentSelector::ActorProfile {actor_profile_id:serde_json::from_value(id).map_err(PersistenceError::database)?},
                 ("applet_registration", Some(selector)) => serde_json::from_value::<arkret_wire::CurrentSelector>(selector).map_err(PersistenceError::database)?,
-                ("circle", Some(circle_id)) => arkret_wire::CurrentSelector::Circle {
-                    circle_id: serde_json::from_value(circle_id).map_err(|error| {
-                        PersistenceError::Internal(format!("stored Circle selector identity is invalid: {error}"))
-                    })?,
-                },
-                ("circle_member_state", Some(selector)) => serde_json::from_value::<arkret_wire::CurrentSelector>(selector)
-                    .map_err(|error| PersistenceError::Internal(format!("stored Circle member selector is invalid: {error}")))?,
                 ("call_focus"|"call_roster"|"call_moderation"|"call_recording_state"|"call_recording_artifact"|"call_transcript_state"|"call_transcript_artifact",Some(selector)) => serde_json::from_value::<arkret_wire::CurrentSelector>(selector).map_err(PersistenceError::database)?,
                 ("realm_media_service",None)=>arkret_wire::CurrentSelector::RealmMediaService,
                 ("call_state", Some(call_id)) => arkret_wire::CurrentSelector::CallState {
@@ -2967,47 +2949,6 @@ pub(crate) async fn accepted_current_member_joined_in_connection(
     Ok(row.present)
 }
 
-/// Whether this Station's accepted parent Realm `member_state` current of
-/// `member` is `join` at exactly `bound` (`circle.md` section 9.1), the
-/// revision a Circle join signed. A local Realm replica that has not reached
-/// `bound` on the Realm stream, or already holds another revision, answers
-/// `false`; the comparison never uses a Circle-stream position.
-pub(crate) async fn parent_join_at_revision_in_connection(
-    conn: &mut AsyncPgConnection,
-    realm_id: &arkret_wire::RealmId,
-    member: &arkret_wire::ActorId,
-    bound: &arkret_wire::CurrentRevision,
-) -> PersistenceResult<bool> {
-    let row = sql_query(
-        "SELECT EXISTS (\
-            SELECT 1 FROM member_state_current_states m \
-            WHERE m.realm_id = $1 AND m.member_id = $2 AND m.membership = 'join' \
-              AND m.current_commit_id = $4 AND m.current_stream_position = $5 \
-              AND (EXISTS (SELECT 1 FROM realm_commits c \
-                           WHERE c.commit_id = m.current_commit_id \
-                             AND c.realm_id = m.realm_id \
-                             AND c.stream_position = m.current_stream_position \
-                             AND c.stream_ref->>'kind' = 'realm' \
-                             AND c.stream_ref->>'realm_id' = m.realm_id) \
-                   OR EXISTS (SELECT 1 FROM replica_stream_anchors a \
-                              WHERE a.realm_id = m.realm_id \
-                                AND a.stream_key=$3 \
-                                AND a.anchor_stream_position >= m.current_stream_position))\
-         ) AS present",
-    )
-    .bind::<Text, _>(realm_id.as_str())
-    .bind::<Text, _>(member.to_string())
-    .bind::<Text, _>(stream_key(&arkret_wire::CommitStreamRef::Realm {
-        realm_id: realm_id.clone(),
-    })?)
-    .bind::<Text, _>(bound.commit_id.as_str())
-    .bind::<BigInt, _>(i64::try_from(bound.stream_position).map_err(PersistenceError::database)?)
-    .get_result::<PresenceRow>(&mut *conn)
-    .await
-    .map_err(PersistenceError::database)?;
-    Ok(row.present)
-}
-
 #[derive(QueryableByName)]
 struct RosterControllerRow {
     #[diesel(sql_type = Jsonb)]
@@ -3028,7 +2969,7 @@ pub(crate) async fn accepted_realm_reader_in_connection(
 ) -> PersistenceResult<bool> {
     if accepted_current_member_joined_in_connection(conn, realm_id, actor).await? {
         if let Some(controller) = crate::agent_management_admission::read_controller_in_connection(
-            conn, realm_id, None, actor,
+            conn, realm_id, actor,
         )
         .await?
         {
@@ -4598,8 +4539,6 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         use arkret_models_collaboration::authority_commit::{
             AccountDeviceHistoricalSignerFact, SelfAuthoritySubmitRequestBody,
         };
-        use arkret_models_collaboration::events_payloads::CircleMemberStatePayload;
-        use arkret_models_collaboration::governance::circle::CircleMembership;
         use arkret_models_collaboration::governance::membership_invite::{
             MembershipPayload, MembershipPayloadState,
         };
@@ -4612,16 +4551,6 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
                     realm_id: realm_id.clone(),
                 }
             }
-            (
-                arkret_wire::EventKind::CircleMemberState,
-                arkret_wire::ScopeRef::Circle {
-                    realm_id,
-                    circle_id,
-                },
-            ) if realm_id == &event.realm_id => arkret_wire::CommitStreamRef::Circle {
-                realm_id: event.realm_id.clone(),
-                circle_id: circle_id.clone(),
-            },
             _ => return Ok(false),
         };
         if event.actor_id != actor
@@ -4634,38 +4563,19 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         {
             return Ok(false);
         }
-        let circle_leave = match &stream {
-            arkret_wire::CommitStreamRef::Realm { .. } => {
-                let payload: MembershipPayload = serde_json::from_value(
-                    serde_json::to_value(&event.payload).map_err(PersistenceError::database)?,
-                )
-                .map_err(invalid)?;
-                if payload.membership != MembershipPayloadState::Leave
-                    || payload.member_id != actor
-                    || payload
-                        .realm_id
-                        .as_ref()
-                        .is_some_and(|realm| realm != &event.realm_id)
-                {
-                    return Ok(false);
-                }
-                None
-            }
-            arkret_wire::CommitStreamRef::Circle { circle_id, .. } => {
-                let payload: CircleMemberStatePayload = serde_json::from_value(
-                    serde_json::to_value(&event.payload).map_err(PersistenceError::database)?,
-                )
-                .map_err(invalid)?;
-                if payload.membership != CircleMembership::Leave
-                    || payload.member_id != actor
-                    || &payload.circle_id != circle_id
-                {
-                    return Ok(false);
-                }
-                Some(payload)
-            }
-            _ => return Ok(false),
-        };
+        let payload: MembershipPayload = serde_json::from_value(
+            serde_json::to_value(&event.payload).map_err(PersistenceError::database)?,
+        )
+        .map_err(invalid)?;
+        if payload.membership != MembershipPayloadState::Leave
+            || payload.member_id != actor
+            || payload
+                .realm_id
+                .as_ref()
+                .is_some_and(|realm| realm != &event.realm_id)
+        {
+            return Ok(false);
+        }
         event
             .verify_event_id_matches_content_with_digest_suite(
                 event.event_id.digest_suite_code().digest_suite(),
@@ -4675,8 +4585,6 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         commit.verify_commit_id_matches_content().map_err(invalid)?;
         #[derive(QueryableByName)]
         struct BoundLeaveRow {
-            #[diesel(sql_type=Nullable<Jsonb>)]
-            circle_leave_parent_revision: Option<Value>,
             #[diesel(sql_type=Jsonb)]
             envelope: Value,
             #[diesel(sql_type=Jsonb)]
@@ -4701,17 +4609,14 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
             // identity of every later hosted submitter. Bind the own leave to
             // that Account's latest accepted membership predecessor instead.
             let row = sql_query(
-                "SELECT e.envelope,c.commit_json,f.circle_leave_parent_revision,f.original_submission_json AS submission_json, \
+                "SELECT e.envelope,c.commit_json,f.original_submission_json AS submission_json, \
                  f.terminal_outcome_json->'commit' AS accepted_json,k.producer_source_fact AS fact_json, \
                  m.value AS member_value,j.envelope AS join_envelope,jc.commit_json AS join_commit_json \
                  FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk \
                  JOIN authority_forward_attempts f ON f.event_pk=e.pk \
                  JOIN (SELECT realm_id,member_id,membership,current_commit_id,current_stream_position,value, \
                        jsonb_build_object('kind','realm','realm_id',realm_id) AS source_stream_ref \
-                       FROM member_state_current_states \
-                       UNION ALL SELECT realm_id,member_id,membership,current_commit_id,current_stream_position,value, \
-                       source_stream_ref FROM circle_member_state_current_states \
-                       WHERE source_stream_ref->>'circle_id'=circle_id) m \
+                       FROM member_state_current_states) m \
                    ON m.realm_id=c.realm_id AND m.member_id=$2 AND m.source_stream_ref=c.stream_ref \
                  JOIN replica_stream_anchors a ON a.realm_id=c.realm_id AND a.stream_key=c.stream_key \
                  JOIN realm_commits opening ON opening.commit_id=a.join_commit_id \
@@ -4721,7 +4626,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
                    WHERE prior.realm_id=c.realm_id AND prior.stream_key=c.stream_key AND prior.stream_ref=c.stream_ref \
                      AND prior.stream_position<c.stream_position \
                      AND ((pe.kind IN ('ak.invite.accept','ak.realm_invite_link.accept') AND pe.envelope->'actor_id'=$8) \
-                       OR (pe.kind IN ('ak.member.state','ak.circle.member.state') \
+                       OR (pe.kind='ak.member.state' \
                            AND pe.envelope->'payload'->'member_id'=$8)) \
                    ORDER BY prior.stream_position DESC LIMIT 1) jc ON true \
                  JOIN canonical_events j ON j.pk=jc.event_pk \
@@ -4735,7 +4640,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
                    AND opening.stream_position<=jc.stream_position \
                    AND oe.envelope->'actor_id'=jsonb_build_object('kind','account','account_id',a.member_account_id) \
                    AND ((oe.kind IN ('ak.invite.accept','ak.realm_invite_link.accept') AND c.stream_ref->>'kind'='realm') \
-                     OR (oe.kind IN ('ak.member.state','ak.circle.member.state') \
+                     OR (oe.kind='ak.member.state' \
                        AND oe.envelope->'payload'->>'membership'='join' \
                        AND oe.envelope->'payload'->'member_id'=oe.envelope->'actor_id')) \
                    AND jc.realm_id=c.realm_id AND jc.stream_key=c.stream_key AND jc.stream_ref=c.stream_ref \
@@ -4763,37 +4668,15 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
                 || join_event.scope_ref != event.scope_ref || join_commit.event_ref != join_event.event_id
                 || join_commit.stream_ref != stream
             { return Ok(false); }
-            let current_matches = if let Some(payload) = &circle_leave {
-                let member: arkret_wire::CircleMemberStateValue = decode_json(row.member_value, "bound Circle leave effective membership")?;
-                member.membership == arkret_wire::MembershipState::Leave
-                    && member.parent_membership_revision.is_none()
-                    && member.effective_at == payload.effective_at.unwrap_or(event.created_at)
-            } else {
-                let member: arkret_wire::MemberStateValue = decode_json(row.member_value, "bound leave effective membership")?;
-                member == (arkret_wire::MemberStateValue { membership: arkret_wire::MembershipState::Leave, joined_at: None })
-            };
-            if !current_matches { return Ok(false); }
+            let member: arkret_wire::MemberStateValue = decode_json(row.member_value, "bound leave effective membership")?;
+            if member != (arkret_wire::MemberStateValue { membership: arkret_wire::MembershipState::Leave, joined_at: None }) { return Ok(false); }
             let own_join = match join_event.kind {
-                arkret_wire::EventKind::InviteAccept | arkret_wire::EventKind::RealmInviteLinkAccept if circle_leave.is_none() => true,
-                arkret_wire::EventKind::MemberState if circle_leave.is_none() => {
+                arkret_wire::EventKind::InviteAccept | arkret_wire::EventKind::RealmInviteLinkAccept => true,
+                arkret_wire::EventKind::MemberState => {
                     let value: MembershipPayload = serde_json::from_value(serde_json::to_value(&join_event.payload)
                         .map_err(PersistenceError::database)?).map_err(invalid)?;
                     value.membership == MembershipPayloadState::Join && value.member_id == actor
                         && value.realm_id.as_ref().is_none_or(|realm| realm == &event.realm_id)
-                }
-                arkret_wire::EventKind::CircleMemberState if circle_leave.is_some() => {
-                    let value: CircleMemberStatePayload = serde_json::from_value(serde_json::to_value(&join_event.payload)
-                        .map_err(PersistenceError::database)?).map_err(invalid)?;
-                    value.membership == CircleMembership::Join
-                        && value.member_id == actor && Some(&value.circle_id) == circle_leave.as_ref().map(|leave| &leave.circle_id)
-                        && value.parent_membership_revision.is_some()
-                        && match row.circle_leave_parent_revision {
-                            Some(bound) => {
-                                let bound: arkret_wire::CurrentRevision = decode_json(bound, "bound Circle leave parent revision")?;
-                                parent_join_at_revision_in_connection(conn, &event.realm_id, &actor, &bound).await?
-                            },
-                            None => false,
-                        }
                 }
                 _ => false,
             };
@@ -4807,41 +4690,6 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         }).await.map_err(PgTransactionError::into_persistence)
     }
 
-    async fn circle_views_for_actor(
-        &self,
-        realm_id: &arkret_wire::RealmId,
-        actor: &arkret_wire::ActorId,
-    ) -> PersistenceResult<Vec<arkret_models_collaboration::governance::circle::CircleView>> {
-        crate::circle_reads::circle_views_for_actor(&self.pool, realm_id, actor).await
-    }
-
-    async fn circle_reads_for_actor(
-        &self,
-        realm_id: &arkret_wire::RealmId,
-        actor: &arkret_wire::ActorId,
-    ) -> PersistenceResult<Vec<arkret_models_collaboration::governance::circle::CircleReadView>>
-    {
-        crate::circle_reads::circle_reads_for_actor(&self.pool, realm_id, actor).await
-    }
-
-    async fn circle_view_for_actor(
-        &self,
-        circle_id: &arkret_wire::CircleId,
-        actor: &arkret_wire::ActorId,
-    ) -> PersistenceResult<Option<arkret_models_collaboration::governance::circle::CircleView>>
-    {
-        crate::circle_reads::circle_view_for_actor(&self.pool, circle_id, actor).await
-    }
-
-    async fn circle_read_for_actor(
-        &self,
-        circle_id: &arkret_wire::CircleId,
-        actor: &arkret_wire::ActorId,
-    ) -> PersistenceResult<Option<arkret_models_collaboration::governance::circle::CircleReadView>>
-    {
-        crate::circle_reads::circle_read_for_actor(&self.pool, circle_id, actor).await
-    }
-
     async fn replica_authorization_head(
         &self,
         stream: &arkret_wire::CommitStreamRef,
@@ -4849,29 +4697,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
         sql_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY").execute(&mut *conn).await?;
-        if let arkret_wire::CommitStreamRef::Circle {
-            realm_id,
-            circle_id,
-        } = stream
-        {
-            if !crate::circle_current_states::metadata_proved_in_connection(
-                &mut *conn, realm_id, circle_id,
-            )
-            .await?
-            {
-                return Ok(None);
-            }
-            #[derive(QueryableByName)]
-            struct Unknown {
-                #[diesel(sql_type=diesel::sql_types::Bool)]
-                present: bool,
-            }
-            let unknown = sql_query("SELECT EXISTS(SELECT 1 FROM circle_member_state_current_states m WHERE m.realm_id=$1 AND m.circle_id=$2 AND m.membership='join' AND circle_member_parent_join_current(m.realm_id,m.member_id,m.value) AND NOT circle_current_row_proved(m.realm_id,jsonb_build_object('kind','circle_member_state','circle_id',m.circle_id,'member_actor_id',m.member_id::jsonb),m.source_stream_ref,m.current_commit_id,m.current_stream_position,m.value)) AS present")
-                .bind::<Text,_>(realm_id.as_str()).bind::<Text,_>(circle_id.as_str()).get_result::<Unknown>(&mut *conn).await.map_err(PersistenceError::database)?.present;
-            if unknown {
-                return Ok(None);
-            }
-        }
+
         crate::replica_authorization::verified_head(conn, stream).await.map_err(Into::into)
         }).await.map_err(PgTransactionError::into_persistence)
     }
@@ -4896,7 +4722,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
             stream_ref: serde_json::Value,
         }
         let mut conn = pg_conn(&self.pool).await?;
-        sql_query("SELECT c.stream_ref FROM replica_stream_anchors a JOIN realm_commits c ON c.commit_id=a.join_commit_id WHERE a.anchor_commit_id IS NULL OR NOT EXISTS(SELECT 1 FROM replica_authorization_cuts cut WHERE cut.realm_id=a.realm_id AND cut.source_stream_ref=jsonb_build_object('kind','realm','realm_id',a.realm_id)) OR (c.stream_ref->>'kind'='circle' AND EXISTS(SELECT 1 FROM circle_member_state_current_states m WHERE m.realm_id=a.realm_id AND m.circle_id=c.stream_ref->>'circle_id' AND m.membership='join' AND circle_member_parent_join_current(m.realm_id,m.member_id,m.value)) AND (NOT EXISTS(SELECT 1 FROM circle_current_states r WHERE r.realm_id=a.realm_id AND r.circle_id=c.stream_ref->>'circle_id' AND circle_current_row_proved(r.realm_id,jsonb_build_object('kind','circle','circle_id',r.circle_id),r.source_stream_ref,r.current_commit_id,r.current_stream_position,r.value)) OR EXISTS(SELECT 1 FROM circle_member_state_current_states m WHERE m.realm_id=a.realm_id AND m.circle_id=c.stream_ref->>'circle_id' AND m.membership='join' AND circle_member_parent_join_current(m.realm_id,m.member_id,m.value) AND NOT circle_current_row_proved(m.realm_id,jsonb_build_object('kind','circle_member_state','circle_id',m.circle_id,'member_actor_id',m.member_id::jsonb),m.source_stream_ref,m.current_commit_id,m.current_stream_position,m.value)))) ORDER BY a.stream_key")
+        sql_query("SELECT c.stream_ref FROM replica_stream_anchors a JOIN realm_commits c ON c.commit_id=a.join_commit_id WHERE a.anchor_commit_id IS NULL OR NOT EXISTS(SELECT 1 FROM replica_authorization_cuts cut WHERE cut.realm_id=a.realm_id AND cut.source_stream_ref=jsonb_build_object('kind','realm','realm_id',a.realm_id)) ORDER BY a.stream_key")
             .load::<StreamRow>(&mut conn).await.map_err(PersistenceError::database)?.into_iter().map(|row| decode_json(row.stream_ref, "pending replica stream")).collect()
     }
 
@@ -5355,49 +5181,19 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         }
         let token = ids::parse_event_id(event.event_id.as_str())
             .ok_or_else(|| invalid("invalid Event token"))?;
-        // Freeze the parent cut before sending the original own Circle leave.
-        // Its old canonical join may already be effective-invalid after a
-        // parent rejoin; that does not authorize content, but the new exact
-        // parent cut can bind delivery of this explicit cleanup write result.
-        let own_circle_leave = if event.kind == arkret_wire::EventKind::CircleMemberState
-            && matches!(event.scope_ref, arkret_wire::ScopeRef::Circle { .. })
-            && event.actor_id.as_account_id().is_some()
-            && event.executed_by.is_none()
-        {
-            let payload: arkret_models_collaboration::events_payloads::CircleMemberStatePayload =
-                serde_json::from_value(
-                    serde_json::to_value(&event.payload).map_err(PersistenceError::database)?,
-                )
-                .map_err(invalid)?;
-            payload.membership
-                == arkret_models_collaboration::governance::circle::CircleMembership::Leave
-                && payload.member_id == event.actor_id
-        } else {
-            false
-        };
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_, PgTransactionError, _>(async |conn| {
         require_forward_private_owner(conn, event).await?;
         queue_event_in_connection(conn, event, at).await?;
         let written = sql_query(
-            "INSERT INTO authority_forward_attempts (event_pk,status,reason_code,attempted_at,original_submission_json,circle_leave_parent_revision) \
-             SELECT e.pk,'forwarding',NULL,$3,$2, \
-                 CASE WHEN $5 THEN (SELECT jsonb_build_object('commit_id',m.current_commit_id,'stream_position',m.current_stream_position) \
-                    FROM member_state_current_states m WHERE m.realm_id=$6 AND m.member_id=$7 AND m.membership='join' \
-                      AND (EXISTS(SELECT 1 FROM realm_commits c WHERE c.commit_id=m.current_commit_id AND c.realm_id=m.realm_id \
-                           AND c.stream_position=m.current_stream_position AND c.stream_ref=jsonb_build_object('kind','realm','realm_id',m.realm_id)) \
-                        OR EXISTS(SELECT 1 FROM replica_stream_anchors a WHERE a.realm_id=m.realm_id AND a.stream_key=$8 \
-                           AND a.anchor_stream_position>=m.current_stream_position))) END \
+            "INSERT INTO authority_forward_attempts (event_pk,status,reason_code,attempted_at,original_submission_json) \
+             SELECT e.pk,'forwarding',NULL,$3,$2 \
              FROM canonical_events e WHERE e.id=$1 AND e.envelope=$4 \
-             ON CONFLICT(event_pk) DO UPDATE SET original_submission_json=EXCLUDED.original_submission_json, \
-                circle_leave_parent_revision=CASE WHEN authority_forward_attempts.original_submission_json IS NULL \
-                  THEN EXCLUDED.circle_leave_parent_revision ELSE authority_forward_attempts.circle_leave_parent_revision END \
+             ON CONFLICT(event_pk) DO UPDATE SET original_submission_json=EXCLUDED.original_submission_json \
              WHERE authority_forward_attempts.original_submission_json IS NULL \
                 OR authority_forward_attempts.original_submission_json=EXCLUDED.original_submission_json"
         ).bind::<Binary,_>(token.to_vec()).bind::<Jsonb,_>(serde_json::to_value(submission).map_err(PersistenceError::database)?)
          .bind::<Timestamptz,_>(at).bind::<Jsonb,_>(serde_json::to_value(event).map_err(PersistenceError::database)?)
-         .bind::<Bool,_>(own_circle_leave).bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(event.actor_id.to_string())
-         .bind::<Text,_>(stream_key(&arkret_wire::CommitStreamRef::Realm { realm_id: event.realm_id.clone() })?)
          .execute(&mut *conn).await?;
         if written != 1 {
             return Err(forward_original_conflict(
@@ -7360,7 +7156,6 @@ impl PgAuthorityCommitStore {
                     .bind::<Text,_>(handoff.handoff_id.as_str()).bind::<Text,_>(handoff.realm_id.as_str())
                     .bind::<Jsonb,_>(serde_json::to_value(manifest).map_err(invalid)?).execute(&mut *conn).await?;
             }
-            crate::replica_authorization::invalidate_circle_continuation(conn, &handoff.realm_id).await?;
             handoff_replica::retain_outgoing_cut(conn, handoff, snapshot).await?;
             sql_query("INSERT INTO management_private_handoff_imports(handoff_id,realm_id,manifest) VALUES($1,$2,$3)")
                 .bind::<Text,_>(handoff.handoff_id.as_str()).bind::<Text,_>(handoff.realm_id.as_str())

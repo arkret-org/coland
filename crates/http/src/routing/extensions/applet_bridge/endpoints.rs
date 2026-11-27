@@ -1778,13 +1778,7 @@ mod revoke_saga_tests {
         assert_eq!(intent.member_id, member);
         assert_eq!(intent.membership, AppletManagedMembershipRemoval::Leave);
 
-        let other_scope = arkret_wire::ScopeRef::Circle {
-            realm_id: arkret_wire::RealmId::new(REALM_ID).unwrap(),
-            circle_id: arkret_wire::CircleId::new(
-                "ak:circle:AXqIXbu56hFXteZXtkBsqJxy_puV4mhSv1U0ZkUldxAL",
-            )
-            .unwrap(),
-        };
+        let other_scope = arkret_wire::ScopeRef::realm(arkret_wire::RealmId::from_event_id(&arkret_wire::EventId::from_digest(arkret_canonical::DigestSuite::Sha256,[78;32])));
         let other = current_join_event(other_scope, &member, TARGET_GRANT);
         assert!(
             classify_current_managed_membership(

@@ -1274,8 +1274,8 @@ struct PeerReadAuthz {
     realm_meta: BTreeMap<String, RealmMetaRecord>,
     realm_members: BTreeMap<String, BTreeMap<String, PeerMembership>>,
     pending_realm_invites: BTreeMap<(String, String), PendingPeerInvite>,
-    circles: BTreeMap<String, PeerCircleState>,
-    circle_members: BTreeMap<String, BTreeMap<String, PeerMembership>>,
+
+
 }
 
 #[cfg(test)]
@@ -1290,18 +1290,6 @@ struct PeerMembership {
 struct PendingPeerInvite {
     invitee_account_id: arkret_wire::AccountId,
     invited_at: DateTime<Utc>,
-}
-
-#[cfg(test)]
-#[derive(Clone, Debug)]
-#[expect(
-    dead_code,
-    reason = "The test fixture retains its complete envelope while each unit case inspects only its relevant fields."
-)]
-struct PeerCircleState {
-    realm_id: String,
-    history_access: String,
-    active: bool,
 }
 
 #[cfg(test)]
@@ -1438,67 +1426,7 @@ impl PeerReadAuthz {
         }
     }
 
-    fn apply_circle_member_record(&mut self, record: &AcceptedEvent) {
-        if record.kind != arkret_wire::EventKind::CircleMemberState.as_str() {
-            return;
-        }
-        let Some(payload) = record_payload(record) else {
-            return;
-        };
-        let Some(circle_id) = payload.get("circle_id").and_then(Value::as_str) else {
-            return;
-        };
-        let Some(actor_id) = payload
-            .get("member_id")
-            .and_then(|value| serde_json::from_value::<arkret_wire::ActorId>(value.clone()).ok())
-        else {
-            return;
-        };
-        let actor = actor_id.to_string();
-        let state = payload
-            .get("membership")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        match state {
-            "join" | "active" => {
-                let previous = self
-                    .circle_members
-                    .get(circle_id)
-                    .and_then(|members| members.get(&actor));
-                let membership = PeerMembership {
-                    joined_at: previous
-                        .map(|member| member.joined_at)
-                        .unwrap_or_else(|| record_event_time(record)),
-                    invited_at: previous.and_then(|member| member.invited_at),
-                };
-                self.circle_members
-                    .entry(circle_id.to_owned())
-                    .or_default()
-                    .insert(actor.to_owned(), membership);
-            }
-            "invite" | "invited" => {
-                if let Some(member) = self
-                    .circle_members
-                    .entry(circle_id.to_owned())
-                    .or_default()
-                    .get_mut(&actor)
-                {
-                    member
-                        .invited_at
-                        .get_or_insert_with(|| record_event_time(record));
-                }
-            }
-            "leave" | "ban" | "removed" | "banned" | "left" => {
-                if let Some(members) = self.circle_members.get_mut(circle_id) {
-                    members.remove(&actor);
-                    if members.is_empty() {
-                        self.circle_members.remove(circle_id);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
+
 }
 
 #[cfg(test)]
@@ -1508,7 +1436,7 @@ fn record_requires_private_plaintext_visibility(record: &AcceptedEvent) -> bool 
         .is_some_and(|event| {
             matches!(
                 event.kind,
-                arkret_wire::EventKind::MemberState | arkret_wire::EventKind::CircleMemberState
+                arkret_wire::EventKind::MemberState
             )
         })
     {
@@ -1866,7 +1794,7 @@ mod membership_identity_tests {
     }
 
     #[test]
-    fn accepted_membership_rebuild_keeps_station_accounts_and_circle_keys_exact() {
+    fn accepted_membership_rebuild_keeps_station_accounts_exact() {
         let source = "ak:did_core:web:source.example";
         let local = arkret_wire::ActorId::account(account(source));
         let foreign = arkret_wire::ActorId::account(account("ak:did_core:web:other.example"));
@@ -1875,8 +1803,8 @@ mod membership_identity_tests {
             realm_meta: BTreeMap::new(),
             realm_members: BTreeMap::new(),
             pending_realm_invites: BTreeMap::new(),
-            circles: BTreeMap::new(),
-            circle_members: BTreeMap::new(),
+
+
         };
         let mut member = record(
             "ak.member.state",
@@ -1907,32 +1835,6 @@ mod membership_identity_tests {
             !authz.realm_members[&realm].contains_key(&foreign.to_string()),
             "retired state alias must not grant peer visibility"
         );
-
-        let circle = "ak:circle:ATOTi3sw4NO_6LjlHGedSYTeT3Leu2J3Tb49M1gn9cFN";
-        for actor in [&local, &foreign] {
-            authz.apply_circle_member_record(&record(
-                "ak.circle.member.state",
-                actor,
-                json!({"circle_id": circle, "member_id": actor, "membership": "join"}),
-            ));
-        }
-        assert_eq!(authz.circle_members[circle].len(), 2);
-        authz.apply_circle_member_record(&record(
-            "ak.circle.member.state",
-            &foreign,
-            json!({"circle_id": circle, "member_id": foreign, "state": "leave"}),
-        ));
-        assert!(
-            authz.circle_members[circle].contains_key(&foreign.to_string()),
-            "retired state alias must not revoke canonical circle membership"
-        );
-        authz.apply_circle_member_record(&record(
-            "ak.circle.member.state",
-            &foreign,
-            json!({"circle_id": circle, "member_id": foreign, "membership": "leave"}),
-        ));
-        assert!(authz.circle_members[circle].contains_key(&local.to_string()));
-        assert!(!authz.circle_members[circle].contains_key(&foreign.to_string()));
 
         authz.apply_invite_record(&record(
             "ak.invite.create",

@@ -1,4 +1,4 @@
-//! Independent Realm/Circle receipt policy currents and atomic admission.
+//! Realm receipt policy currents and atomic admission.
 
 use arkret_event_draft::EventPayloadExt as _;
 use arkret_models_collaboration::events_payloads::CurrentScopeReadReceiptPolicy;
@@ -23,10 +23,6 @@ pub(crate) async fn commit_read_receipt_policy_authority_current_state_in_connec
         conn, event, commit, prepared,
     )
     .await?;
-    if matches!(&event.scope_ref, ScopeRef::Circle { .. }) {
-        crate::circle_current_states::require_active_author_in_connection(conn, event, commit)
-            .await?;
-    }
     commit_read_receipt_policy_current_state_in_connection(conn, event, commit).await
 }
 
@@ -41,7 +37,7 @@ pub(crate) async fn commit_read_receipt_policy_current_state_in_connection(
     }
     arkret_schema::validate_event_for_submit(event)
         .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
-    if event.scope_ref.realm_id_opt() != Some(&event.realm_id)
+    if !matches!(&event.scope_ref, ScopeRef::Realm { realm_id } if realm_id == &event.realm_id)
         || commit.stream_ref.scope_ref() != event.scope_ref
         || commit.realm_id != event.realm_id
         || commit.event_ref != event.event_id
@@ -54,9 +50,7 @@ pub(crate) async fn commit_read_receipt_policy_current_state_in_connection(
         .as_scope_read_receipt_policy()
         .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
     let current = CurrentScopeReadReceiptPolicy {
-        selector: CurrentSelector::ScopeReadReceiptPolicy {
-            scope_ref: event.scope_ref.clone(),
-        },
+        selector: CurrentSelector::ScopeReadReceiptPolicy,
         source_stream_ref: commit.stream_ref.clone(),
         revision: CurrentRevision {
             commit_id: commit.commit_id.clone(),
@@ -78,15 +72,7 @@ pub(crate) async fn upsert_verified_current_in_connection(
         .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
     arkret_canonical::canonical_json_bytes(current)
         .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
-    let CurrentSelector::ScopeReadReceiptPolicy { scope_ref } = &current.selector else {
-        return Err(PersistenceError::SchemaViolation(
-            "receipt policy selector required".into(),
-        ));
-    };
-    let realm = scope_ref
-        .realm_id_opt()
-        .ok_or_else(|| PersistenceError::SchemaViolation("receipt scope has no Realm".into()))?;
-    let scope = serde_json::to_value(scope_ref).map_err(PersistenceError::database)?;
+    let realm = current.source_stream_ref.realm_id();
     let source =
         serde_json::to_value(&current.source_stream_ref).map_err(PersistenceError::database)?;
     let value = serde_json::to_value(&current.value).map_err(PersistenceError::database)?;
@@ -94,8 +80,8 @@ pub(crate) async fn upsert_verified_current_in_connection(
         i64::try_from(current.revision.stream_position).map_err(PersistenceError::database)?;
     let affected = diesel::sql_query(
         "INSERT INTO scope_read_receipt_policy_current_states \
-         (realm_id,scope_ref,source_stream_ref,current_commit_id,current_stream_position,value,updated_at) \
-         VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (realm_id,scope_ref) DO UPDATE SET \
+         (realm_id,source_stream_ref,current_commit_id,current_stream_position,value,updated_at) \
+         VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (realm_id) DO UPDATE SET \
          source_stream_ref=EXCLUDED.source_stream_ref,current_commit_id=EXCLUDED.current_commit_id, \
          current_stream_position=EXCLUDED.current_stream_position,value=EXCLUDED.value,updated_at=EXCLUDED.updated_at \
          WHERE scope_read_receipt_policy_current_states.source_stream_ref=EXCLUDED.source_stream_ref \
@@ -104,7 +90,7 @@ pub(crate) async fn upsert_verified_current_in_connection(
                AND scope_read_receipt_policy_current_states.current_commit_id=EXCLUDED.current_commit_id \
                AND scope_read_receipt_policy_current_states.value=EXCLUDED.value))",
     )
-    .bind::<Text, _>(realm.as_str()).bind::<Jsonb, _>(scope).bind::<Jsonb, _>(source)
+    .bind::<Text, _>(realm.as_str()).bind::<Jsonb, _>(source)
     .bind::<Text, _>(current.revision.commit_id.as_str()).bind::<BigInt, _>(position)
     .bind::<Jsonb, _>(value).bind::<Timestamptz, _>(updated_at)
     .execute(conn).await.map_err(PersistenceError::database)?;
@@ -128,15 +114,13 @@ mod tests {
         value: &serde_json::Value,
         at: DateTime<Utc>,
     ) -> PersistenceResult<()> {
-        if scope.realm_id_opt() != Some(realm) {
+        if scope.realm_id_opt() != Some(realm) || &stream.scope_ref() != scope {
             return Err(PersistenceError::SchemaViolation(
                 "test current belongs to another Realm".into(),
             ));
         }
         let current = CurrentScopeReadReceiptPolicy {
-            selector: CurrentSelector::ScopeReadReceiptPolicy {
-                scope_ref: scope.clone(),
-            },
+            selector: CurrentSelector::ScopeReadReceiptPolicy,
             source_stream_ref: stream.clone(),
             revision: revision.clone(),
             value: serde_json::from_value(value.clone())
@@ -154,21 +138,11 @@ mod tests {
             arkret_canonical::DigestSuite::Sha256,
             [81; 32],
         ));
-        let circle = arkret_wire::CircleId::from_event_id(&arkret_wire::EventId::from_digest(
-            arkret_canonical::DigestSuite::Sha256,
-            [82; 32],
-        ));
-        let scopes = [
-            arkret_wire::ScopeRef::Realm {
-                realm_id: realm.clone(),
-            },
-            arkret_wire::ScopeRef::Circle {
-                realm_id: realm.clone(),
-                circle_id: circle,
-            },
-        ];
+        let other = arkret_wire::RealmId::from_event_id(&arkret_wire::EventId::from_digest(arkret_canonical::DigestSuite::Sha256, [82;32]));
+        let scopes = [arkret_wire::ScopeRef::realm(realm.clone()), arkret_wire::ScopeRef::realm(other)];
         let at = chrono::Utc::now();
         for (i, scope) in scopes.iter().enumerate() {
+            let realm = scope.realm_id();
             let stream = arkret_wire::CommitStreamRef::from_scope(scope, None).unwrap();
             let revision = arkret_wire::CurrentRevision {
                 commit_id: arkret_wire::RealmCommitId::from_digest([i as u8 + 1; 32]),
@@ -224,8 +198,9 @@ mod tests {
             value: serde_json::Value,
         }
         for (i, scope) in scopes.iter().enumerate() {
-            let row:Row=diesel::sql_query("SELECT value FROM scope_read_receipt_policy_current_states WHERE realm_id=$1 AND scope_ref=$2")
-                .bind::<Text,_>(realm.as_str()).bind::<Jsonb,_>(serde_json::to_value(scope).unwrap()).get_result(&mut conn).await.unwrap();
+            let realm = scope.realm_id();
+            let row:Row=diesel::sql_query("SELECT value FROM scope_read_receipt_policy_current_states WHERE realm_id=$1")
+                .bind::<Text,_>(realm.as_str()).get_result(&mut conn).await.unwrap();
             assert_eq!(
                 row.value,
                 serde_json::json!({"disclosure":if i==0 {"required"} else {"disabled"}})

@@ -114,7 +114,7 @@ pub(crate) async fn handshake_event_in_connection(
 }
 
 /// Use only inside the caller's read/admission transaction. Realm membership,
-/// a Circle capability and an Agent ownership projection cannot authorize
+/// an Agent ownership projection cannot authorize
 /// this scope; the exact controller or a currently effective owned Agent can.
 pub(crate) async fn participant_in_connection(
     conn: &mut AsyncPgConnection,

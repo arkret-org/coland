@@ -200,10 +200,8 @@ impl ProjectionState {
         operation: &Operation,
     ) -> ProjectionEffect {
         let scope = &operation.context.accepted_scope_ref;
-        if !matches!(
-            scope,
-            arkret_wire::ScopeRef::Realm { .. } | arkret_wire::ScopeRef::Circle { .. }
-        ) || scope.realm_id_opt() != Some(&operation.realm_id)
+        if !matches!(scope, arkret_wire::ScopeRef::Realm { .. })
+            || scope.realm_id_opt() != Some(&operation.realm_id)
             || serde_json::from_value::<
                 arkret_models_collaboration::events_payloads::ReadReceiptPolicyPayload,
             >(operation.payload.clone())
@@ -214,17 +212,10 @@ impl ProjectionState {
                 reason: arkret_wire::ErrorCode::SCHEMA_VIOLATION.to_owned(),
             };
         }
-        let subject = match arkret_canonical::canonical_json_bytes(scope) {
-            Ok(bytes) => String::from_utf8(bytes).expect("canonical JSON is UTF-8"),
-            Err(_) => {
-                return ProjectionEffect::Rejected {
-                    reason: arkret_wire::ErrorCode::SCHEMA_VIOLATION.to_owned(),
-                };
-            }
-        };
+
         self.set_facet(
             operation.realm_id.as_ref(),
-            FacetRef::new(facet::SCOPE_READ_RECEIPT_POLICY, subject),
+            FacetRef::singleton(facet::SCOPE_READ_RECEIPT_POLICY),
             operation.payload.clone(),
         );
         ProjectionEffect::ScopeReadReceiptPolicyProjected {

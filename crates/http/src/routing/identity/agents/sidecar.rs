@@ -148,7 +148,7 @@ fn sidecar_access_readiness(
 /// the five shared members, plus `participant_authority_digest` exactly for
 /// Sidecar scope (`encryption-and-audit.md` §2.5.1, `sidecar.md` §6).
 /// The removed `authority_stream_head` is an unknown member for every scope;
-/// Realm and Circle bindings carrying the Sidecar digest are also rejected
+/// Realm bindings carrying the Sidecar digest are also rejected
 /// before any state comparison.
 fn decode_mls_governance_binding(
     value: &Value,
@@ -1230,7 +1230,7 @@ mod tests {
             #[diesel(sql_type=diesel::sql_types::BigInt)]
             count: i64,
         }
-        let counts = "SELECT (SELECT count(*) FROM canonical_events)+(SELECT count(*) FROM realm_commits)+(SELECT count(*) FROM sidecar_context_current_states)+(SELECT count(*) FROM member_state_current_states)+(SELECT count(*) FROM strand_current_states)+(SELECT count(*) FROM circle_current_states)+(SELECT count(*) FROM mls_group_current_states)+(SELECT count(*) FROM mls_welcome_provenance) AS count";
+        let counts = "SELECT (SELECT count(*) FROM canonical_events)+(SELECT count(*) FROM realm_commits)+(SELECT count(*) FROM sidecar_context_current_states)+(SELECT count(*) FROM member_state_current_states)+(SELECT count(*) FROM strand_current_states)+(SELECT count(*) FROM mls_group_current_states)+(SELECT count(*) FROM mls_welcome_provenance) AS count";
         let mut conn = pool.get().await.unwrap();
         assert_eq!(diesel::sql_query("SELECT (SELECT count(*) FROM agent_sidecars)+(SELECT count(*) FROM agent_sidecar_contexts) AS count").get_result::<Count>(&mut conn).await.unwrap().count, 0);
         let before = diesel::sql_query(counts)

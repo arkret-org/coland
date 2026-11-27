@@ -48,12 +48,7 @@ pub(crate) async fn put_native(
         crate::applet_e2ee::require_current_consent(conn,&registration,&installation,scope,accepted_at).await?;
         let cut = crate::realm_authorization_cut::RealmAuthorizationCut::read(conn,&current.realm_id,actor).await?;
         cut.require_native_backup_subject()?;
-        if let ScopeRef::Circle{realm_id,circle_id}=scope {
-            let basis=crate::circle_current_states::locked_circle_basis(conn,realm_id,circle_id).await?;
-            if basis["value"]["state"]!="active"
-                || !crate::circle_current_states::effective_member_in_connection(conn,realm_id,circle_id,actor).await?
-            {return Err(super::unavailable("native publisher has no active exact Circle membership").into());}
-        }
+
         require_publication_policy(conn,&registration,actor,scope,action,arkret_models_collaboration::governance::operation_wire::AppletPolicyOperation::Execute,accepted_at).await?;
         let preparation = super::prepare_input_in_connection(conn,&current,scope).await?;
         backup.validate_native_recipient(&preparation.input.content_backup_recipient).map_err(|error|PersistenceError::SchemaViolation(error.to_string()))?;
@@ -75,7 +70,6 @@ pub(crate) async fn put_native(
         if root.effective_scope!=*scope || root.epoch!=group.value.epoch
             || root.group_state_ref!=group.value.current_mls_commit_event_ref
             || group.value.current_key_access_revision!=group.value.covered_key_access_revision
-            || crate::mls_group_current_states::circle_tree_holds_invalid_leaf(conn,scope,&group).await?
         {return Err(PersistenceError::Conflict("epoch_update_required: native root basis is not current".into()).into());}
         crate::content_endpoint_bindings::native_backup_endpoint_in_connection(conn,&current,&group.value).await?;
         let genesis=crate::committed_disclosure::accepted_full_event_in_connection(conn,&current.realm_id.event_id()).await?
@@ -143,21 +137,13 @@ pub(super) async fn require_publication_policy(
         crate::policy_current_states::read_scoped_applet_management_policies_for_delivery(
             conn,
             scope.realm_id(),
-            scope.circle_id(),
         )
         .await?;
-    let mut resources = vec![PolicyResourceSelector {
+    let resources = vec![PolicyResourceSelector {
         kind: PolicyResourceKind::Realm,
         realm_id: Some(scope.realm_id().clone()),
         resource_ref: Some(scope.realm_id().to_string()),
     }];
-    if let Some(circle) = scope.circle_id() {
-        resources.push(PolicyResourceSelector {
-            kind: PolicyResourceKind::Object,
-            realm_id: Some(scope.realm_id().clone()),
-            resource_ref: Some(circle.to_string()),
-        });
-    }
     let service = arkret_wire::ActorId::service(registration.service_id.clone());
     let decision = arkret_policy::applet_management::select_applet_management(
         Some(&policies),

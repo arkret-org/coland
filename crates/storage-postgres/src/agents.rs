@@ -236,9 +236,6 @@ impl AgentParticipationStore for PgAgentParticipationStore {
                 })?
                 .1;
             let realm = locator
-                .split(":ak:circle:")
-                .next()
-                .unwrap_or(locator)
                 .split(":ak:strand:")
                 .next()
                 .unwrap_or(locator);

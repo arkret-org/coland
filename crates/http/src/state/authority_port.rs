@@ -68,84 +68,7 @@ fn self_event_route(kind: &arkret_wire::EventKind) -> ServiceResult<SelfEventRou
         EventKind::MlsHistoryRequest
         | EventKind::MlsHistoryGrant
         | EventKind::RealmActorStatusSet
-        | EventKind::RealmActorRecoverySet
-        | EventKind::CircleCreate
-        | EventKind::AppletBridgeError
-        | EventKind::SidecarCreate
-        | EventKind::SidecarMemberState
-        | EventKind::SidecarContextAttach
-        | EventKind::AgentSidecarExchangeControl
-        | EventKind::RealmOrganization
-        | EventKind::RealmLink
-        | EventKind::RealmJoinRule
-        | EventKind::RealmHistoryAccess
-        | EventKind::CircleMemberState
-        | EventKind::StrandCreate
-        | EventKind::RealmProfile
-        | EventKind::RealmTombstone
-        | EventKind::RealmDestroy
-        | EventKind::RealmArchive
-        | EventKind::RealmRestore
-        | EventKind::RealmFreeze
-        | EventKind::RealmUnfreeze
-        | EventKind::RealmGovernanceStationChange
-        | EventKind::StrandUpdate
-        | EventKind::StrandTracksUpdate
-        | EventKind::RsvpSet
-        | EventKind::StrandArchive
-        | EventKind::StrandRestore
-        | EventKind::StrandStageSet
-        | EventKind::StrandMove
-        | EventKind::StrandReorder
-        | EventKind::StrandWatchSet
-        | EventKind::AgentInteractionSet
-        | EventKind::AgentActionApprove
-        | EventKind::SpaceCreate
-        | EventKind::SpaceUpdate
-        | EventKind::SpaceParent
-        | EventKind::SpaceTombstone
-        | EventKind::SchemaDefine
-        | EventKind::RealmPolicyBundle
-        | EventKind::PolicySet
-        | EventKind::PolicyAction
-        | EventKind::DirectConversationBound
-        | EventKind::RealmSetDefaultStrand
-        | EventKind::ScopeReadReceiptPolicy
-        | EventKind::RealmPlaintextVisibleServices
-        | EventKind::RealmPreviewPolicy
-        | EventKind::RealmAssetPrivacyPolicy
-        | EventKind::MemberIdentityUpdate
-        | EventKind::CallCreate
-        | EventKind::CallState
-        | EventKind::CallRecordingStart
-        | EventKind::RealmMediaService
-        | EventKind::MessageCreate
-        | EventKind::MemberState
-        | EventKind::CapabilityGrant
-        | EventKind::MessageRevise
-        | EventKind::MessageRedact
-        | EventKind::ModerationDecision
-        | EventKind::ModerationDecisionLift
-        | EventKind::RealmInviteLinkCreate
-        | EventKind::RealmInviteLinkRevoke
-        | EventKind::RealmInviteLinkAccept
-        | EventKind::InviteCreate
-        | EventKind::InviteRevoke
-        | EventKind::InviteCancel
-        | EventKind::InviteAccept
-        | EventKind::CapabilityRevoke
-        | EventKind::CapabilityRelinquish
-        | EventKind::RelationCreate
-        | EventKind::RelationUpdate
-        | EventKind::RelationTombstone
-        | EventKind::SpaceArchive
-        | EventKind::SpaceRestore
-        | EventKind::ReactionAdd
-        | EventKind::ReactionRemove
-        | EventKind::PinAdd
-        | EventKind::PinRemove
-        | EventKind::PinReorder
-        | EventKind::MimiRoomBinding => Ok(SelfEventRoute::GuardedUnit),
+        | EventKind::RealmActorRecoverySet | EventKind::AppletBridgeError | EventKind::SidecarCreate | EventKind::SidecarMemberState | EventKind::SidecarContextAttach | EventKind::AgentSidecarExchangeControl | EventKind::RealmOrganization | EventKind::RealmLink | EventKind::RealmJoinRule | EventKind::RealmHistoryAccess | EventKind::StrandCreate | EventKind::RealmProfile | EventKind::RealmTombstone | EventKind::RealmDestroy | EventKind::RealmArchive | EventKind::RealmRestore | EventKind::RealmFreeze | EventKind::RealmUnfreeze | EventKind::RealmGovernanceStationChange | EventKind::StrandUpdate | EventKind::StrandTracksUpdate | EventKind::RsvpSet | EventKind::StrandArchive | EventKind::StrandRestore | EventKind::StrandStageSet | EventKind::StrandMove | EventKind::StrandReorder | EventKind::StrandWatchSet | EventKind::AgentInteractionSet | EventKind::AgentActionApprove | EventKind::SpaceCreate | EventKind::SpaceUpdate | EventKind::SpaceParent | EventKind::SpaceTombstone | EventKind::SchemaDefine | EventKind::RealmPolicyBundle | EventKind::PolicySet | EventKind::PolicyAction | EventKind::DirectConversationBound | EventKind::RealmSetDefaultStrand | EventKind::ScopeReadReceiptPolicy | EventKind::RealmPlaintextVisibleServices | EventKind::RealmPreviewPolicy | EventKind::RealmAssetPrivacyPolicy | EventKind::MemberIdentityUpdate | EventKind::CallCreate | EventKind::CallState | EventKind::CallRecordingStart | EventKind::RealmMediaService | EventKind::MessageCreate | EventKind::MemberState | EventKind::CapabilityGrant | EventKind::MessageRevise | EventKind::MessageRedact | EventKind::ModerationDecision | EventKind::ModerationDecisionLift | EventKind::RealmInviteLinkCreate | EventKind::RealmInviteLinkRevoke | EventKind::RealmInviteLinkAccept | EventKind::InviteCreate | EventKind::InviteRevoke | EventKind::InviteCancel | EventKind::InviteAccept | EventKind::CapabilityRevoke | EventKind::CapabilityRelinquish | EventKind::RelationCreate | EventKind::RelationUpdate | EventKind::RelationTombstone | EventKind::SpaceArchive | EventKind::SpaceRestore | EventKind::ReactionAdd | EventKind::ReactionRemove | EventKind::PinAdd | EventKind::PinRemove | EventKind::PinReorder | EventKind::MimiRoomBinding => Ok(SelfEventRoute::GuardedUnit),
         EventKind::Unknown(raw) => Err(ServiceError::SchemaViolation(format!(
             "self Event kind {raw} is not registered"
         ))),
@@ -235,35 +158,6 @@ pub(super) fn require_guarded_unit_event(request: &EventAdmissionSubmission) -> 
                 event.kind,
                 arkret_wire::EventKind::RealmActorStatusSet
                     | arkret_wire::EventKind::RealmActorRecoverySet
-            ))
-        && !(matches!(event.scope_ref, arkret_wire::ScopeRef::Circle { .. })
-            && matches!(
-                event.kind,
-                arkret_wire::EventKind::CircleMemberState
-                    | arkret_wire::EventKind::MlsHistoryRequest
-                    | arkret_wire::EventKind::MlsHistoryGrant
-                    | arkret_wire::EventKind::CapabilityGrant
-                    | arkret_wire::EventKind::CapabilityRevoke
-                    | arkret_wire::EventKind::ScopeReadReceiptPolicy
-                    | arkret_wire::EventKind::CallCreate
-                    | arkret_wire::EventKind::CallState
-                    | arkret_wire::EventKind::CallRecordingStart
-                    | arkret_wire::EventKind::StrandWatchSet
-                    | arkret_wire::EventKind::PolicySet
-                    | arkret_wire::EventKind::StrandCreate
-                    | arkret_wire::EventKind::AppletBridgeError
-                    | arkret_wire::EventKind::MessageCreate
-                    | arkret_wire::EventKind::MessageRedact
-                    | arkret_wire::EventKind::ModerationDecision
-                    | arkret_wire::EventKind::ModerationDecisionLift
-                    | arkret_wire::EventKind::RelationCreate
-                    | arkret_wire::EventKind::RelationUpdate
-                    | arkret_wire::EventKind::RelationTombstone
-                    | arkret_wire::EventKind::ReactionAdd
-                    | arkret_wire::EventKind::ReactionRemove
-                    | arkret_wire::EventKind::PinAdd
-                    | arkret_wire::EventKind::PinRemove
-                    | arkret_wire::EventKind::PinReorder
             ))
         && !(matches!(event.scope_ref, arkret_wire::ScopeRef::Sidecar { .. })
             && matches!(
@@ -1011,8 +905,6 @@ mod tests {
             EventKind::PolicyAction,
             EventKind::AgentActionApprove,
             EventKind::DirectConversationBound,
-            EventKind::CircleCreate,
-            EventKind::CircleMemberState,
             EventKind::MemberIdentityUpdate,
             EventKind::RealmOrganization,
             EventKind::RealmLink,
@@ -1092,8 +984,6 @@ mod tests {
             EventKind::IdentityAccountabilityGrant,
             EventKind::MlsGenesis,
             EventKind::MlsCommit,
-            EventKind::CircleCreate,
-            EventKind::CircleMemberState,
             EventKind::MemberIdentityUpdate,
             EventKind::RealmOrganization,
             EventKind::RealmLink,
@@ -1262,7 +1152,6 @@ mod tests {
         }
         for kind in [
             EventKind::StrandCreate,
-            EventKind::CircleMemberState,
             EventKind::RealmProfile,
             EventKind::MessageRevise,
         ] {
@@ -1278,9 +1167,8 @@ mod tests {
         // authority. Those are independently checked by the accepting unit.
         for kind in [EventKind::MlsHistoryRequest, EventKind::MlsHistoryGrant] {
             event.kind = kind;
-            event.scope_ref = arkret_wire::ScopeRef::Circle {
+            event.scope_ref = arkret_wire::ScopeRef::Realm {
                 realm_id: event.realm_id.clone(),
-                circle_id: arkret_wire::CircleId::from_event_id(&event.event_id),
             };
             assert!(
                 require_guarded_unit_event(&arkret_wire::EventAdmissionSubmission::new(

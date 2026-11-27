@@ -711,28 +711,6 @@ backup/restore of the already-bound key. They do not rotate identity material.
   front coland with nginx/Caddy/Traefik `limit_req` or an API gateway that
   shares state across replicas.
 
-### AKP-0007 (Circle primitive) — migration & sizing notes
-
-- **Schema**: the `projection_circles` / `projection_circle_members` mirror
-  tables and the `scope_circle_id` / `default_scope_circle_id` /
-  `child_scope_policy` / `effective_scope` columns on the Strand / Morph /
-  Space / Events mirrors are part of the squashed
-  `00000000000000_initial` migration; there is no separate Circle upgrade
-  step.
-- **Disk sizing**: `effective_scope` adds one nullable `TEXT` column per
-  projected Event. A complete `ak:circle:<44-char event token>` value is 54
-  bytes on the wire; PostgreSQL's short `TEXT` header and tuple alignment put
-  the stored cost around 55–60 bytes per row, plus the BTREE index entry on
-  `projection_events_effective_scope_idx`. A 100M-event projection grows
-  by ~7 GiB total (table + index). Drop the index if your deployment never
-  filters projection reads by Circle scope.
-- **Multi-replica + Circle membership**: the Circle membership FSM lives
-  on the durable event log, so cross-replica consistency comes for free
-  once the underlying Postgres replication is healthy. The
-  `circle_member_must_be_realm_member` invariant is checked in-reducer; a
-  replica that hasn't replayed the parent Realm's latest `ak.member.state`
-  events will fail-closed on Circle membership writes — the canonical fix
-  is to gate writes behind the federation outbox acknowledgement.
 - **Metrics**: Prometheus text metrics are exposed on the separate
   `COLAND_METRICS_BIND` listener (default `127.0.0.1:9090`) at `/metrics`.
 - **OpenTelemetry**: OTLP trace export is disabled unless the binary is built

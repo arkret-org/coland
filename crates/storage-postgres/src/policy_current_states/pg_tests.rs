@@ -107,114 +107,6 @@ async fn seed_genesis(conn: &mut AsyncPgConnection) {
     insert_history(conn, &genesis, &commit(&genesis, 0)).await;
 }
 
-/// Accepted-history import for the genuine parent Circle creation. The
-/// original Circle current materializer supplies its event-derived identity;
-/// an empty Circle stream is never proved by an arbitrary CircleId alone.
-/// This fixture does not exercise producer verification or Circle-create HTTP.
-async fn seed_management_circle(conn: &mut AsyncPgConnection) -> arkret_wire::CircleId {
-    let create = event(
-        EventKind::CircleCreate,
-        json!({"object": {
-            "schema":"ak.schema.circle.v1", "realm_id":realm(),
-            "title":"Management policy history", "summary":null,
-            "display":{"short_name":"Management","color_token":"slate","symbol":{"glyph":"shield"}},
-            "directory_visibility":"members", "join_rule":"invite", "history_access":"since_join",
-            "state":"active", "created_by":event(EventKind::RealmCreate,json!({}),0).actor_id,
-            "created_at":"2026-10-05T12:00:01.000Z"
-        }}),
-        1,
-    );
-    let payload = create.as_circle_create().unwrap();
-    assert!(payload.object.id.is_none());
-    assert_eq!(payload.object.realm_id, create.realm_id);
-    assert_eq!(payload.object.created_by, create.actor_id);
-    assert_eq!(payload.object.created_at, create.created_at);
-    let basis = commit(&create, 1);
-    insert_history(conn, &create, &basis).await;
-    crate::circle_current_states::commit_in_connection(conn, &create, &basis)
-        .await
-        .unwrap();
-    let circle = arkret_wire::CircleId::from_event_id(&create.event_id);
-    require_complete_policy_stream(
-        conn,
-        &realm(),
-        &CommitStreamRef::Realm { realm_id: realm() },
-        Some(&revision(&basis)),
-    )
-    .await
-    .unwrap();
-    require_complete_policy_stream(
-        conn,
-        &realm(),
-        &CommitStreamRef::Circle {
-            realm_id: realm(),
-            circle_id: circle.clone(),
-        },
-        None,
-    )
-    .await
-    .unwrap();
-    circle
-}
-
-/// Imported accepted history exercises the real scoped fanout gate; the joint
-/// suite supplies the producer verification and complete management HTTP path.
-#[tokio::test]
-async fn circle_management_policy_fanout_accepts_an_original_source_submission() {
-    // Imported signed-history shape isolates the fanout kind gate. The joint
-    // test separately exercises real authoring, admission and Circle privacy.
-    let database = TestDatabase::lease().await;
-    let mut conn = database.pool().get().await.unwrap();
-    sql_query("BEGIN").execute(&mut conn).await.unwrap();
-    seed_genesis(&mut conn).await;
-    let circle = seed_management_circle(&mut conn).await;
-    let accepted = arkret_wire::test_support::raw_event_for_actor_at(
-        EventKind::PolicySet.as_str(),
-        arkret_wire::ScopeRef::Circle {
-            realm_id: realm(),
-            circle_id: circle.clone(),
-        },
-        event(EventKind::RealmCreate, json!({}), 0).actor_id,
-        json!(management_policy(None, "deny")),
-        chrono::DateTime::parse_from_rfc3339("2026-10-05T12:00:02Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc),
-    )
-    .unwrap();
-    let mut basis = commit(&accepted, 2);
-    basis.stream_ref = CommitStreamRef::Circle {
-        realm_id: realm(),
-        circle_id: circle,
-    };
-    basis.stream_position = 0;
-    basis.previous_commit_ref = None;
-    admit_in_connection(&mut conn, &accepted, &basis)
-        .await
-        .unwrap();
-    insert_history(&mut conn, &accepted, &basis).await;
-    commit_in_connection(&mut conn, &accepted, &basis)
-        .await
-        .unwrap();
-    let source: arkret_wire::EventAdmissionSubmission =
-        serde_json::from_value(json!({"event":accepted})).unwrap();
-    let targets = crate::realm_fanout::plan_realm_fanout_in_connection(
-        &mut conn,
-        &source.event,
-        &basis,
-        &"ak:did_core:web:station.example".parse().unwrap(),
-        Some(&source),
-        &[],
-        basis.committed_at.timestamp_millis(),
-    )
-    .await
-    .unwrap_or_else(|error| panic!("{}", error.into_persistence()));
-    assert_eq!(
-        targets, 0,
-        "an empty Circle never falls back to Realm members"
-    );
-    sql_query("ROLLBACK").execute(&mut conn).await.unwrap();
-}
-
 /// Imported accepted history isolates the classifier; this is not a claim
 /// that producer verification or the complete management HTTP path ran.
 #[tokio::test]
@@ -557,20 +449,15 @@ async fn management_unrelated_gap_is_isolated_but_required_scope_and_realm_fork_
         .execute(&mut conn)
         .await
         .unwrap();
-    let circle =
-        arkret_wire::CircleId::from_event_id(&event(EventKind::RealmCreate, json!({}), 0).event_id);
+    let sidecar =
+        arkret_wire::SidecarId::from_event_id(&event(EventKind::RealmCreate, json!({}), 0).event_id);
     sql_query("INSERT INTO realm_commits(commit_id,realm_id,stream_key,stream_ref,stream_position,previous_commit_ref,event_pk,governance_generation,commit_json,committed_at) VALUES('opaque-management-sibling',$1,'sibling',$2,0,NULL,NULL,0,'{}',now())")
-        .bind::<Text,_>(realm().as_str()).bind::<Jsonb,_>(json!(CommitStreamRef::Circle { realm_id:realm(), circle_id:circle.clone() })).execute(&mut conn).await.unwrap();
+        .bind::<Text,_>(realm().as_str()).bind::<Jsonb,_>(json!(CommitStreamRef::Sidecar { realm_id:realm(), sidecar_id:sidecar })).execute(&mut conn).await.unwrap();
     assert!(
         read_agent_management_policies_in_connection(&mut conn, &realm())
             .await
             .unwrap()
             .is_empty()
-    );
-    assert!(
-        read_scoped_agent_management_policies_in_connection(&mut conn, &realm(), Some(&circle))
-            .await
-            .is_err()
     );
     sql_query("ROLLBACK TO SAVEPOINT tamper")
         .execute(&mut conn)
@@ -599,9 +486,9 @@ async fn management_non_realm_policy_source_is_unresolved_not_absent() {
     let payload = management_policy(None, "deny");
     let accepted = event(EventKind::PolicySet, json!(payload), 1);
     let mut basis = commit(&accepted, 1);
-    basis.stream_ref = CommitStreamRef::Circle {
+    basis.stream_ref = CommitStreamRef::Sidecar {
         realm_id: realm(),
-        circle_id: arkret_wire::CircleId::from_event_id(&accepted.event_id),
+        sidecar_id: arkret_wire::SidecarId::from_event_id(&accepted.event_id),
     };
     basis.stream_position = 0;
     basis.previous_commit_ref = None;
@@ -1217,7 +1104,6 @@ async fn management_member_event_read_uses_current_and_never_assumes_missing_pro
     crate::agent_management_admission::require_member_event_read_in_connection(
         &mut conn,
         &realm(),
-        None,
         &controller,
         &agent,
         at,
@@ -1240,7 +1126,6 @@ async fn management_member_event_read_uses_current_and_never_assumes_missing_pro
     let error = crate::agent_management_admission::require_member_event_read_in_connection(
         &mut conn,
         &realm(),
-        None,
         &controller,
         &agent,
         at,
@@ -1259,7 +1144,6 @@ async fn management_member_event_read_uses_current_and_never_assumes_missing_pro
         crate::agent_management_admission::require_member_event_read_in_connection(
             &mut conn,
             &realm(),
-            None,
             &controller,
             &agent,
             at,
@@ -1305,7 +1189,6 @@ async fn management_member_event_read_checks_accepted_policy_in_a_read_only_snap
     let error = crate::agent_management_admission::require_member_event_read_in_connection(
         &mut conn,
         &realm(),
-        None,
         &controller,
         &agent,
         chrono::Utc::now(),
@@ -1322,7 +1205,7 @@ async fn management_member_event_read_checks_accepted_policy_in_a_read_only_snap
 /// Imported canonical accepted sources exercise the actual Policy admission/CAS
 /// and materializer hooks. Producer signatures/full HTTP are a separate suite.
 #[tokio::test]
-async fn management_writer_all_operations_realm_circle_and_review_carrier_boundary() {
+async fn management_writer_round_trips_all_operations_in_the_realm() {
     use arkret_models_collaboration::governance::operation_wire::AgentPolicyOperation;
     use arkret_policy::agent_management::{AgentManagementContext, evaluate_agent_management};
     let database = TestDatabase::lease().await;
@@ -1337,7 +1220,6 @@ async fn management_writer_all_operations_realm_circle_and_review_carrier_bounda
         "ak:did_core:web:agent.example".parse().unwrap(),
         controller.station_id.clone(),
     );
-    let circle = seed_management_circle(&mut conn).await;
     for operation in [
         AgentPolicyOperation::Join,
         AgentPolicyOperation::Authorize,
@@ -1347,7 +1229,6 @@ async fn management_writer_all_operations_realm_circle_and_review_carrier_bounda
         AgentPolicyOperation::Publish,
         AgentPolicyOperation::Serve,
     ] {
-        for in_circle in [false, true] {
             sql_query("SAVEPOINT candidate")
                 .execute(&mut conn)
                 .await
@@ -1355,14 +1236,7 @@ async fn management_writer_all_operations_realm_circle_and_review_carrier_bounda
             let mut payload = json!(policy(None, true));
             payload["value"]["rules"] = json!([{"rule_id":"managed","kind":"agent","agent_target":{"kind":"all"},"agent_operations":[operation],"effect":"deny"}]);
             payload["value"]["default_effect"] = json!("allow");
-            let scope = if in_circle {
-                arkret_wire::ScopeRef::Circle {
-                    realm_id: realm(),
-                    circle_id: circle.clone(),
-                }
-            } else {
-                arkret_wire::ScopeRef::Realm { realm_id: realm() }
-            };
+            let scope = arkret_wire::ScopeRef::realm(realm());
             let accepted = arkret_wire::test_support::raw_event_for_actor_at(
                 EventKind::PolicySet.as_str(),
                 scope,
@@ -1373,20 +1247,12 @@ async fn management_writer_all_operations_realm_circle_and_review_carrier_bounda
                     .with_timezone(&chrono::Utc),
             )
             .unwrap();
-            let mut basis = commit(&accepted, 2);
-            if in_circle {
-                basis.stream_ref = CommitStreamRef::Circle {
-                    realm_id: realm(),
-                    circle_id: circle.clone(),
-                };
-                basis.stream_position = 0;
-                basis.previous_commit_ref = None;
-            }
+            let basis = commit(&accepted, 1);
             let target = admit_in_connection(&mut conn, &accepted, &basis)
                 .await
                 .unwrap()
                 .unwrap();
-            assert_eq!(target.circle_id.is_some(), in_circle);
+            assert_eq!(target, WireResourceSelector::realm(realm()));
             insert_history(&mut conn, &accepted, &basis).await;
             commit_in_connection(&mut conn, &accepted, &basis)
                 .await
@@ -1394,7 +1260,6 @@ async fn management_writer_all_operations_realm_circle_and_review_carrier_bounda
             let policies = read_scoped_agent_management_policies_in_connection(
                 &mut conn,
                 &realm(),
-                in_circle.then_some(&circle),
             )
             .await
             .unwrap();
@@ -1422,22 +1287,12 @@ async fn management_writer_all_operations_realm_circle_and_review_carrier_bounda
                 .unwrap(),
                 arkret_wire::PolicyEffect::Deny
             );
-            let mut invalid = accepted.clone();
-            invalid.payload.get_mut("value").unwrap()["default_effect"] = json!("require_review");
-            if in_circle {
-                assert!(
-                    admit_in_connection(&mut conn, &invalid, &basis)
-                        .await
-                        .is_err()
-                );
-            }
             let zero=sql_query("SELECT NOT EXISTS(SELECT 1 FROM capability_grant_current_states) AND NOT EXISTS(SELECT 1 FROM agent_interaction_current_states) AS present").get_result::<Present>(&mut conn).await.unwrap();
             assert!(zero.present);
             sql_query("ROLLBACK TO SAVEPOINT candidate")
                 .execute(&mut conn)
                 .await
                 .unwrap();
-        }
     }
     sql_query("ROLLBACK").execute(&mut conn).await.unwrap();
 }
@@ -1450,32 +1305,14 @@ async fn management_support_rejects_raw_unsupported_configuration_without_effect
     let mut conn = database.pool().get().await.unwrap();
     sql_query("BEGIN").execute(&mut conn).await.unwrap();
     seed_genesis(&mut conn).await;
-    let circle = seed_management_circle(&mut conn).await;
-    for in_circle in [false, true] {
+    {
         let mut candidate = management_policy(None, "allow");
         let PolicySetValue::Governance(document) = &mut candidate.value else {
             unreachable!()
         };
-        if in_circle {
-            document.rules[0].agent_operations = Some(vec![
-                arkret_models_collaboration::governance::operation_wire::AgentPolicyOperation::Join,
-            ]);
-            document.rules[0].effect = arkret_wire::PolicyEffect::RequireReview;
-            document.rules[0].review_requirement = Some(arkret_models_collaboration::governance::operation_wire::ManagementReviewRequirement {
-                approver_actor_ids: vec![document.created_by.clone()], min_approver_count: 1, max_age_seconds: 60,
-            });
-        } else {
-            document.rules[0].actions = Some(vec!["ak.unknown.action".into()]);
-        }
+        document.rules[0].actions = Some(vec!["ak.unknown.action".into()]);
         candidate.validate().unwrap();
-        let scope = if in_circle {
-            arkret_wire::ScopeRef::Circle {
-                realm_id: realm(),
-                circle_id: circle.clone(),
-            }
-        } else {
-            arkret_wire::ScopeRef::Realm { realm_id: realm() }
-        };
+        let scope = arkret_wire::ScopeRef::realm(realm());
         let original = arkret_wire::test_support::raw_event_for_actor_at(
             EventKind::PolicySet.as_str(),
             scope,
@@ -1486,15 +1323,7 @@ async fn management_support_rejects_raw_unsupported_configuration_without_effect
                 .with_timezone(&chrono::Utc),
         )
         .unwrap();
-        let mut basis = commit(&original, 2);
-        if in_circle {
-            basis.stream_ref = CommitStreamRef::Circle {
-                realm_id: realm(),
-                circle_id: circle.clone(),
-            };
-            basis.stream_position = 0;
-            basis.previous_commit_ref = None;
-        }
+        let basis = commit(&original, 1);
         let error = admit_in_connection(&mut conn, &original, &basis)
             .await
             .unwrap_err();
@@ -1511,7 +1340,7 @@ async fn management_support_rejects_raw_unsupported_configuration_without_effect
 }
 
 #[tokio::test]
-async fn management_authorize_full_selector_priority_and_circle_current_are_not_realm_anchor() {
+async fn management_authorize_uses_the_exact_strand_selector_and_fails_closed_on_missing_current() {
     let database = TestDatabase::lease().await;
     let mut conn = database.pool().get().await.unwrap();
     sql_query("BEGIN").execute(&mut conn).await.unwrap();
@@ -1527,14 +1356,13 @@ async fn management_authorize_full_selector_priority_and_circle_current_are_not_
     let strand: arkret_wire::StrandId = "ak:strand:AT47eNekH0_aKZyIMsXq_s1FAWdYXC71_CUxQ5O478t-"
         .parse()
         .unwrap();
-    let circle = seed_management_circle(&mut conn).await;
     let mut payload = json!(policy(None, true));
     payload["value"]["default_effect"] = json!("deny");
     payload["value"]["rules"] = json!([
       {"rule_id":"narrow_deny","kind":"agent","agent_target":{"kind":"all"},"agent_operations":["authorize"],"actions":["ak.message.create"],"priority":1,"effect":"deny","resources":[{"kind":"strand","realm_id":realm(),"resource_ref":strand}]},
       {"rule_id":"whole_allow","kind":"agent","agent_target":{"kind":"all"},"agent_operations":["authorize"],"priority":2,"effect":"allow"}]);
     let accepted = event(EventKind::PolicySet, payload, 2);
-    let basis = commit(&accepted, 2);
+    let basis = commit(&accepted, 1);
     admit_in_connection(&mut conn, &accepted, &basis)
         .await
         .unwrap();
@@ -1554,63 +1382,11 @@ async fn management_authorize_full_selector_priority_and_circle_current_are_not_
     )
     .await
     .unwrap();
-    let mut circle_payload = json!(policy(None, true));
-    circle_payload["policy_id"] = json!("ak:policy:0198ff00-0000-7000-8000-000000000002");
-    circle_payload["value"]["id"] = circle_payload["policy_id"].clone();
-    circle_payload["value"]["rules"] = json!([{"rule_id":"circle_deny","kind":"agent","agent_target":{"kind":"all"},"agent_operations":["authorize"],"effect":"deny"}]);
-    let accepted = arkret_wire::test_support::raw_event_for_actor_at(
-        EventKind::PolicySet.as_str(),
-        arkret_wire::ScopeRef::Circle {
-            realm_id: realm(),
-            circle_id: circle.clone(),
-        },
-        arkret_wire::ActorId::account(controller.clone()),
-        circle_payload,
-        basis.committed_at,
-    )
-    .unwrap();
-    let mut circle_basis = commit(&accepted, 3);
-    circle_basis.stream_ref = CommitStreamRef::Circle {
-        realm_id: realm(),
-        circle_id: circle.clone(),
-    };
-    circle_basis.stream_position = 0;
-    circle_basis.previous_commit_ref = None;
-    admit_in_connection(&mut conn, &accepted, &circle_basis)
-        .await
-        .unwrap();
-    insert_history(&mut conn, &accepted, &circle_basis).await;
-    commit_in_connection(&mut conn, &accepted, &circle_basis)
-        .await
-        .unwrap();
-    assert!(
-        crate::agent_management_admission::require_authorization_in_connection(
-            &mut conn,
-            &realm(),
-            &controller,
-            &agent,
-            &["ak.message.create".into()],
-            &resources,
-            basis.committed_at
-        )
-        .await
-        .is_err()
-    );
-    let sibling = arkret_wire::CircleId::from_event_id(
-        &event(EventKind::CircleCreate, json!({}), 3).event_id,
-    );
-    crate::agent_management_admission::require_authorization_in_connection(
-        &mut conn,
-        &realm(),
-        &controller,
-        &agent,
-        &["ak.message.create".into()],
-        &[WireResourceSelector::circle(realm(), sibling)],
-        basis.committed_at,
-    )
-    .await
-    .unwrap();
-    sql_query("DELETE FROM policy_current_states WHERE policy_id='ak:policy:0198ff00-0000-7000-8000-000000000002'").execute(&mut conn).await.unwrap();
+    let narrowed = [WireResourceSelector::strand(realm(), strand)];
+    assert!(crate::agent_management_admission::require_authorization_in_connection(
+        &mut conn,&realm(),&controller,&agent,&["ak.message.create".into()],&narrowed,basis.committed_at
+    ).await.is_err());
+    sql_query("DELETE FROM policy_current_states WHERE policy_id='ak:policy:0198ff00-0000-7000-8000-000000000001'").execute(&mut conn).await.unwrap();
     assert!(
         crate::agent_management_admission::require_authorization_in_connection(
             &mut conn,
@@ -1637,13 +1413,13 @@ async fn management_authorization_object_scope_requires_exact_accepted_creation_
     seed_genesis(&mut conn).await;
     let accepted = event(
         EventKind::StrandCreate,
-        json!({"object":{"realm_id":realm(),"scope_circle_id":null}}),
+        json!({"object":{"realm_id":realm()}}),
         1,
     );
     let basis = commit(&accepted, 1);
     let id = arkret_wire::StrandId::from_event_id(&accepted.event_id);
     let target = WireResourceSelector::strand(realm(), id.clone());
-    let value = json!({"id":id,"realm_id":realm(),"scope_circle_id":null});
+    let value = json!({"id":id,"realm_id":realm()});
     sql_query("INSERT INTO strand_current_states(realm_id,strand_id,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,$3,$4,$5,$6)")
       .bind::<Text,_>(realm().as_str()).bind::<Text,_>(id.as_str()).bind::<Text,_>(basis.commit_id.as_str())
       .bind::<BigInt,_>(basis.stream_position as i64).bind::<Jsonb,_>(&value).bind::<Timestamptz,_>(basis.committed_at).execute(&mut conn).await.unwrap();
@@ -1661,9 +1437,9 @@ async fn management_authorization_object_scope_requires_exact_accepted_creation_
             .unwrap(),
         Some(arkret_wire::ScopeRef::Realm { .. })
     ));
-    let circle = arkret_wire::CircleId::from_event_id(&accepted.event_id);
+    let legacy = "retired-private-scope";
     sql_query("UPDATE strand_current_states SET value=jsonb_set(value,'{scope_circle_id}',$2) WHERE strand_id=$1")
-      .bind::<Text,_>(id.as_str()).bind::<Jsonb,_>(json!(circle)).execute(&mut conn).await.unwrap();
+      .bind::<Text,_>(id.as_str()).bind::<Jsonb,_>(json!(legacy)).execute(&mut conn).await.unwrap();
     assert!(
         authorization_object_scope_in_connection(&mut conn, &realm(), &target)
             .await

@@ -2286,39 +2286,6 @@ impl AuthorityCommitApplication {
             .await?)
     }
 
-    pub async fn circle_views_for_actor(
-        &self,
-        realm_id: &arkret_wire::RealmId,
-        actor: &arkret_wire::ActorId,
-    ) -> ServiceResult<Vec<arkret_models_collaboration::governance::circle::CircleView>> {
-        Ok(self.store().circle_views_for_actor(realm_id, actor).await?)
-    }
-
-    pub async fn circle_reads_for_actor(
-        &self,
-        realm_id: &arkret_wire::RealmId,
-        actor: &arkret_wire::ActorId,
-    ) -> ServiceResult<Vec<arkret_models_collaboration::governance::circle::CircleReadView>> {
-        Ok(self.store().circle_reads_for_actor(realm_id, actor).await?)
-    }
-
-    pub async fn circle_view_for_actor(
-        &self,
-        circle_id: &arkret_wire::CircleId,
-        actor: &arkret_wire::ActorId,
-    ) -> ServiceResult<Option<arkret_models_collaboration::governance::circle::CircleView>> {
-        Ok(self.store().circle_view_for_actor(circle_id, actor).await?)
-    }
-
-    pub async fn circle_read_for_actor(
-        &self,
-        circle_id: &arkret_wire::CircleId,
-        actor: &arkret_wire::ActorId,
-    ) -> ServiceResult<Option<arkret_models_collaboration::governance::circle::CircleReadView>>
-    {
-        Ok(self.store().circle_read_for_actor(circle_id, actor).await?)
-    }
-
     pub async fn replica_authorization_head(
         &self,
         stream: &arkret_wire::CommitStreamRef,

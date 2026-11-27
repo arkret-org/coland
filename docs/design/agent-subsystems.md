@@ -3,7 +3,7 @@
 本文记录 Coland 当前 Agent participation、治理策略和通知子系统的实现边界。规范真源是
 `arkret-spec/spec/v1`；本文只说明服务端内部结构。
 
-设计原则：controller selection、Realm/Circle/Strand policy、capability 与生命周期是四个独立权威；
+设计原则：controller selection、Realm/Strand policy、capability 与生命周期是四个独立权威；
 在执行动作时求交并逐项校验，不互相复制或物化。数据库直接采用当前 schema，不保留兼容层。
 
 现状基线(已勘察):
@@ -23,12 +23,12 @@
 成功后该 agent/scope slot 的 version 加一；版本不一致返回 `cas_conflict`。
 
 服务端以 bearer + DPoP session 证明 controller 身份，只保存 scope、version 与五个 selection bit。
-该写入不创建 Event、不签发 receipt、不生成 capability，也不复制当前 Realm/Circle/Strand policy。
+该写入不创建 Event、不签发 receipt、不生成 capability，也不复制当前 Realm/Strand policy。
 GET 返回每个 slot 的 `{target_scope, selection, version}`，供客户端诚实执行后续 CAS。
 
 ## S1 — Governance policy projection
 
-Realm、Circle 与 Strand 的 `agent_participation.agent` 是 reducer 管理的治理策略。子级只能相对父级
+Realm 与 Strand 的 `agent_participation.agent` 是 reducer 管理的治理策略。子级只能相对父级
 tighten；放宽返回 `agent_participation_ceiling_widen`。投影层把当前策略写入
 `agent_participation_ceiling`，读侧按目标 scope 求出当前最内层有效 policy。
 
@@ -147,4 +147,4 @@ S3(notification dispatcher)── 最大,独立子系统;mention gate 依赖 par
 - 每个子系统落地后回填 `_agents_todos.md` 对应项与 commit hash;cotest 真实联调在 S1–S4 就绪后统一跑。
 
 ## 与 spec 的关系
-本设计是 coland 实现侧落点,不改协议语义;AKP-0016 与已 merge 的 normative 文本(capabilities §5.4、strand-and-message §9.4.5、realm-and-space §2、circle 字段表、private-objects §4.1)是真源。若实现中发现 spec 不完善,先改 spec 再改码。
+本设计是 coland 实现侧落点,不改协议语义;AKP-0016 与已 merge 的 normative 文本(capabilities §5.4、strand-and-message §9.4.5、realm-and-space §2、private-objects §4.1)是真源。若实现中发现 spec 不完善,先改 spec 再改码。

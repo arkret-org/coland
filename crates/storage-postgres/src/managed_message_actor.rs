@@ -483,10 +483,6 @@ async fn require_applet_producer_inner(
         arkret_wire::ScopeRef::Realm { realm_id } => {
             arkret_wire::WireResourceSelector::realm(realm_id.clone())
         }
-        arkret_wire::ScopeRef::Circle {
-            realm_id,
-            circle_id,
-        } => arkret_wire::WireResourceSelector::circle(realm_id.clone(), circle_id.clone()),
         _ => {
             return Err(denied(
                 "Applet producer has no supported exact installation scope",
@@ -646,10 +642,7 @@ async fn require_applet_producer_inner(
             applet_id: Some(registration.applet_id.to_string()),
             executed_by: Some(service.clone()),
             registration_epoch: Some(registration.registration_epoch.to_string()),
-            circle_id: match &effective_scope {
-                arkret_wire::ScopeRef::Circle { circle_id, .. } => Some(circle_id.to_string()),
-                _ => None,
-            },
+
             ..Default::default()
         };
         if let Some((commit, prepared)) = acceptance {

@@ -33,8 +33,8 @@ struct ContentTarget {
 }
 
 /// One resource per issuance keeps action/resource/constraint correlation in
-/// the existing flat session carrier. A Realm selector never proves a child
-/// Circle or Sidecar source; those still require their exact consumer gates.
+/// the existing flat session carrier. A Realm selector never proves a Sidecar source,
+/// which requires its own consumer authorization.
 async fn content_target(
     conn: &mut AsyncPgConnection,
     request: &AgentSessionAuthorityRequest,
@@ -81,21 +81,10 @@ async fn content_target(
             }
             let scope = match covering.stream_ref {
                 CommitStreamRef::Realm { ref realm_id }
-                    if realm_id == &current.realm_id && current.scope_circle_id.is_none() =>
+                    if realm_id == &current.realm_id =>
                 {
                     ScopeRef::Realm {
                         realm_id: realm_id.clone(),
-                    }
-                }
-                CommitStreamRef::Circle {
-                    ref realm_id,
-                    ref circle_id,
-                } if realm_id == &current.realm_id
-                    && current.scope_circle_id.as_ref() == Some(circle_id) =>
-                {
-                    ScopeRef::Circle {
-                        realm_id: realm_id.clone(),
-                        circle_id: circle_id.clone(),
                     }
                 }
                 _ => {
@@ -196,14 +185,6 @@ async fn read_source(
                 .await?
                 .is_some()
         }
-        ScopeRef::Circle {
-            realm_id,
-            circle_id,
-        } => crate::account_stream_scan::caller_circle_floor_in_connection(
-            conn, realm_id, circle_id, &actor,
-        )
-        .await?
-        .is_some(),
         ScopeRef::Sidecar {
             realm_id,
             sidecar_id,
@@ -412,9 +393,6 @@ pub(crate) async fn require_forwarded_message_source(
         .parse::<arkret_wire::StrandId>()
         .map_err(unavailable)?;
     let mut scopes = vec![format!("realm:{}", event.realm_id)];
-    if let Some(circle) = event.scope_ref.circle_id() {
-        scopes.push(format!("circle:{}:{circle}", event.realm_id));
-    }
     scopes.push(format!("strand:{}:{strand}", event.realm_id));
     let agent = session.account_id.principal_id.as_str();
     crate::agent_participation_admission::lock_selection(conn, agent, true).await?;
@@ -429,7 +407,7 @@ pub(crate) async fn require_forwarded_message_source(
     let target = WireResourceSelector::strand(event.realm_id.clone(), strand.clone());
     let facts = coland_storage::OperationFacts {
         strand_id: Some(strand.to_string()),
-        circle_id: event.scope_ref.circle_id().map(ToString::to_string),
+
         track: event
             .payload
             .get("track_name")
@@ -509,9 +487,6 @@ pub(crate) async fn home_content_queries(
     .await?
     .ok_or_else(|| unavailable("current Agent ownership is unavailable"))?;
     let mut scopes = vec![format!("realm:{}", target.realm)];
-    if let Some(circle) = target.scope.circle_id() {
-        scopes.push(format!("circle:{}:{circle}", target.realm));
-    }
     if let Some(strand) = &target.resource.strand_id {
         scopes.push(format!("strand:{}:{strand}", target.realm));
     }
@@ -556,7 +531,7 @@ pub(crate) async fn home_content_queries(
         let actions = [name.as_str()];
         let facts = coland_storage::OperationFacts {
             strand_id: target.resource.strand_id.as_ref().map(ToString::to_string),
-            circle_id: target.scope.circle_id().map(ToString::to_string),
+
             object_kind: (action == OwnedAgentContentAction::MessageCreate)
                 .then(|| "message".to_owned()),
             ..Default::default()
@@ -727,15 +702,11 @@ async fn read_at_cut(
         false
     };
 
-    let circle = match &target.scope {
-        ScopeRef::Circle { circle_id, .. } => Some(circle_id),
-        _ => None,
-    };
     let policies = if direct {
         Vec::new()
     } else {
         crate::policy_current_states::read_scoped_agent_management_policy_snapshot_in_connection(
-            conn, realm, circle,
+            conn, realm,
         )
         .await?
     };
@@ -744,13 +715,10 @@ async fn read_at_cut(
     let mut participation =
         arkret_models_collaboration::governance::agent_participation::ParticipationBits::ALL;
     let mut scopes = vec![format!("realm:{realm}")];
-    if let Some(circle) = circle {
-        scopes.push(format!("circle:{realm}:{circle}"));
-    }
     if let Some(strand) = &target.resource.strand_id {
         scopes.push(format!("strand:{realm}:{strand}"));
     }
-    // Only shared project actions inherit Realm, Circle and Strand participation policy.
+    // Only shared project actions inherit Realm and Strand participation policy.
     let project_participation = !direct && !personal;
     let private_selection = if project_participation {
         crate::agent_participation_admission::selection_snapshot(
@@ -836,7 +804,7 @@ async fn read_at_cut(
         for track in &tracks {
             let facts = coland_storage::OperationFacts {
                 strand_id: target.resource.strand_id.as_ref().map(ToString::to_string),
-                circle_id: circle.map(ToString::to_string),
+
                 track: track.clone(),
                 object_kind: (action == arkret_wire::CapabilityActionId::MESSAGE_CREATE)
                     .then(|| "message".to_owned()),

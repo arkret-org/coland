@@ -1,7 +1,6 @@
 //! MLS public-material authorization at one PostgreSQL read cut.
 //!
-//! Circle reads require the same parent Realm join generation at the current
-//! and historical Circle cuts. Positions are compared within one stream only.
+//! Positions are compared within one MLS group's source stream.
 
 use arkret_models_collaboration::events_payloads::MlsGenesisPayload;
 use arkret_models_collaboration::mls_group_state_material::MlsGroupStateMaterialRequestBody;
@@ -226,16 +225,6 @@ async fn read_with_authority(
                 realm_id: realm_id.clone(),
             },
         ),
-        ScopeRef::Circle {
-            realm_id,
-            circle_id,
-        } => (
-            realm_id,
-            CommitStreamRef::Circle {
-                realm_id: realm_id.clone(),
-                circle_id: circle_id.clone(),
-            },
-        ),
         ScopeRef::Sidecar {
             realm_id,
             sidecar_id,
@@ -310,73 +299,6 @@ async fn read_with_authority(
                     .is_some_and(|floor| target.stream_position >= floor.oldest_position),
                 floor,
             )
-        } else if let ScopeRef::Circle { circle_id, .. } = &request.effective_scope {
-            let Some(join) = sql_query(
-                "SELECT membership,current_stream_position,current_commit_id \
-                 FROM circle_member_state_current_states WHERE realm_id=$1 AND circle_id=$2 \
-                 AND member_id=$3 AND membership='join' AND source_stream_ref=$4 \
-                 AND circle_member_parent_join_current(realm_id,member_id,value)",
-            )
-            .bind::<Text, _>(realm_id.as_str())
-            .bind::<Text, _>(circle_id.as_str())
-            .bind::<Text, _>(caller.to_string())
-            .bind::<Jsonb, _>(
-                serde_json::to_value(&expected_stream).map_err(PersistenceError::database)?,
-            )
-            .get_result::<MemberRow>(&mut *conn)
-            .await
-            .optional()
-            .map_err(PersistenceError::database)?
-            else {
-                return Ok(Read::NotFound);
-            };
-            let joined_at_target = if join.current_stream_position < 0 {
-                false
-            } else if target.stream_position >= join.current_stream_position as u64 {
-                true
-            } else {
-                // The most recent membership at the target cut must itself be
-                // joined and bind the parent's still-current exact revision.
-                let historical = sql_query(
-                    "SELECT circle_member_parent_join_current($1,$2,h.payload) AS present \
-                     FROM (SELECT e.envelope->'payload' AS payload \
-                     FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk \
-                     WHERE c.realm_id=$1 AND c.stream_ref=$3 AND c.stream_position <= $4 \
-                     AND e.state='committed' AND e.envelope->>'kind'='ak.circle.member.state' \
-                     AND e.envelope->'payload'->'member_id'=$5 \
-                     ORDER BY c.stream_position DESC LIMIT 1) h",
-                )
-                .bind::<Text, _>(realm_id.as_str())
-                .bind::<Text, _>(caller.to_string())
-                .bind::<Jsonb, _>(
-                    serde_json::to_value(&expected_stream).map_err(PersistenceError::database)?,
-                )
-                .bind::<BigInt, _>(
-                    i64::try_from(target.stream_position).map_err(PersistenceError::database)?,
-                )
-                .bind::<Jsonb, _>(serde_json::to_value(caller).map_err(PersistenceError::database)?)
-                .get_result::<PresentRow>(&mut *conn)
-                .await
-                .optional()
-                .map_err(PersistenceError::database)?;
-                historical.is_some_and(|row| row.present)
-            };
-            let floor = if tenure.service_id == issuer.as_str() {
-                crate::account_stream_scan::caller_circle_floor_in_connection(
-                    conn, realm_id, circle_id, caller,
-                )
-                .await?
-            } else {
-                match crate::account_stream_scan::replica_circle_floor_in_connection(
-                    conn, realm_id, circle_id, caller,
-                )
-                .await?
-                {
-                    Ok(floor) => Some(floor),
-                    Err(_) => return Ok(Read::RevisionUnavailable),
-                }
-            };
-            (joined_at_target, floor)
         } else {
             let Some(join) = sql_query(
                 "SELECT membership,current_stream_position,current_commit_id \

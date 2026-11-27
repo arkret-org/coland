@@ -108,30 +108,6 @@ pub(super) fn hosted_member_join_event(
             }
             payload.member_id
         }
-        arkret_wire::EventKind::CircleMemberState => {
-            let arkret_wire::ScopeRef::Circle { circle_id, .. } = &event.scope_ref else {
-                return None;
-            };
-            if event
-                .payload
-                .get("circle_id")
-                .and_then(serde_json::Value::as_str)
-                != Some(circle_id.as_str())
-                || event
-                    .payload
-                    .get("membership")
-                    .and_then(serde_json::Value::as_str)
-                    != Some("join")
-            {
-                return None;
-            }
-            let member: arkret_wire::ActorId =
-                serde_json::from_value(event.payload.get("member_id")?.clone()).ok()?;
-            if member != event.actor_id {
-                return None;
-            }
-            member
-        }
         arkret_wire::EventKind::InviteAccept | arkret_wire::EventKind::RealmInviteLinkAccept => {
             event.actor_id.clone()
         }
@@ -245,10 +221,10 @@ async fn prepare_or_replicate_one(
     let commit = &item.source_commit;
     if event.kind == arkret_wire::EventKind::SidecarCreate
         || matches!(event.scope_ref, arkret_wire::ScopeRef::Sidecar { .. })
-        || !matches!(commit.stream_ref, CommitStreamRef::Realm { .. } | CommitStreamRef::Circle { .. })
+        || !matches!(commit.stream_ref, CommitStreamRef::Realm { .. })
     {
         return Err(ServiceError::UnsupportedEventKind(
-            "replication requires a shared Realm or Circle original".to_owned(),
+            "replication requires a shared Realm original".to_owned(),
         ));
     }
     let current_authority = state

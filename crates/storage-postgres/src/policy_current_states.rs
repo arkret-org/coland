@@ -85,18 +85,17 @@ async fn read_agent_management_policies_in_connection(
     conn: &mut AsyncPgConnection,
     realm: &arkret_wire::RealmId,
 ) -> PersistenceResult<Vec<arkret_models_collaboration::governance::operation_wire::Policy>> {
-    read_scoped_agent_management_policies_in_connection(conn, realm, None).await
+    read_scoped_agent_management_policies_in_connection(conn, realm).await
 }
 
-/// Parent Realm and the operation's actual Circle are applicable layers. Strand
+/// Read the governing Realm policies at this cut. Strand
 /// selectors narrow their rules; they do not create a protocol ScopeRef.
 pub(crate) async fn read_scoped_agent_management_policies_in_connection(
     conn: &mut AsyncPgConnection,
     realm: &arkret_wire::RealmId,
-    circle: Option<&arkret_wire::CircleId>,
 ) -> PersistenceResult<Vec<arkret_models_collaboration::governance::operation_wire::Policy>> {
     Box::pin(read_scoped_agent_management_policies_at_cut(
-        conn, realm, circle, true,
+        conn, realm, true,
     ))
     .await
 }
@@ -106,9 +105,8 @@ pub(crate) async fn read_scoped_agent_management_policies_in_connection(
 pub(crate) async fn read_scoped_agent_management_policy_snapshot_in_connection(
     conn: &mut AsyncPgConnection,
     realm: &arkret_wire::RealmId,
-    circle: Option<&arkret_wire::CircleId>,
 ) -> PersistenceResult<Vec<arkret_models_collaboration::governance::operation_wire::Policy>> {
-    read_scoped_agent_management_policies_at_cut(conn, realm, circle, false).await
+    read_scoped_agent_management_policies_at_cut(conn, realm, false).await
 }
 
 fn management_source(
@@ -116,12 +114,7 @@ fn management_source(
     scope: &arkret_wire::ScopeRef,
 ) -> PersistenceResult<CommitStreamRef> {
     let source = CommitStreamRef::from_scope(scope, None).map_err(schema)?;
-    if source.realm_id() != realm
-        || !matches!(
-            source,
-            CommitStreamRef::Realm { .. } | CommitStreamRef::Circle { .. }
-        )
-    {
+    if source.realm_id() != realm || !matches!(source, CommitStreamRef::Realm { .. }) {
         return Err(refused(
             "Management Policy has unresolved governance evidence",
         ));
@@ -275,14 +268,6 @@ async fn require_complete_policy_stream(
                   (stream_ref=jsonb_build_object('kind','realm','realm_id',$1) AND stream_position=0))),false)) \
          AND MIN(stream_position)=0 AND ($3 IS NULL OR \
              (MAX(stream_position)=$3 AND BOOL_OR(stream_position=$3 AND commit_id=$4))),false) \
-         OR (COUNT(*)=0 AND $3 IS NULL AND $2->>'kind'='circle' AND EXISTS(SELECT 1 \
-             FROM circle_current_states cc JOIN realm_commits pc ON pc.realm_id=$1 \
-             AND pc.stream_ref=jsonb_build_object('kind','realm','realm_id',$1) \
-             JOIN canonical_events pe ON pe.pk=pc.event_pk WHERE cc.circle_id=$2->>'circle_id' \
-             AND cc.realm_id=$1 AND cc.value->>'id'=cc.circle_id \
-             AND cc.create_event_id=pe.envelope->>'event_id' \
-             AND pe.state='committed' AND pe.kind='ak.circle.create' \
-             AND pe.envelope->>'event_id'=('ak:event:' || substring(cc.circle_id from 11)))) \
          AS present FROM nodes",
     )
     .bind::<Text,_>(realm.as_str()).bind::<Jsonb,_>(source_json)
@@ -307,11 +292,10 @@ const MANAGEMENT_HISTORY_SELECT: &str = "SELECT e.envelope->'payload'->>'policy_
 async fn read_scoped_agent_management_policies_at_cut(
     conn: &mut AsyncPgConnection,
     realm: &arkret_wire::RealmId,
-    circle: Option<&arkret_wire::CircleId>,
     lock: bool,
 ) -> PersistenceResult<Vec<arkret_models_collaboration::governance::operation_wire::Policy>> {
     Ok(
-        read_management_policy_domains_at_cut(conn, realm, circle, lock, false, &PolicyKind::Agent)
+        read_management_policy_domains_at_cut(conn, realm, lock, &PolicyKind::Agent)
             .await?
             .into_iter()
             .map(|(policy, _)| policy)
@@ -331,15 +315,14 @@ pub(crate) async fn read_agent_management_authorization_domains_in_connection(
         CommitStreamRef,
     )>,
 > {
-    read_management_policy_domains_at_cut(conn, realm, None, true, true, &PolicyKind::Agent).await
+    read_management_policy_domains_at_cut(conn, realm, true, &PolicyKind::Agent).await
 }
 
 pub(crate) async fn read_scoped_applet_management_policies_in_connection(
     conn: &mut AsyncPgConnection,
     realm: &arkret_wire::RealmId,
-    circle: Option<&arkret_wire::CircleId>,
 ) -> PersistenceResult<Vec<arkret_models_collaboration::governance::operation_wire::Policy>> {
-    read_scoped_applet_management_policies_at_cut(conn, realm, circle, true).await
+    read_scoped_applet_management_policies_at_cut(conn, realm, true).await
 }
 
 /// Preserve a delivery's shared authority barrier without upgrading it to a
@@ -347,7 +330,6 @@ pub(crate) async fn read_scoped_applet_management_policies_in_connection(
 pub(crate) async fn read_scoped_applet_management_policies_for_delivery(
     conn: &mut AsyncPgConnection,
     realm: &arkret_wire::RealmId,
-    circle: Option<&arkret_wire::CircleId>,
 ) -> PersistenceResult<Vec<arkret_models_collaboration::governance::operation_wire::Policy>> {
     sql_query("SELECT true AS present FROM realm_authorities WHERE realm_id=$1 FOR SHARE")
         .bind::<Text, _>(realm.as_str())
@@ -356,43 +338,33 @@ pub(crate) async fn read_scoped_applet_management_policies_for_delivery(
         .optional()
         .map_err(PersistenceError::database)?
         .ok_or_else(|| refused("the Realm has no current governance authority"))?;
-    read_scoped_applet_management_policies_at_cut(conn, realm, circle, false).await
+    read_scoped_applet_management_policies_at_cut(conn, realm, false).await
 }
 
 async fn read_scoped_applet_management_policies_at_cut(
     conn: &mut AsyncPgConnection,
     realm: &arkret_wire::RealmId,
-    circle: Option<&arkret_wire::CircleId>,
     lock: bool,
 ) -> PersistenceResult<Vec<arkret_models_collaboration::governance::operation_wire::Policy>> {
     Ok(
-        read_management_policy_domains_at_cut(
-            conn,
-            realm,
-            circle,
-            lock,
-            false,
-            &PolicyKind::Applet,
-        )
-        .await
-        .map_err(|error| match error {
-            PersistenceError::Conflict(detail) => {
-                PersistenceError::Conflict(format!("revision_unavailable: {detail}"))
-            }
-            other => other,
-        })?
-        .into_iter()
-        .map(|(policy, _)| policy)
-        .collect(),
+        read_management_policy_domains_at_cut(conn, realm, lock, &PolicyKind::Applet)
+            .await
+            .map_err(|error| match error {
+                PersistenceError::Conflict(detail) => {
+                    PersistenceError::Conflict(format!("revision_unavailable: {detail}"))
+                }
+                other => other,
+            })?
+            .into_iter()
+            .map(|(policy, _)| policy)
+            .collect(),
     )
 }
 
 async fn read_management_policy_domains_at_cut(
     conn: &mut AsyncPgConnection,
     realm: &arkret_wire::RealmId,
-    circle: Option<&arkret_wire::CircleId>,
     lock: bool,
-    all_scopes: bool,
     kind: &PolicyKind,
 ) -> PersistenceResult<
     Vec<(
@@ -417,14 +389,7 @@ async fn read_management_policy_domains_at_cut(
     let realm_source = CommitStreamRef::Realm {
         realm_id: realm.clone(),
     };
-    let circle_source = circle.map(|circle_id| CommitStreamRef::Circle {
-        realm_id: realm.clone(),
-        circle_id: circle_id.clone(),
-    });
     require_complete_policy_stream(conn, realm, &realm_source, None).await?;
-    if let Some(source) = &circle_source {
-        require_complete_policy_stream(conn, realm, source, None).await?;
-    }
     let history = sql_query(format!(
         "{MANAGEMENT_HISTORY_SELECT} AND e.envelope->'payload'->>'policy_id' IN \
          (SELECT pe.envelope->'payload'->>'policy_id' FROM realm_commits pc \
@@ -457,10 +422,6 @@ async fn read_management_policy_domains_at_cut(
         current.insert(row.policy_id.clone(), row);
     }
     let mut policies = Vec::new();
-    let mut checked = BTreeSet::from([realm_source.clone()]);
-    if let Some(source) = &circle_source {
-        checked.insert(source.clone());
-    }
     for id in ids {
         let chain = management_chain(
             by_id
@@ -482,16 +443,10 @@ async fn read_management_policy_domains_at_cut(
                 "Agent Policy current differs from its last accepted write",
             ));
         }
-        // A policy currently carried by another Circle is not a parent policy.
-        if !all_scopes && source != realm_source && Some(&source) != circle_source.as_ref() {
-            continue;
-        }
-        for node in &chain {
-            let source: CommitStreamRef =
-                serde_json::from_value(node.source_stream.clone()).map_err(schema)?;
-            if checked.insert(source.clone()) {
-                require_complete_policy_stream(conn, realm, &source, None).await?;
-            }
+        if source != realm_source {
+            return Err(refused(
+                "Management Policy was not accepted in its governing Realm",
+            ));
         }
         let PolicySetValue::Governance(policy) =
             serde_json::from_value(row.value.clone()).map_err(schema)?
@@ -505,7 +460,7 @@ async fn read_management_policy_domains_at_cut(
 
 /// Resolve immutable object governance scope from its accepted creation, not a
 /// service-local hint. The current revision must still have a committed source;
-/// the immutable Realm/Circle binding must equal the whole creation carrier.
+/// the immutable Realm binding must equal the whole creation carrier.
 pub(crate) async fn authorization_object_scope_in_connection(
     conn: &mut AsyncPgConnection,
     realm: &arkret_wire::RealmId,
@@ -593,17 +548,12 @@ pub(crate) async fn authorization_object_scope_in_connection(
         || creation.get("realm_id").and_then(Value::as_str) != Some(realm.as_str())
         || row.value.get("id").and_then(Value::as_str) != Some(id.as_str())
         || row.value.get("realm_id").and_then(Value::as_str) != Some(realm.as_str())
-        || row.value.get("scope_circle_id").and_then(Value::as_str)
-            != creation.get("scope_circle_id").and_then(Value::as_str)
-        || match &scope {
-            arkret_wire::ScopeRef::Realm { .. } => creation
+        || !matches!(scope, arkret_wire::ScopeRef::Realm { .. })
+        || [&row.value, creation].iter().any(|value| {
+            value
                 .get("scope_circle_id")
-                .is_some_and(|value| !value.is_null()),
-            arkret_wire::ScopeRef::Circle { circle_id, .. } => {
-                creation.get("scope_circle_id").and_then(Value::as_str) != Some(circle_id.as_str())
-            }
-            _ => true,
-        }
+                .is_some_and(|legacy| !legacy.is_null())
+        })
     {
         return Err(refused(
             "authorization object immutable scope differs from accepted source",
@@ -631,13 +581,6 @@ pub(crate) fn management_policy_scope_target(
         CommitStreamRef::Realm { realm_id } if realm_id == realm => {
             Ok(WireResourceSelector::realm(realm_id.clone()))
         }
-        CommitStreamRef::Circle {
-            realm_id,
-            circle_id,
-        } if realm_id == realm => Ok(WireResourceSelector::circle(
-            realm_id.clone(),
-            circle_id.clone(),
-        )),
         _ => Err(refused("Management Policy actual scope is unresolved")),
     }
 }
@@ -873,23 +816,9 @@ async fn check_policy_cas_in_connection(
         };
         require_complete_policy_stream(conn, &event.realm_id, &source, Some(&head)).await?;
     } else {
-        // A new Circle stream may be empty only when its creation is proved in
-        // the complete parent Realm; it is not an arbitrary private cache miss.
-        if !matches!(source, CommitStreamRef::Circle { .. }) || commit.previous_commit_ref.is_some()
-        {
-            return Err(refused(
-                "Management Policy CAS needs an established governance prefix",
-            ));
-        }
-        require_complete_policy_stream(conn, &event.realm_id, &source, None).await?;
-        let occupied = sql_query("SELECT EXISTS(SELECT 1 FROM realm_commits WHERE realm_id=$1 AND stream_ref=$2) AS present")
-            .bind::<Text,_>(event.realm_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(&source).map_err(schema)?)
-            .get_result::<Present>(&mut *conn).await.map_err(PersistenceError::database)?.present;
-        if occupied {
-            return Err(refused(
-                "Management Policy stream already has accepted history",
-            ));
-        }
+        return Err(refused(
+            "Management Policy CAS needs an established governance prefix",
+        ));
     }
     let history = sql_query(format!(
         "{MANAGEMENT_HISTORY_SELECT} AND e.envelope->'payload'->>'policy_id'=$1"
@@ -967,7 +896,7 @@ fn require_supported_policy(
     if document.policy_kind == PolicyKind::Applet {
         use arkret_models_collaboration::governance::operation_wire::AppletPolicyOperation;
         document.validate().map_err(schema)?;
-        if !matches!(scope,arkret_wire::ScopeRef::Realm {realm_id}|arkret_wire::ScopeRef::Circle {realm_id,..} if document.realm_id.as_ref()==Some(realm_id))
+        if !matches!(scope,arkret_wire::ScopeRef::Realm {realm_id} if document.realm_id.as_ref()==Some(realm_id))
             || document.default_effect != PolicyEffect::Allow
             || document.rules.iter().any(|rule| {
                 rule.kind != PolicyRuleKind::Applet
@@ -987,7 +916,7 @@ fn require_supported_policy(
                                 op,
                                 AppletPolicyOperation::CreateBot | AppletPolicyOperation::MapGhost
                             ) && !(matches!(op,AppletPolicyOperation::Join | AppletPolicyOperation::Publish | AppletPolicyOperation::Execute)
-                                && matches!(&rule.applet_target,Some(arkret_models_collaboration::governance::operation_wire::AppletPolicyTarget::Installation {effective_scope,..}) if matches!(effective_scope,arkret_wire::ScopeRef::Realm{realm_id}|arkret_wire::ScopeRef::Circle{realm_id,..} if document.realm_id.as_ref()==Some(realm_id))))
+                                && matches!(&rule.applet_target,Some(arkret_models_collaboration::governance::operation_wire::AppletPolicyTarget::Installation {effective_scope,..}) if matches!(effective_scope,arkret_wire::ScopeRef::Realm{realm_id} if document.realm_id.as_ref()==Some(realm_id))))
                                 && !(matches!(op,AppletPolicyOperation::Install)
                                     && match &rule.applet_target {
                                         Some(arkret_models_collaboration::governance::operation_wire::AppletPolicyTarget::All {} | arkret_models_collaboration::governance::operation_wire::AppletPolicyTarget::Requester { .. }) => true,
@@ -999,7 +928,7 @@ fn require_supported_policy(
             })
         {
             return Err(refused(
-                "Applet Policy requires established consumers; only install, creation and exact Realm/Circle installation join, publish or execute rules with an allow default are supported",
+                "Applet Policy requires established consumers; only install, creation and exact Realm installation join, publish or execute rules with an allow default are supported",
             ));
         }
         return Ok(());
@@ -1225,37 +1154,22 @@ mod admission_tests {
             .unwrap();
             assert_eq!(effect, expected);
         }
-        let circle = arkret_wire::ScopeRef::Circle {
-            realm_id: realm.clone(),
-            circle_id: arkret_wire::CircleId::from_event_id(&arkret_wire::EventId::from_digest(
-                arkret_canonical::DigestSuite::Sha256,
-                [217; 32],
-            )),
-        };
-        let mut circle_join = policy.clone();
-        if let Some(AppletPolicyTarget::Installation {
-            effective_scope, ..
-        }) = &mut circle_join.rules[0].applet_target
-        {
-            *effective_scope = circle.clone();
-        }
-        assert!(require_supported_policy(&circle_join, &scope).is_ok());
-        assert!(require_supported_policy(&circle_join, &circle).is_ok());
-        circle_join.rules[0].effect = arkret_wire::PolicyEffect::RequireReview;
-        circle_join.rules[0].review_requirement = Some(
+        let mut review = policy.clone();
+        review.rules[0].effect = arkret_wire::PolicyEffect::RequireReview;
+        review.rules[0].review_requirement = Some(
             arkret_models_collaboration::governance::operation_wire::ManagementReviewRequirement {
                 approver_actor_ids: vec![policy.created_by.clone()],
                 min_approver_count: 1,
                 max_age_seconds: 60,
             },
         );
-        circle_join.validate().unwrap();
-        assert!(require_supported_policy(&circle_join, &circle).is_ok());
-        let mut wrong_realm = circle_join.clone();
+        review.validate().unwrap();
+        assert!(require_supported_policy(&review, &scope).is_ok());
+        let mut wrong_realm = review.clone();
         wrong_realm.realm_id = Some(arkret_wire::RealmId::from_event_id(
             &arkret_wire::EventId::from_digest(arkret_canonical::DigestSuite::Sha256, [218; 32]),
         ));
-        assert!(require_supported_policy(&wrong_realm, &circle).is_err());
+        assert!(require_supported_policy(&wrong_realm, &scope).is_err());
         let mut broad = policy.clone();
         broad.rules[0].applet_target = Some(AppletPolicyTarget::All {});
         assert!(require_supported_policy(&broad, &scope).is_err());
@@ -1322,10 +1236,7 @@ pub(crate) fn validate_disclosed_shared_policy(
                     PolicyKind::Access | PolicyKind::Moderation | PolicyKind::Agent
                 )
                 && source.realm_id() == realm
-                && matches!(
-                    source,
-                    CommitStreamRef::Realm { .. } | CommitStreamRef::Circle { .. }
-                ) =>
+                && matches!(source, CommitStreamRef::Realm { .. }) =>
         {
             Ok(())
         }
@@ -1360,12 +1271,6 @@ pub(crate) async fn resolve_scope(
             "strand_current_states",
             "strand_id",
             WireResourceSelector::strand(realm.clone(), id),
-        )
-    } else if let Ok(id) = arkret_wire::CircleId::new(scope) {
-        (
-            "circle_current_states",
-            "circle_id",
-            WireResourceSelector::circle(realm.clone(), id),
         )
     } else if let Ok(id) = arkret_wire::PolicyId::new(scope) {
         (
@@ -1437,10 +1342,6 @@ pub(crate) async fn admit_in_connection(
                     ));
                 }
                 return Ok(Some(match &event.scope_ref {
-                    arkret_wire::ScopeRef::Circle {
-                        realm_id,
-                        circle_id,
-                    } => WireResourceSelector::circle(realm_id.clone(), circle_id.clone()),
                     _ => WireResourceSelector::realm(event.realm_id.clone()),
                 }));
             }
@@ -1672,27 +1573,13 @@ mod scoped_current_tests {
             .bind::<Jsonb,_>(json!(commit)).bind::<Timestamptz,_>(commit.committed_at).bind::<Binary,_>(event.event_id.token_bytes().to_vec())
             .execute(&mut *conn).await.unwrap();
     }
-    async fn seed(conn: &mut AsyncPgConnection) -> (RealmCommit, arkret_wire::CircleId) {
+    async fn seed(conn: &mut AsyncPgConnection) -> RealmCommit {
         sql_query("INSERT INTO realm_authorities(realm_id,generation,service_id,authority_ref) VALUES($1,0,'ak:did_core:web:station.example','{}')")
             .bind::<Text,_>(realm().as_str()).execute(&mut *conn).await.unwrap();
         let genesis = genesis();
         let zero = basis(&genesis, 0, None, 80);
         insert(conn, &genesis, &zero).await;
-        let create = fixture(
-            EventKind::CircleCreate,
-            arkret_wire::ScopeRef::Realm { realm_id: realm() },
-            json!({}),
-            1,
-        );
-        let circle = arkret_wire::CircleId::from_event_id(&create.event_id);
-        let first = basis(&create, 1, Some(&zero), 81);
-        insert(conn, &create, &first).await;
-        sql_query("INSERT INTO circle_current_states(realm_id,circle_id,create_event_id,current_commit_id,current_stream_position,source_stream_ref,short_name_folded,value,updated_at) VALUES($1,$2,$3,$4,1,$5,'scope-cas',$6,$7)")
-            .bind::<Text,_>(realm().as_str()).bind::<Text,_>(circle.as_str()).bind::<Text,_>(create.event_id.as_str())
-            .bind::<Text,_>(first.commit_id.as_str()).bind::<Jsonb,_>(json!(first.stream_ref))
-            .bind::<Jsonb,_>(json!({"id":circle,"realm_id":realm()})).bind::<Timestamptz,_>(create.created_at)
-            .execute(&mut *conn).await.unwrap();
-        (first, circle)
+        zero
     }
     fn policy(previous: Option<&RealmCommit>, suffix: &str) -> PolicySetStatePayload {
         serde_json::from_value(json!({
@@ -1758,11 +1645,8 @@ mod scoped_current_tests {
         next_payload.expected_commit_id = Some(Some(pointer.commit_id.clone()));
         let next = history(
             &next_payload,
-            arkret_wire::ScopeRef::Circle {
-                realm_id: realm(),
-                circle_id: arkret_wire::CircleId::from_event_id(&genesis().event_id),
-            },
-            0,
+            arkret_wire::ScopeRef::Realm { realm_id: realm() },
+            91,
             91,
         );
         let mut rows = vec![next, first];
@@ -1772,7 +1656,7 @@ mod scoped_current_tests {
                 .last()
                 .unwrap()
                 .current_stream_position,
-            0
+            91
         );
         let fork = history(
             &next_payload,
@@ -1796,13 +1680,13 @@ mod scoped_current_tests {
     // Imported accepted history tests the real PostgreSQL reader/writer/CAS,
     // not producer authentication or enabling the closed management gates.
     #[tokio::test]
-    async fn realm_circle_realm_updates_follow_exact_cas_not_cross_stream_positions() {
+    async fn realm_policy_updates_require_the_exact_prior_revision() {
         let database = TestDatabase::lease().await;
         let mut conn = database.pool().get().await.unwrap();
         sql_query("BEGIN").execute(&mut conn).await.unwrap();
-        let (head, circle) = seed(&mut conn).await;
+        let head = seed(&mut conn).await;
         assert!(
-            read_scoped_agent_management_policies_in_connection(&mut conn, &realm(), Some(&circle))
+            read_scoped_agent_management_policies_in_connection(&mut conn, &realm())
                 .await
                 .unwrap()
                 .is_empty()
@@ -1812,32 +1696,22 @@ mod scoped_current_tests {
             &mut conn,
             &policy(None, "1"),
             realm_scope.clone(),
-            2,
+            1,
             Some(&head),
             82,
         )
         .await;
-        let circle_scope = arkret_wire::ScopeRef::Circle {
-            realm_id: realm(),
-            circle_id: circle.clone(),
-        };
         let next = accepted(
             &mut conn,
             &policy(Some(&first), "1"),
-            circle_scope.clone(),
-            0,
-            None,
+            realm_scope.clone(),
+            2,
+            Some(&first),
             83,
         )
         .await;
-        assert!(
-            read_agent_management_policies_in_connection(&mut conn, &realm())
-                .await
-                .unwrap()
-                .is_empty()
-        );
         assert_eq!(
-            read_scoped_agent_management_policies_in_connection(&mut conn, &realm(), Some(&circle))
+            read_scoped_agent_management_policies_in_connection(&mut conn, &realm())
                 .await
                 .unwrap()
                 .len(),
@@ -1857,13 +1731,7 @@ mod scoped_current_tests {
                 head,
                 ..
             } => {
-                assert_eq!(
-                    source,
-                    CommitStreamRef::Circle {
-                        realm_id: realm(),
-                        circle_id: circle.clone()
-                    }
-                );
+                assert_eq!(source, CommitStreamRef::Realm { realm_id: realm() });
                 assert_eq!(
                     revision,
                     CurrentRevision {
@@ -1871,21 +1739,21 @@ mod scoped_current_tests {
                         stream_position: next.stream_position,
                     }
                 );
-                assert_eq!(head.stream_position, 0);
+                assert_eq!(head.stream_position, 2);
             }
-            _ => panic!("migrated Policy must retain its actual Circle leaf"),
+            _ => panic!("migrated Policy must retain its Realm revision"),
         }
         let parent = accepted(
             &mut conn,
             &policy(None, "2"),
             realm_scope.clone(),
             3,
-            Some(&first),
+            Some(&next),
             84,
         )
         .await;
         assert_eq!(
-            read_scoped_agent_management_policies_in_connection(&mut conn, &realm(), Some(&circle))
+            read_scoped_agent_management_policies_in_connection(&mut conn, &realm())
                 .await
                 .unwrap()
                 .len(),
@@ -1955,7 +1823,7 @@ mod scoped_current_tests {
             .await
             .unwrap();
         assert!(
-            read_scoped_agent_management_policies_in_connection(&mut conn, &realm(), Some(&circle))
+            read_scoped_agent_management_policies_in_connection(&mut conn, &realm())
                 .await
                 .is_err()
         );
@@ -1968,32 +1836,24 @@ mod scoped_current_tests {
     }
 
     #[tokio::test]
-    async fn unrelated_circle_current_is_not_a_parent_but_its_exact_pointer_cannot_be_forged() {
+    async fn forged_policy_revision_position_is_rejected() {
         let database = TestDatabase::lease().await;
         let mut conn = database.pool().get().await.unwrap();
         sql_query("BEGIN").execute(&mut conn).await.unwrap();
-        let (_, circle) = seed(&mut conn).await;
-        let scope = arkret_wire::ScopeRef::Circle {
-            realm_id: realm(),
-            circle_id: circle.clone(),
-        };
-        let first = accepted(&mut conn, &policy(None, "1"), scope, 0, None, 87).await;
-        assert!(
-            read_agent_management_policies_in_connection(&mut conn, &realm())
-                .await
-                .unwrap()
-                .is_empty()
-        );
-        let other = arkret_wire::CircleId::from_event_id(&genesis().event_id);
-        assert!(
-            read_scoped_agent_management_policies_in_connection(&mut conn, &realm(), Some(&other))
-                .await
-                .is_err()
-        );
+        let head = seed(&mut conn).await;
+        let first = accepted(
+            &mut conn,
+            &policy(None, "1"),
+            arkret_wire::ScopeRef::Realm { realm_id: realm() },
+            1,
+            Some(&head),
+            87,
+        )
+        .await;
         sql_query("UPDATE policy_current_states SET current_stream_position=current_stream_position+1 WHERE current_commit_id=$1")
             .bind::<Text,_>(first.commit_id.as_str()).execute(&mut conn).await.unwrap();
         assert!(
-            read_scoped_agent_management_policies_in_connection(&mut conn, &realm(), Some(&circle))
+            read_scoped_agent_management_policies_in_connection(&mut conn, &realm())
                 .await
                 .is_err()
         );

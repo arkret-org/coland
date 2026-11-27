@@ -104,14 +104,6 @@ pub(super) fn validate_admin_install_events(
 
     let expected_resource = match &basis.effective_scope {
         ScopeRef::Realm { realm_id } => WireResourceSelector::realm(realm_id.clone()),
-        ScopeRef::Circle {
-            realm_id,
-            circle_id,
-        } => {
-            let mut selector = WireResourceSelector::circle(realm_id.clone(), circle_id.clone());
-            selector.match_scope = Some(ResourceMatchScope::Exact);
-            selector
-        }
         _ => {
             return Err(AppError::param_invalid(
                 "unsupported applet effective scope",
@@ -203,10 +195,6 @@ pub(super) fn validate_admin_install_events(
         approved_scopes.push(ScopeGrant {
             actions: grant.actions.clone(),
             realm_ids: vec![realm_id.clone()],
-            circle_ids: match &basis.effective_scope {
-                ScopeRef::Circle { circle_id, .. } => Some(vec![circle_id.clone()]),
-                _ => None,
-            },
             constraints: grant.constraints.clone(),
         });
     }
@@ -1023,7 +1011,7 @@ pub(super) async fn namespace_conflicts_for(
 
 pub(super) fn effective_scope_realm_id(scope: &ScopeRef) -> String {
     match scope {
-        ScopeRef::Realm { realm_id } | ScopeRef::Circle { realm_id, .. } => realm_id.to_string(),
+        ScopeRef::Realm { realm_id } => realm_id.to_string(),
         _ => unreachable!("unsupported canonical applet effective scope"),
     }
 }

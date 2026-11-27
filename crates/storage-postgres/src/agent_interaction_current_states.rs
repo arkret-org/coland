@@ -1234,7 +1234,7 @@ pub(crate) async fn project_in_connection(
 pub(crate) fn requires_shared_public_mode(event: &Event) -> bool {
     if !matches!(
         event.scope_ref,
-        ScopeRef::Realm { .. } | ScopeRef::Circle { .. }
+        ScopeRef::Realm { .. }
     ) {
         return false;
     }

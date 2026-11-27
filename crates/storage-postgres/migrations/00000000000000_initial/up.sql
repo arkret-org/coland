@@ -546,7 +546,7 @@ CREATE TABLE public.agent_participation (
     third_party_mention_delivery_allowed boolean DEFAULT false NOT NULL,
     acting_on_behalf_allowed boolean DEFAULT false NOT NULL,
     updated_at timestamp with time zone NOT NULL,
-    CONSTRAINT agent_participation_scope_kind_check CHECK ((scope_kind = ANY (ARRAY['realm'::text, 'circle'::text, 'strand'::text])))
+    CONSTRAINT agent_participation_scope_kind_check CHECK ((scope_kind = ANY (ARRAY['realm'::text, 'strand'::text])))
 );
 
 ALTER TABLE ONLY public.agent_participation
@@ -937,7 +937,7 @@ CREATE TABLE public.realm_actor_blob_uploads (
     authorization_ref jsonb NOT NULL,
     accepted_at timestamp with time zone NOT NULL,
     CONSTRAINT realm_actor_blob_upload_scope CHECK (COALESCE(
-        effective_scope->>'kind' IN ('realm','circle') AND
+        effective_scope->>'kind' = 'realm' AND
         actor_id->>'kind'='realm' AND
         effective_scope->>'realm_id'=actor_id#>>'{realm_actor_id,realm_id}', false))
 );
@@ -1124,8 +1124,6 @@ CREATE TABLE public.authority_forward_attempts (
     original_submission_json jsonb,
     peer_request_json jsonb,
     terminal_outcome_json jsonb,
-    -- Local first-attempt cut for an own Circle leave result, never a wire field.
-    circle_leave_parent_revision jsonb,
     event_pk bigint PRIMARY KEY REFERENCES public.canonical_events(pk) ON DELETE RESTRICT,
     status text NOT NULL CHECK (status IN ('forwarding', 'rejected', 'temporarily_unavailable')),
     reason_code text,
@@ -1175,7 +1173,7 @@ EXCEPTION WHEN lock_not_available THEN
 END;
 $$;
 
--- One chain per serialized CommitStreamRef. Realm, Circle and Sidecar
+-- One chain per serialized CommitStreamRef. Realm and Sidecar
 -- positions are intentionally incomparable: there is no global chain and no
 -- global position. A member Station keeps a Commit whose Event a hosted
 -- member may not hold in full as a continuity-only chain node: its `event_pk`
@@ -1282,17 +1280,14 @@ FOR EACH ROW EXECUTE FUNCTION public.record_realm_commit_event_kind();
 -- temporarily unavailable and later replicas are `dependency_missing`.
 -- Internal cache of verified, disclosed SDK authorization current rows.
 CREATE TABLE public.replica_authorization_cuts (
+ -- Start of continuous coverage from a verified snapshot. A head alone does
+ -- not prove an undisclosed message had an empty reaction set at that cut.
+ snapshot_stream_position BIGINT CHECK(snapshot_stream_position BETWEEN 0 AND head_stream_position),
  realm_id TEXT NOT NULL,
  source_stream_ref JSONB NOT NULL,
  head_commit_id TEXT NOT NULL,
  head_stream_position BIGINT NOT NULL CHECK(head_stream_position BETWEEN 0 AND 9007199254740991),
- circle_effect_base_commit_id TEXT,
- circle_effect_base_stream_position BIGINT,
- circle_continuation_id UUID,
  verified_at TIMESTAMPTZ NOT NULL,
- CHECK ((circle_effect_base_commit_id IS NULL AND circle_effect_base_stream_position IS NULL AND circle_continuation_id IS NULL)
-     OR (circle_effect_base_commit_id IS NOT NULL AND circle_effect_base_stream_position IS NOT NULL AND circle_effect_base_stream_position BETWEEN 0 AND head_stream_position AND circle_continuation_id IS NOT NULL
-         AND (circle_effect_base_stream_position<head_stream_position OR circle_effect_base_commit_id=head_commit_id))),
  PRIMARY KEY(realm_id,source_stream_ref)
 );
 
@@ -1308,13 +1303,8 @@ CREATE TABLE public.replica_authorization_rows (
  source_stream_ref JSONB NOT NULL,
  current_commit_id TEXT NOT NULL,
  current_stream_position BIGINT NOT NULL CHECK(current_stream_position BETWEEN 0 AND 9007199254740991),
- observed_anchor_commit_id TEXT,
- observed_anchor_stream_position BIGINT,
- circle_continuation_id UUID,
  value JSONB NOT NULL,
  updated_at TIMESTAMPTZ NOT NULL,
- CHECK ((observed_anchor_commit_id IS NULL AND observed_anchor_stream_position IS NULL AND circle_continuation_id IS NULL)
-     OR (observed_anchor_commit_id IS NOT NULL AND observed_anchor_stream_position IS NOT NULL AND observed_anchor_stream_position BETWEEN current_stream_position AND 9007199254740991 AND circle_continuation_id IS NOT NULL)),
  PRIMARY KEY(realm_id,selector)
 );
 
@@ -2924,64 +2914,6 @@ CREATE INDEX policy_documents_owner_idx ON public.policy_documents USING btree (
 
 CREATE INDEX policy_documents_scope_subject_idx ON public.policy_documents USING btree (scope, subject_ref, policy_kind);
 
-CREATE TABLE public.projection_circle_members (
-    pk bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    circle_pk bigint NOT NULL,
-    actor_id text NOT NULL,
-    state text DEFAULT 'active'::text NOT NULL,
-    invited_at timestamp with time zone,
-    joined_at timestamp with time zone NOT NULL,
-    updated_at timestamp with time zone NOT NULL,
-    CONSTRAINT projection_circle_members_state_check CHECK ((state = ANY (ARRAY['invite'::text, 'join'::text, 'leave'::text, 'ban'::text, 'knock'::text])))
-);
-
-ALTER TABLE ONLY public.projection_circle_members
-    ADD CONSTRAINT projection_circle_members_circle_pk_actor_id_key UNIQUE (circle_pk, actor_id);
-
-CREATE INDEX projection_circle_members_actor_idx ON public.projection_circle_members USING btree (actor_id);
-
-CREATE TABLE public.projection_circles (
-    pk bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    id bytea NOT NULL CHECK (octet_length(id) = 33),
-    realm_id text NOT NULL,
-    profile_ref text,
-    title text NOT NULL,
-    summary text,
-    display jsonb NOT NULL,
-    directory_visibility text DEFAULT 'members'::text NOT NULL,
-    join_rule text DEFAULT 'invite'::text NOT NULL,
-    history_access text DEFAULT 'since_join'::text NOT NULL,
-    content_encryption_floor text,
-    metadata_encryption_floor text,
-    encryption_profile text DEFAULT 'mls_rfc9420'::text NOT NULL,
-    content_scheme text,
-    mls_group_ref text,
-    durability_policy text,
-    state text DEFAULT 'active'::text NOT NULL,
-    state_changed_at timestamp with time zone,
-    created_by jsonb NOT NULL,
-    updated_by jsonb,
-    created_at timestamp with time zone NOT NULL,
-    updated_at timestamp with time zone,
-    CONSTRAINT projection_circles_content_encryption_floor_check CHECK ((content_encryption_floor = ANY (ARRAY['allow_plaintext'::text, 'e2ee_required'::text]))),
-    CONSTRAINT projection_circles_content_scheme_check CHECK ((content_scheme = ANY (ARRAY['mls_rfc9420'::text, 'mls_exporter_aead_v1'::text]))),
-    CONSTRAINT projection_circles_directory_visibility_check CHECK ((directory_visibility = ANY (ARRAY['members'::text, 'realm_members'::text]))),
-    CONSTRAINT projection_circles_join_rule_check CHECK ((join_rule = ANY (ARRAY['invite'::text, 'knock'::text, 'public'::text]))),
-    CONSTRAINT projection_circles_metadata_encryption_floor_check CHECK ((metadata_encryption_floor = ANY (ARRAY['allow_plaintext'::text, 'e2ee_required'::text]))),
-    CONSTRAINT projection_circles_durability_policy_check CHECK ((durability_policy = ANY (ARRAY['none'::text, 'organization_recovery_key'::text]))),
-    CONSTRAINT projection_circles_scheme_binding_check CHECK (((encryption_profile = 'none'::text AND content_scheme IS NULL AND durability_policy IS NULL) OR (encryption_profile = 'mls_rfc9420'::text AND ((content_scheme = 'mls_rfc9420'::text AND durability_policy IS NULL) OR (content_scheme = 'mls_exporter_aead_v1'::text AND durability_policy IS NOT NULL))))),
-    CONSTRAINT projection_circles_state_check CHECK ((state = ANY (ARRAY['active'::text, 'archived'::text, 'tombstoned'::text])))
-);
-
-ALTER TABLE ONLY public.projection_circles
-    ADD CONSTRAINT projection_circles_id_key UNIQUE (id);
-
-CREATE INDEX projection_circles_realm_idx ON public.projection_circles USING btree (realm_id);
-
-CREATE INDEX projection_circles_state_idx ON public.projection_circles USING btree (state);
-
-ALTER TABLE ONLY public.projection_circle_members
-    ADD CONSTRAINT projection_circle_members_circle_pk_fkey FOREIGN KEY (circle_pk) REFERENCES public.projection_circles(pk) ON DELETE CASCADE;
 
 -- Materialized projection of an admitted canonical Event. The Event identity
 -- lives in exactly one place -- `canonical_events.id` -- and is reached from
@@ -3035,7 +2967,6 @@ CREATE TABLE public.projection_morphs (
     versions jsonb DEFAULT '[]'::jsonb NOT NULL,
     content jsonb,
     encrypted_content jsonb,
-    scope_circle_id bytea CHECK (octet_length(scope_circle_id) = 33),
     created_at timestamp with time zone NOT NULL,
     updated_at timestamp with time zone,
     -- Stage invariants follow common-fields.md 5.3.
@@ -3056,7 +2987,6 @@ ALTER TABLE ONLY public.projection_morphs
 
 CREATE INDEX projection_morphs_realm_idx ON public.projection_morphs USING btree (realm_id);
 
-CREATE INDEX projection_morphs_scope_circle_id_idx ON public.projection_morphs USING btree (scope_circle_id);
 
 CREATE INDEX projection_morphs_state_idx ON public.projection_morphs USING btree (state);
 
@@ -4435,9 +4365,6 @@ CREATE TABLE member_state_current_states (
 CREATE INDEX member_state_current_state_membership
  ON member_state_current_states(realm_id,membership,member_id);
 
--- Circle create is a Realm-stream Event; membership writes are on that
--- Circle's own Commit stream. These rows are derived only in the accepting
--- transaction and carry the exact accepted revision.
 CREATE TABLE call_state_current_states (
  realm_id TEXT NOT NULL,
  call_id TEXT NOT NULL,
@@ -4449,7 +4376,7 @@ CREATE TABLE call_state_current_states (
  updated_at TIMESTAMPTZ NOT NULL,
  PRIMARY KEY(realm_id,call_id),
  CHECK(jsonb_typeof(value)='object'),
- CHECK(source_stream_ref->>'kind' IN ('realm','circle')),
+ CHECK(source_stream_ref->>'kind' = 'realm'),
  CHECK(source_stream_ref->>'realm_id'=realm_id)
 );
 
@@ -4465,7 +4392,7 @@ CREATE TABLE call_component_current_states (
  PRIMARY KEY(realm_id,call_id,selector),
  CHECK(selector->>'call_id'=call_id),
  CHECK(selector->>'kind' IN ('call_focus','call_roster','call_moderation','call_recording_state','call_recording_artifact','call_transcript_state','call_transcript_artifact')),
- CHECK(source_stream_ref->>'kind' IN ('realm','circle')),
+ CHECK(source_stream_ref->>'kind' = 'realm'),
  CHECK(source_stream_ref->>'realm_id'=realm_id)
 );
 
@@ -4501,56 +4428,6 @@ CREATE TABLE realm_media_service_current_states (
  CHECK(source_stream_ref->>'realm_id'=realm_id)
 );
 
-CREATE TABLE circle_current_states (
- realm_id TEXT NOT NULL,
- circle_id TEXT NOT NULL PRIMARY KEY,
- create_event_id TEXT NOT NULL UNIQUE,
- current_commit_id TEXT NOT NULL,
- current_stream_position BIGINT NOT NULL CHECK(current_stream_position BETWEEN 0 AND 9007199254740991),
- source_stream_ref JSONB NOT NULL,
- short_name_folded TEXT NOT NULL,
- value JSONB NOT NULL,
- updated_at TIMESTAMPTZ NOT NULL,
- UNIQUE(realm_id,short_name_folded),
- CHECK(jsonb_typeof(value)='object'),
- CHECK(source_stream_ref->>'kind'='realm'),
- CHECK(value->>'id'=circle_id),
- CHECK(value->>'realm_id'=realm_id)
-);
-CREATE TABLE circle_member_state_current_states (
- realm_id TEXT NOT NULL,
- circle_id TEXT NOT NULL,
- member_id TEXT NOT NULL,
- membership TEXT NOT NULL CHECK(membership IN ('join','knock','leave','ban')),
- current_commit_id TEXT NOT NULL,
- current_stream_position BIGINT NOT NULL CHECK(current_stream_position BETWEEN 0 AND 9007199254740991),
- source_stream_ref JSONB NOT NULL,
- value JSONB NOT NULL,
- updated_at TIMESTAMPTZ NOT NULL,
- PRIMARY KEY(circle_id,member_id),
- CHECK(jsonb_typeof(value)='object'),
- CHECK(source_stream_ref->>'kind'='circle'),
- CHECK(value->>'membership'=membership),
- CHECK((membership='join')=(value ? 'parent_membership_revision'))
-);
-CREATE INDEX circle_member_state_current_state_membership
- ON circle_member_state_current_states(circle_id,membership,member_id);
-CREATE INDEX circle_member_state_current_states_realm
- ON circle_member_state_current_states(realm_id,member_id,circle_id);
--- Effective Circle membership (circle.md section 9.1): a canonical Circle join
--- counts only while the parent Realm member_state current of the same actor
--- is join at exactly the producer-signed parent_membership_revision. The
--- comparison is the parent Realm Commit identity plus its Realm-stream
--- position; no Circle-stream position is ever compared with it.
-CREATE FUNCTION circle_member_parent_join_current(
-    circle_realm_id TEXT, circle_member_id TEXT, circle_value JSONB
-) RETURNS BOOLEAN LANGUAGE sql STABLE AS $$
-    SELECT EXISTS (SELECT 1 FROM member_state_current_states parent
-        WHERE parent.realm_id=circle_realm_id AND parent.member_id=circle_member_id
-          AND parent.membership='join' AND circle_value->>'membership'='join'
-          AND parent.current_commit_id=circle_value->'parent_membership_revision'->>'commit_id'
-          AND parent.current_stream_position::text=circle_value->'parent_membership_revision'->>'stream_position')
-$$;
 
 -- Native Sidecar genesis is a Realm-stream Event. This accepted current is
 -- separate from the service-local agent_sidecars projection and permanently
@@ -4727,7 +4604,7 @@ CREATE TABLE rsvp_current_states (
  CHECK(jsonb_typeof(occurrence) IN ('null','string')),
  CHECK(jsonb_typeof(responder_actor_id)='object'),
  CHECK(jsonb_typeof(value)='object'),
- CHECK(source_stream_ref->>'kind' IN ('realm','circle'))
+ CHECK(source_stream_ref->>'kind' = 'realm')
 );
 CREATE INDEX rsvp_current_states_realm ON rsvp_current_states(realm_id,event_ref);
 
@@ -5131,21 +5008,15 @@ CREATE TABLE realm_bootstrap_current_states (
  PRIMARY KEY(realm_id,state_family)
 );
 
--- One whole-value receipt policy per exact, independently configured scope.
+-- The Realm stream owns the sole receipt policy at its accepted revision.
 CREATE TABLE scope_read_receipt_policy_current_states (
- realm_id TEXT NOT NULL,
- scope_ref JSONB NOT NULL,
+ realm_id TEXT PRIMARY KEY,
  source_stream_ref JSONB NOT NULL,
  current_commit_id TEXT NOT NULL,
  current_stream_position BIGINT NOT NULL CHECK(current_stream_position BETWEEN 0 AND 9007199254740991),
  value JSONB NOT NULL,
  updated_at TIMESTAMPTZ NOT NULL,
- PRIMARY KEY(realm_id,scope_ref),
- CHECK(jsonb_typeof(scope_ref)='object' AND scope_ref ?& ARRAY['kind','realm_id'] AND scope_ref->>'realm_id'=realm_id),
- CHECK((scope_ref->>'kind'='realm' AND scope_ref - 'kind' - 'realm_id'='{}'::jsonb)
-    OR (scope_ref->>'kind'='circle' AND scope_ref ? 'circle_id' AND jsonb_typeof(scope_ref->'circle_id')='string'
-        AND scope_ref - 'kind' - 'realm_id' - 'circle_id'='{}'::jsonb)),
- CHECK(source_stream_ref=scope_ref),
+ CHECK(source_stream_ref=jsonb_build_object('kind','realm','realm_id',realm_id)),
  CHECK(jsonb_typeof(value)='object' AND value<>'{}'::jsonb AND value - 'disclosure' - 'visibility'='{}'::jsonb),
  CHECK(NOT value ? 'disclosure' OR (jsonb_typeof(value->'disclosure')='string' AND value->>'disclosure' IN ('required','optional','disabled'))),
  CHECK(NOT value ? 'visibility' OR (jsonb_typeof(value->'visibility')='string' AND value->>'visibility' IN ('public','members','private')))
@@ -5341,7 +5212,7 @@ CREATE TABLE actor_profile_current_states (
  scope_ref JSONB NOT NULL,
  UNIQUE(scope_ref,actor_id),
  CHECK(actor_id->>'kind'='account'),
- CHECK(scope_ref->>'kind' IN ('realm','circle')),
+ CHECK(scope_ref->>'kind' = 'realm'),
  CHECK(scope_ref->>'realm_id'=realm_id),
  current_commit_id TEXT NOT NULL REFERENCES realm_commits(commit_id),
  current_stream_position BIGINT NOT NULL CHECK(current_stream_position BETWEEN 0 AND 9007199254740991),
@@ -5787,7 +5658,7 @@ CREATE TABLE public.realm_actor_backup_admissions (
     accepted_at timestamptz NOT NULL,
     UNIQUE(actor_id,idempotency_key),
     FOREIGN KEY (realm_id, actor_id) REFERENCES public.realm_actor_backup_namespaces(realm_id, actor_id),
-    CHECK (effective_scope->>'kind' IN ('realm', 'circle')),
+    CHECK (effective_scope->>'kind' = 'realm'),
     CHECK (effective_scope->>'realm_id' = realm_id),
     CHECK (source#>>'{admission,envelope_digest}' = envelope_digest),
     CHECK (source#>'{admission,realm_actor_id}' = actor_id->'realm_actor_id'),
@@ -5810,7 +5681,7 @@ CREATE TABLE public.realm_actor_backup_series (
     source jsonb NOT NULL CHECK (jsonb_typeof(source) = 'object'),
     PRIMARY KEY (realm_id, actor_id, effective_scope, series_pointer_version),
     FOREIGN KEY (realm_id, actor_id) REFERENCES public.realm_actor_backup_namespaces(realm_id, actor_id),
-    CHECK (effective_scope->>'kind' IN ('realm', 'circle')),
+    CHECK (effective_scope->>'kind' = 'realm'),
     CHECK (effective_scope->>'realm_id' = realm_id),
     CHECK (record->'actor_id' = actor_id),
     CHECK (record->'effective_scope' = effective_scope),
@@ -5933,64 +5804,3 @@ CREATE TABLE realm_invite_link_current_states (
  CHECK((state_kind='realm_invite_link_lifecycle' AND value IN ('"active"'::jsonb,'"revoked"'::jsonb))
        OR (state_kind<>'realm_invite_link_lifecycle' AND jsonb_typeof(value)='object'))
 );
-
--- A retained value is not a fresh current claim. This read-only predicate is
--- shared by repeatable-read convenience and authorization readers. Native
--- provenance is tied to the actual Station and current authority; replicas
--- additionally need an exact, uninterrupted Circle-domain observation segment.
-CREATE FUNCTION circle_current_row_proved(
- p_realm TEXT, p_selector JSONB, p_source JSONB, p_commit TEXT,
- p_position BIGINT, p_value JSONB
-) RETURNS BOOLEAN LANGUAGE sql STABLE AS $$
- SELECT EXISTS (
-   SELECT 1 FROM realm_authorities a
-   WHERE a.realm_id=p_realm AND current_device_inventory_station() IS NOT NULL
-     AND (
-       (a.service_id=current_device_inventory_station() AND EXISTS (
-         SELECT 1 FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk
-         WHERE c.realm_id=p_realm AND c.stream_ref=p_source
-           AND c.commit_id=p_commit AND c.stream_position=p_position
-           AND e.state='committed'
-       ))
-       OR (a.service_id<>current_device_inventory_station() AND EXISTS (
-         SELECT 1 FROM replica_authorization_rows r
-         JOIN replica_authorization_cuts h ON h.realm_id=r.realm_id
-           AND h.source_stream_ref=r.source_stream_ref
-         WHERE r.realm_id=p_realm AND r.selector=p_selector
-           AND r.source_stream_ref=p_source AND r.current_commit_id=p_commit
-           AND r.current_stream_position=p_position AND r.value=p_value
-           AND r.circle_continuation_id IS NOT NULL
-           AND r.circle_continuation_id=h.circle_continuation_id
-           AND h.circle_effect_base_commit_id IS NOT NULL
-           AND r.observed_anchor_commit_id IS NOT NULL
-           AND r.observed_anchor_stream_position BETWEEN h.circle_effect_base_stream_position AND h.head_stream_position
-           AND r.current_stream_position<=r.observed_anchor_stream_position
-           AND (r.current_stream_position<r.observed_anchor_stream_position OR r.current_commit_id=r.observed_anchor_commit_id)
-           AND (
-             (r.observed_anchor_stream_position=h.circle_effect_base_stream_position AND r.observed_anchor_commit_id=h.circle_effect_base_commit_id)
-             OR (r.observed_anchor_stream_position=h.head_stream_position AND r.observed_anchor_commit_id=h.head_commit_id)
-             OR (r.observed_anchor_stream_position>h.circle_effect_base_stream_position AND r.observed_anchor_stream_position<h.head_stream_position AND EXISTS (
-               SELECT 1 FROM realm_commits interior WHERE interior.realm_id=r.realm_id
-                 AND interior.stream_ref=r.source_stream_ref
-                 AND interior.commit_id=r.observed_anchor_commit_id
-                 AND interior.stream_position=r.observed_anchor_stream_position
-             ))
-           )
-           AND NOT EXISTS (
-             SELECT 1 FROM (SELECT held.commit_id,held.stream_position FROM realm_commits held
-               WHERE held.realm_id=h.realm_id AND held.stream_ref=h.source_stream_ref
-               ORDER BY held.stream_position DESC LIMIT 1) tail
-             WHERE tail.stream_position>h.head_stream_position OR (tail.stream_position=h.head_stream_position AND tail.commit_id<>h.head_commit_id)
-           )
-           AND NOT EXISTS (
-             SELECT 1 FROM replica_stream_anchors tail JOIN realm_commits opening ON opening.commit_id=tail.join_commit_id
-             WHERE tail.stream_key=(SELECT held.stream_key FROM realm_commits held
-               WHERE held.realm_id=h.realm_id AND held.stream_ref=h.source_stream_ref
-               ORDER BY held.stream_position DESC LIMIT 1)
-               AND opening.realm_id=h.realm_id AND opening.stream_ref=h.source_stream_ref AND opening.stream_key=tail.stream_key
-               AND (tail.anchor_stream_position>h.head_stream_position OR (tail.anchor_stream_position=h.head_stream_position AND tail.anchor_commit_id<>h.head_commit_id))
-           )
-       ))
-     )
- )
-$$;

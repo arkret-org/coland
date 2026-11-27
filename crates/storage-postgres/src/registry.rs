@@ -54,7 +54,7 @@ pub struct PgPersistenceStore {
     service_identity: PgServiceIdentityStore,
     principal_resolutions: PgPrincipalResolutionStore,
     service_routes: PgServiceRouteStore,
-    circle_projections: PgCircleProjectionStore,
+
     key_backups: PgKeyBackupStore,
     policy_documents: PgPolicyDocumentStore,
     recovery_policies: PgRecoveryPolicyStore,
@@ -137,7 +137,7 @@ impl PgPersistenceStore {
             service_identity: PgServiceIdentityStore { pool: pool.clone() },
             principal_resolutions: PgPrincipalResolutionStore { pool: pool.clone() },
             service_routes: PgServiceRouteStore { pool: pool.clone() },
-            circle_projections: PgCircleProjectionStore { pool: pool.clone() },
+
             key_backups: PgKeyBackupStore { pool: pool.clone() },
             policy_documents: PgPolicyDocumentStore { pool: pool.clone() },
             recovery_policies: PgRecoveryPolicyStore { pool: pool.clone() },
@@ -397,9 +397,6 @@ impl EventProjectionStoreRegistry for PgPersistenceStore {
         &self.key_backups
     }
 
-    fn circle_projections(&self) -> &dyn CircleProjectionStore {
-        &self.circle_projections
-    }
 
     fn object_current_snapshot(&self) -> &dyn ObjectCurrentSnapshotStore {
         &self.object_current_snapshot

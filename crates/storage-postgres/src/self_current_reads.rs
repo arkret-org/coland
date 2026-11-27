@@ -10,7 +10,7 @@
 //! after membership ends; this exception grants no content visibility.
 //! An unknown Realm and a caller that is not a currently joined member share
 //! the universal `not_found`. Each selector must prove its own effective scope;
-//! unrelated Circle or Sidecar streams do not invalidate a confirmed Realm-scope
+//! unrelated Sidecar streams do not invalidate a confirmed Realm-scope
 //! Strand. No `never_written` answer is inferred from a missing row alone.
 
 use arkret_models_collaboration::exact_current_state::{
@@ -160,7 +160,7 @@ async fn member_cut(
     if !joined {
         return Ok(MemberCut::NotVisible);
     }
-    crate::agent_management_admission::read_controller_in_connection(conn, realm_id, None, caller)
+    crate::agent_management_admission::read_controller_in_connection(conn, realm_id, caller)
         .await?;
     if tenure.service_id != issuer.as_str() {
         return Ok(MemberCut::ForeignTenure);
@@ -217,6 +217,28 @@ struct HistoryBindingRow {
     value: serde_json::Value,
 }
 
+/// Accepted personal registration and current resolution on the issuing home
+/// Station. This identifies the host PCR; it grants no stream access by itself.
+async fn personal_stream_host(
+    conn: &mut AsyncPgConnection,
+    realm_id: &RealmId,
+    issuer: &DidCoreId,
+) -> Result<Option<HistoryBindingRow>, PgTransactionError> {
+    Ok(sql_query(
+        "SELECT jsonb_build_array(r.genesis_event_id,r.current_commit_id,a.generation,a.service_id) AS value \
+         FROM pcr_genesis_units g JOIN principal_resolution_current_states r \
+           ON (r.pcr_realm_id,r.principal_id,r.station_id)=(g.realm_id,g.principal_id,g.station_id) \
+         JOIN realm_authorities a ON a.realm_id=g.realm_id AND a.service_id=g.station_id \
+         JOIN realm_commits c ON c.realm_id=g.realm_id AND c.commit_id=r.current_commit_id \
+           AND c.stream_position=r.current_stream_position \
+         JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' \
+         WHERE g.realm_id=$1 AND g.station_id=$2 \
+           AND NOT EXISTS (SELECT 1 FROM committed_events t WHERE t.realm_id=g.realm_id \
+                           AND t.kind IN ('ak.realm.tombstone','ak.realm.destroy'))",
+    ).bind::<Text,_>(realm_id.as_str()).bind::<Text,_>(issuer.as_str())
+     .get_result::<HistoryBindingRow>(conn).await.optional()?)
+}
+
 /// Heads, caller visibility and policy provenance are frozen by one snapshot.
 pub(crate) async fn realm_stream_subscription_cut(
     pool: &PgPool,
@@ -231,7 +253,9 @@ pub(crate) async fn realm_stream_subscription_cut(
         let mut listing = list_streams_in_connection(conn, realm_id, &caller, issuer).await?;
         let mut history_digest = None;
         if let AccountRealmStreamList::Listed(streams) = &listing {
-            let realm_policy = sql_query(
+            let realm_policy = if !streams.is_empty() && streams.iter().all(|row| matches!(row.stream_ref, CommitStreamRef::Sidecar { .. })) {
+                personal_stream_host(conn, realm_id, issuer).await?
+            } else { sql_query(
                 "SELECT jsonb_build_array(h.value,h.current_commit_id,h.current_stream_position,m.current_commit_id,m.current_stream_position,a.generation,a.service_id) AS value \
                  FROM realm_bootstrap_current_states h \
                  LEFT JOIN realm_commits hc ON hc.realm_id=h.realm_id AND hc.commit_id=h.current_commit_id AND hc.stream_position=h.current_stream_position AND hc.stream_ref=jsonb_build_object('kind','realm','realm_id',h.realm_id) \
@@ -243,25 +267,13 @@ pub(crate) async fn realm_stream_subscription_cut(
                  AND (mc.commit_id IS NOT NULL OR EXISTS(SELECT 1 FROM replica_authorization_rows r WHERE r.realm_id=m.realm_id AND r.selector=jsonb_build_object('kind','member_state','actor_id',$3::jsonb) AND r.source_stream_ref=jsonb_build_object('kind','realm','realm_id',m.realm_id) AND r.current_commit_id=m.current_commit_id AND r.current_stream_position=m.current_stream_position AND r.value=m.value))",
             ).bind::<Text,_>(realm_id.as_str()).bind::<Text,_>(caller.to_string())
                 .bind::<Jsonb,_>(serde_json::to_value(&caller).map_err(PersistenceError::database)?)
-                .get_result::<HistoryBindingRow>(&mut *conn).await.optional()?;
+                .get_result::<HistoryBindingRow>(&mut *conn).await.optional()? };
             if let Some(policy) = realm_policy {
                 let mut bindings = vec![policy.value];
                 let mut complete = true;
                 for row in streams {
                     let scoped = match &row.stream_ref {
                         CommitStreamRef::Realm { .. } => continue,
-                        CommitStreamRef::Circle { circle_id, .. } => sql_query(
-                            "SELECT jsonb_build_array(c.value->'history_access',c.current_commit_id,c.current_stream_position,m.current_commit_id,m.current_stream_position,m.value->'parent_membership_revision') AS value \
-                             FROM circle_current_states c \
-                             LEFT JOIN realm_commits cc ON cc.realm_id=c.realm_id AND cc.commit_id=c.current_commit_id AND cc.stream_position=c.current_stream_position AND cc.stream_ref=c.source_stream_ref \
-                             JOIN circle_member_state_current_states m ON m.realm_id=c.realm_id AND m.circle_id=c.circle_id AND m.member_id=$3 AND m.membership='join' \
-                             LEFT JOIN realm_commits mc ON mc.realm_id=m.realm_id AND mc.commit_id=m.current_commit_id AND mc.stream_position=m.current_stream_position AND mc.stream_ref=m.source_stream_ref \
-                             WHERE c.realm_id=$1 AND c.circle_id=$2 AND circle_member_parent_join_current(m.realm_id,m.member_id,m.value) \
-                             AND (cc.commit_id IS NOT NULL OR EXISTS(SELECT 1 FROM replica_authorization_rows r WHERE r.realm_id=c.realm_id AND r.selector=jsonb_build_object('kind','circle','circle_id',c.circle_id) AND r.source_stream_ref=c.source_stream_ref AND r.current_commit_id=c.current_commit_id AND r.current_stream_position=c.current_stream_position AND r.value=c.value)) \
-                             AND (mc.commit_id IS NOT NULL OR EXISTS(SELECT 1 FROM replica_authorization_rows r WHERE r.realm_id=m.realm_id AND r.selector=jsonb_build_object('kind','circle_member_state','circle_id',m.circle_id,'member_actor_id',$4::jsonb) AND r.source_stream_ref=m.source_stream_ref AND r.current_commit_id=m.current_commit_id AND r.current_stream_position=m.current_stream_position AND r.value=m.value))",
-                        ).bind::<Text,_>(realm_id.as_str()).bind::<Text,_>(circle_id.as_str()).bind::<Text,_>(caller.to_string())
-                            .bind::<Jsonb,_>(serde_json::to_value(&caller).map_err(PersistenceError::database)?)
-                            .get_result::<HistoryBindingRow>(&mut *conn).await.optional()?,
                         CommitStreamRef::Sidecar { sidecar_id, .. } => sql_query(
                             "SELECT jsonb_build_array(s.value,s.current_commit_id,s.current_stream_position) AS value \
                              FROM sidecar_current_states s LEFT JOIN realm_commits c ON c.realm_id=s.realm_id AND c.commit_id=s.current_commit_id AND c.stream_position=s.current_stream_position AND c.stream_ref=s.source_stream_ref \
@@ -289,48 +301,42 @@ async fn list_streams_in_connection(
     caller: &ActorId,
     issuer: &DidCoreId,
 ) -> Result<AccountRealmStreamList, PgTransactionError> {
-    let realm_head = match member_cut(conn, realm_id, caller, issuer).await? {
-        MemberCut::NotVisible => return Ok(AccountRealmStreamList::NotVisible),
-        MemberCut::ForeignTenure => {
-            let listing =
-                crate::replica_stream_listing::in_connection(conn, realm_id, caller).await?;
-            if matches!(listing, AccountRealmStreamList::Listed(_)) {
-                crate::circle_current_states::require_actor_currents_in_connection(
-                    conn,
-                    Some(realm_id),
-                    caller,
-                )
-                .await?;
+    if personal_stream_host(conn, realm_id, issuer)
+        .await?
+        .is_none()
+    {
+        let realm_head = match member_cut(conn, realm_id, caller, issuer).await? {
+            MemberCut::NotVisible => return Ok(AccountRealmStreamList::NotVisible),
+            MemberCut::ForeignTenure => {
+                return Ok(
+                    crate::replica_stream_listing::in_connection(conn, realm_id, caller).await?,
+                );
             }
-            return Ok(listing);
-        }
-        MemberCut::Member { realm_head, .. } => realm_head,
-    };
-    crate::circle_current_states::require_actor_currents_in_connection(
-        conn,
-        Some(realm_id),
-        caller,
-    )
-    .await?;
-    let Some(head) = realm_head else {
-        return Ok(AccountRealmStreamList::Listed(Vec::new()));
-    };
-    let Some(floor) =
-        crate::account_stream_scan::caller_realm_floor_in_connection(conn, realm_id, caller)
-            .await?
-    else {
-        return Ok(AccountRealmStreamList::Unproved(
-            "a per-member join or history floor is not proved at this cut",
-        ));
-    };
-    let mut visible = vec![RealmStreamView {
-        stream_ref: head.stream_ref,
-        head_commit_ref: head.commit_id,
-        next_position: head.stream_position.checked_add(1).ok_or_else(|| {
-            PersistenceError::Internal("Realm stream position overflows".to_owned())
-        })?,
-        readable_floor: Some(floor),
-    }];
+            MemberCut::Member { realm_head, .. } => realm_head,
+        };
+        let Some(head) = realm_head else {
+            return Ok(AccountRealmStreamList::Listed(Vec::new()));
+        };
+        let Some(floor) =
+            crate::account_stream_scan::caller_realm_floor_in_connection(conn, realm_id, caller)
+                .await?
+        else {
+            return Ok(AccountRealmStreamList::Unproved(
+                "a per-member join or history floor is not proved at this cut",
+            ));
+        };
+        return Ok(AccountRealmStreamList::Listed(vec![RealmStreamView {
+            stream_ref: head.stream_ref,
+            head_commit_ref: head.commit_id,
+            next_position: head.stream_position.checked_add(1).ok_or_else(|| {
+                PersistenceError::Internal("Realm stream position overflows".to_owned())
+            })?,
+            readable_floor: Some(floor),
+        }]));
+    }
+    // A personal stream's own accepted controller or Agent floor establishes
+    // discovery. Its source project never contributes a head or membership.
+    let mut visible = Vec::new();
     let heads = sql_query(crate::authority_commit::REALM_STREAM_HEADS_SQL)
         .bind::<Text, _>(realm_id.as_str())
         .load::<ScopedHeadRow>(&mut *conn)
@@ -339,12 +345,6 @@ async fn list_streams_in_connection(
         let stream: CommitStreamRef =
             serde_json::from_value(head.stream_ref).map_err(PersistenceError::database)?;
         let floor = match &stream {
-            CommitStreamRef::Circle { circle_id, .. } => {
-                crate::account_stream_scan::caller_circle_floor_in_connection(
-                    conn, realm_id, circle_id, caller,
-                )
-                .await?
-            }
             CommitStreamRef::Realm { .. } => continue,
             CommitStreamRef::Sidecar { sidecar_id, .. } => {
                 crate::sidecar_authority_cut::public_material_floor_in_connection(
@@ -365,6 +365,9 @@ async fn list_streams_in_connection(
                 .ok_or_else(|| corrupt("scoped stream position overflows"))?,
             readable_floor: Some(floor),
         });
+    }
+    if visible.is_empty() {
+        return Ok(AccountRealmStreamList::NotVisible);
     }
     let mut keyed = visible
         .into_iter()
@@ -813,14 +816,8 @@ pub(crate) async fn exact_current_state_for_actor_in_connection(
     value
         .validate_current_for_domain(&request.realm_id, &selector.primary_conflict_domain)
         .map_err(|error| corrupt(error.to_string()))?;
-    let scope = match &value.scope_circle_id {
-        Some(circle_id) => ScopeRef::Circle {
-            realm_id: request.realm_id.clone(),
-            circle_id: circle_id.clone(),
-        },
-        None => ScopeRef::Realm {
-            realm_id: request.realm_id.clone(),
-        },
+    let scope = ScopeRef::Realm {
+        realm_id: request.realm_id.clone(),
     };
     let Some(head) = relation_scope_head(conn, &scope, &head).await? else {
         return Ok(SelfExactCurrentRead::Unresolved(
@@ -1095,35 +1092,6 @@ async fn moderation_state_read(
         CommitStreamRef::Realm {
             realm_id: source_realm,
         } if source_realm == realm_id => head,
-        CommitStreamRef::Circle {
-            realm_id: source_realm,
-            circle_id,
-        } if source_realm == realm_id => {
-            let scope = ScopeRef::Circle {
-                realm_id: realm_id.clone(),
-                circle_id: circle_id.clone(),
-            };
-            match crate::scope_access::ensure_scope_member_snapshot(conn, realm_id, &scope, caller)
-                .await
-            {
-                Ok(()) => {}
-                Err(PersistenceError::NotFound(_)) => return Ok(SelfExactCurrentRead::NotFound),
-                Err(error) => return Err(error.into()),
-            }
-            let key = crate::authority_commit::stream_key(&source_stream_ref)?;
-            let Some(row) = sql_query("SELECT commit_id,stream_position FROM realm_commits WHERE realm_id=$1 AND stream_key=$2 ORDER BY stream_position DESC LIMIT 1")
-                .bind::<Text, _>(realm_id.as_str()).bind::<Text, _>(key).get_result::<HeadRow>(&mut *conn).await.optional()? else {
-                return Ok(SelfExactCurrentRead::Unresolved("the Circle stream has no established head"));
-            };
-            CommitStreamHead {
-                stream_ref: source_stream_ref.clone(),
-                commit_id: row
-                    .commit_id
-                    .parse()
-                    .map_err(|error| corrupt(format!("invalid Circle head: {error}")))?,
-                stream_position: to_u64(row.stream_position, "Circle head")?,
-            }
-        }
         _ => {
             return Ok(SelfExactCurrentRead::Unresolved(
                 "the moderated target's scope visibility is not proved at this cut",
@@ -1240,18 +1208,15 @@ pub(crate) async fn strand_watch_observation_in_connection(
     {
         return Ok(SelfExactCurrentRead::NotFound);
     }
-    let scope = match strand
-        .value
-        .get("scope_circle_id")
-        .and_then(serde_json::Value::as_str)
-    {
-        Some(circle) => ScopeRef::Circle {
-            realm_id: request.realm_id.clone(),
-            circle_id: circle.parse().map_err(PersistenceError::database)?,
-        },
-        None => ScopeRef::Realm {
-            realm_id: request.realm_id.clone(),
-        },
+    let object: arkret_models_collaboration::objects::strand::Strand =
+        serde_json::from_value(strand.value.clone()).map_err(PersistenceError::database)?;
+    if object.realm_id != request.realm_id || object.id.as_ref() != Some(&request.strand_id) {
+        return Ok(SelfExactCurrentRead::Unresolved(
+            "Strand identity differs from its current",
+        ));
+    }
+    let scope = ScopeRef::Realm {
+        realm_id: request.realm_id.clone(),
     };
     let stream = CommitStreamRef::from_scope(&scope, None).map_err(PersistenceError::database)?;
     if strand.stream_ref != serde_json::to_value(&stream).map_err(PersistenceError::database)? {
@@ -1259,36 +1224,6 @@ pub(crate) async fn strand_watch_observation_in_connection(
             "Strand source differs from its effective namespace",
         ));
     }
-    let head = if let ScopeRef::Circle { circle_id, .. } = &scope {
-        if audit.is_none()
-            && !crate::circle_current_states::effective_member_in_connection(
-                conn,
-                &request.realm_id,
-                circle_id,
-                &caller,
-            )
-            .await?
-        {
-            return Ok(SelfExactCurrentRead::NotFound);
-        }
-        let visible = sql_query("SELECT EXISTS(SELECT 1 FROM circle_member_state_current_states m JOIN circle_current_states c ON c.realm_id=m.realm_id AND c.circle_id=m.circle_id WHERE m.realm_id=$1 AND m.circle_id=$2 AND m.member_id=$3 AND m.membership='join' AND circle_member_parent_join_current(m.realm_id,m.member_id,m.value) AND c.value->>'state'='active' AND circle_current_row_proved(m.realm_id,jsonb_build_object('kind','circle_member_state','circle_id',m.circle_id,'member_actor_id',m.member_id::jsonb),m.source_stream_ref,m.current_commit_id,m.current_stream_position,m.value) AND circle_current_row_proved(c.realm_id,jsonb_build_object('kind','circle','circle_id',c.circle_id),c.source_stream_ref,c.current_commit_id,c.current_stream_position,c.value)) AS present")
-            .bind::<Text,_>(request.realm_id.as_str()).bind::<Text,_>(circle_id.as_str()).bind::<Text,_>(caller.to_string()).get_result::<ExistsRow>(&mut *conn).await?.present;
-        if !visible && audit.is_none() {
-            return Ok(SelfExactCurrentRead::NotFound);
-        }
-        let key = crate::authority_commit::stream_key(&stream)?;
-        let Some(row) = sql_query("SELECT commit_id,stream_position FROM realm_commits WHERE realm_id=$1 AND stream_key=$2 ORDER BY stream_position DESC LIMIT 1")
-            .bind::<Text,_>(request.realm_id.as_str()).bind::<Text,_>(key).get_result::<HeadRow>(&mut *conn).await.optional()? else {
-                return Ok(SelfExactCurrentRead::Unresolved("Circle watch stream head is unavailable"));
-            };
-        CommitStreamHead {
-            stream_ref: stream,
-            commit_id: row.commit_id.parse().map_err(PersistenceError::database)?,
-            stream_position: to_u64(row.stream_position, "Circle watch head")?,
-        }
-    } else {
-        head
-    };
     if to_u64(strand.current_stream_position, "Strand current position")? > head.stream_position
         || (to_u64(strand.current_stream_position, "Strand current position")?
             == head.stream_position
@@ -1301,10 +1236,6 @@ pub(crate) async fn strand_watch_observation_in_connection(
     crate::agent_management_admission::read_controller_in_connection(
         conn,
         &request.realm_id,
-        match &scope {
-            ScopeRef::Circle { circle_id, .. } => Some(circle_id),
-            _ => None,
-        },
         &caller,
     )
     .await?;

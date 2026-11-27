@@ -309,7 +309,6 @@ fn creating_event(reference: &str) -> Option<arkret_wire::EventId> {
         return Some(id);
     }
     for prefix in [
-        "ak:circle:",
         "ak:morph:",
         "ak:strand:",
         "ak:space:",
@@ -352,22 +351,9 @@ fn dependencies(
             dependencies.insert(id);
         }
     }
-    if let arkret_wire::ScopeRef::Circle { circle_id, .. } = &operation.context.accepted_scope_ref {
-        dependencies.insert(
-            creating_event(circle_id.as_str())
-                .ok_or_else(|| unavailable("Circle scope has no original creation token"))?,
-        );
-    }
-    if let Some(circle) = operation
-        .payload
-        .get("object")
-        .and_then(|object| object.get("scope_circle_id"))
-        .and_then(serde_json::Value::as_str)
-    {
-        dependencies.insert(
-            creating_event(circle)
-                .ok_or_else(|| unavailable("Morph Circle fact has no original creation token"))?,
-        );
+
+    if operation.payload.get("object").is_some_and(|object| object.get("scope_circle_id").is_some()) {
+        return Err(unavailable("unsupported Morph scope"));
     }
     if let Some(target) = morph_mutation_target(operation)
         && target.starts_with("ak:morph:")
@@ -442,7 +428,6 @@ fn reduce_streams(
             ));
         }
         let relevant = operation.event_kind.as_str().starts_with("ak.morph.")
-            || operation.event_kind == EventKind::CircleCreate
             || operation.event_kind == EventKind::RealmCreate
             || operation
                 .payload
@@ -477,7 +462,6 @@ pub(crate) struct NativeReadFact {
     pub action: arkret_wire::CapabilityActionId,
     pub target: arkret_wire::WireResourceSelector,
     pub facts: coland_storage::OperationFacts,
-    pub circle: Option<arkret_wire::CircleId>,
 }
 
 fn field_paths(value: &serde_json::Value) -> Vec<String> {
@@ -518,17 +502,9 @@ fn fact_for_morph(
     target.kind = arkret_wire::ResourceSelectorKind::Morph;
     target.morph_id = Some(morph.morph_id.parse().map_err(unavailable)?);
     target.morph_kind = Some(morph.morph_kind.clone());
-    let circle = morph
-        .scope_circle_id
-        .as_ref()
-        .map(|value| value.parse())
-        .transpose()
-        .map_err(unavailable)?;
-    target.circle_id = circle.clone();
     let facts = coland_storage::OperationFacts {
         object_kind: Some("morph".into()),
         morph_kind: Some(morph.morph_kind.clone()),
-        circle_id: morph.scope_circle_id.clone(),
         target_created_at: Some(morph.created_at),
         target_owner: Some(serde_json::from_str(&morph.created_by).map_err(unavailable)?),
         read_fields: Some(field_paths(value)),
@@ -537,7 +513,6 @@ fn fact_for_morph(
     Ok(NativeReadFact {
         target,
         facts,
-        circle,
         action: arkret_wire::CapabilityActionId::MorphRead,
     })
 }
@@ -550,7 +525,6 @@ fn realm_fact(realm: &RealmId, value: &serde_json::Value) -> NativeReadFact {
             read_fields: Some(field_paths(value)),
             ..Default::default()
         },
-        circle: None,
     }
 }
 
@@ -577,20 +551,9 @@ async fn require_fact(
 async fn visible(
     conn: &mut AsyncPgConnection,
     realm: &RealmId,
-    circle: Option<&str>,
     actor: &ActorId,
 ) -> PersistenceResult<bool> {
-    let Some(circle) = circle else {
-        return Ok(true);
-    };
-    let circle = circle.parse().map_err(unavailable)?;
-    // Native floor evaluation includes the exact current parent join revision;
-    // the reducer's historical Circle member set cannot substitute that cut.
-    Ok(
-        crate::account_stream_scan::caller_circle_floor_in_connection(conn, realm, &circle, actor)
-            .await?
-            .is_some(),
-    )
+    Ok(crate::account_stream_scan::caller_realm_floor_in_connection(conn, realm, actor).await?.is_some())
 }
 
 fn morph_row(
@@ -638,7 +601,7 @@ pub(crate) async fn list_in_connection(
     for morph in material.state.morphs.values() {
         if morph.realm_id != realm.as_str()
             || (!include_terminal && morph.state.is_terminal())
-            || !visible(conn, realm, morph.scope_circle_id.as_deref(), actor).await?
+            || !visible(conn, realm, actor).await?
         {
             continue;
         }
@@ -682,15 +645,6 @@ async fn history_visible(
         CommitStreamRef::Realm { realm_id } => {
             crate::account_stream_scan::caller_realm_floor_in_connection(conn, realm_id, actor)
                 .await?
-        }
-        CommitStreamRef::Circle {
-            realm_id,
-            circle_id,
-        } => {
-            crate::account_stream_scan::caller_circle_floor_in_connection(
-                conn, realm_id, circle_id, actor,
-            )
-            .await?
         }
         _ => return Ok(false),
     };
@@ -763,7 +717,7 @@ pub(crate) async fn document_in_connection(
     };
     if morph.realm_id != realm.as_str()
         || morph.morph_kind != "document"
-        || !visible(conn, realm, morph.scope_circle_id.as_deref(), actor).await?
+        || !visible(conn, realm, actor).await?
     {
         return Ok(None);
     }
@@ -875,13 +829,7 @@ fn reference_fact(
     target: arkret_wire::WireResourceSelector,
     value: &serde_json::Value,
     object_kind: &str,
-    circle: Option<String>,
 ) -> PersistenceResult<NativeReadFact> {
-    let typed_circle = circle
-        .as_deref()
-        .map(str::parse)
-        .transpose()
-        .map_err(unavailable)?;
     let (strand_id, track) = if source.event.kind == EventKind::MessageCreate {
         let payload: arkret_models_collaboration::events_payloads::message::MessageCreatePayload =
             serde_json::from_value(
@@ -897,13 +845,11 @@ fn reference_fact(
     };
     Ok(NativeReadFact {
         target,
-        circle: typed_circle,
         action: arkret_wire::CapabilityActionId::MorphRead,
         facts: coland_storage::OperationFacts {
             strand_id,
             track,
             object_kind: Some(object_kind.into()),
-            circle_id: circle,
             target_owner: Some(source.event.actor_id.clone()),
             target_created_at: Some(source.event.created_at),
             read_fields: Some(field_paths(value)),
@@ -931,7 +877,7 @@ async fn relations_for_document(
             && (row.from_object_ref() == Some(morph.morph_id.as_str())
                 || row.to_object_ref() == Some(morph.morph_id.as_str()))
     }) {
-        if !visible(conn, &realm, relation.scope_circle_id.as_deref(), actor).await? {
+        if !visible(conn, &realm, actor).await? {
             continue;
         }
         let source = original_object_event(material, &relation.relation_id, "ak:relation:")?;
@@ -961,7 +907,7 @@ async fn relations_for_document(
             Some(target) => match material.state.morphs.get(target) {
                 Some(endpoint)
                     if !endpoint.state.is_terminal()
-                        && visible(conn, &realm, endpoint.scope_circle_id.as_deref(), actor)
+                        && visible(conn, &realm, actor)
                             .await? =>
                 {
                     let fact = fact_for_morph(
@@ -998,18 +944,11 @@ async fn relations_for_document(
         let mut target = arkret_wire::WireResourceSelector::realm(realm.clone());
         target.kind = arkret_wire::ResourceSelectorKind::Relation;
         target.relation_id = Some(relation.relation_id.parse().map_err(unavailable)?);
-        target.circle_id = relation
-            .scope_circle_id
-            .as_deref()
-            .map(str::parse)
-            .transpose()
-            .map_err(unavailable)?;
         let fact = reference_fact(
             source,
             target,
             &value,
             "relation",
-            relation.scope_circle_id.clone(),
         )?;
         require_fact(conn, actor, &fact, at).await?;
         let mut metadata = fact.clone();
@@ -1086,12 +1025,8 @@ async fn comments_for_document(
         if !history_visible(conn, source, actor).await? {
             continue;
         }
-        let circle = match &source.event.scope_ref {
-            arkret_wire::ScopeRef::Circle { circle_id, .. } => Some(circle_id.to_string()),
-            arkret_wire::ScopeRef::Realm { realm_id } if realm_id == &realm => None,
-            _ => return Err(unavailable("comment has no registered content scope")),
-        };
-        if !visible(conn, &realm, circle.as_deref(), actor).await? {
+        if source.event.scope_ref != (arkret_wire::ScopeRef::Realm { realm_id: realm.clone() }) { return Err(unavailable("comment has no registered content scope")); }
+        if !visible(conn, &realm, actor).await? {
             continue;
         }
         if message.encrypted {
@@ -1129,12 +1064,7 @@ async fn comments_for_document(
         let mut target = arkret_wire::WireResourceSelector::realm(realm.clone());
         target.kind = arkret_wire::ResourceSelectorKind::Message;
         target.message_id = Some(message.message_id.parse().map_err(unavailable)?);
-        target.circle_id = circle
-            .as_deref()
-            .map(str::parse)
-            .transpose()
-            .map_err(unavailable)?;
-        let fact = reference_fact(source, target, &value, "message", circle)?;
+        let fact = reference_fact(source, target, &value, "message")?;
         require_fact(conn, actor, &fact, at).await?;
         let mut history = fact.clone();
         history.action = arkret_wire::CapabilityActionId::ObjectReadHistory;
@@ -1227,7 +1157,6 @@ pub(crate) async fn qualify_delivery_facts(
             crate::agent_management_admission::require_content_snapshot_in_connection(
                 conn,
                 realm,
-                fact.circle.as_ref(),
                 controller,
                 account,
                 operation,
@@ -1259,13 +1188,7 @@ pub(crate) async fn qualify_delivery_facts(
                 source.clone(),
                 at,
             )?;
-            if !visible(
-                conn,
-                realm,
-                fact.circle.as_ref().map(|id| id.as_str()),
-                &actor,
-            )
-            .await?
+            if !visible(conn, realm, &actor).await?
             {
                 return Err(unavailable(
                     "projection source is no longer visible to its recipient",
@@ -2448,16 +2371,17 @@ mod tests {
         object.id = None;
         object.state = None;
         object.created_at = at(1);
-        object.scope_circle_id = Some(arkret_wire::CircleId::from_event_id(&opening.event_id));
         object
             .fields
             .insert("body".into(), json!("Unknown Circle body"));
         let payload =
             arkret_models_collaboration::events_payloads::morph::MorphCreatePayload { object };
+        let mut payload = serde_json::to_value(payload).unwrap();
+        payload["object"]["scope_circle_id"] = json!("retired-private-scope");
         let create = event(
             EventKind::MorphCreate,
             &opening.realm_id,
-            serde_json::to_value(payload).unwrap(),
+            payload,
             1,
         );
         insert_history(&mut conn, &create, 1).await;

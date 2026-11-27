@@ -580,36 +580,10 @@ impl NotificationStore for PgNotificationStore {
                     })
                 })
                 .transpose()?;
-            let strand = match strand {
-                Some(strand) => {
-                    if let Some(circle_id) = &strand.scope_circle_id {
-                        crate::circle_current_states::require_scope_currents_in_connection(
-                            conn,
-                            &strand.realm_id,
-                            circle_id,
-                        )
-                        .await?;
-                    }
-                    let circle_members = match strand.scope_circle_id.as_ref() {
-                        Some(circle_id) => sql_query(FANOUT_CIRCLE_MEMBERS_SQL)
-                            .bind::<Text, _>(strand.realm_id.as_str())
-                            .bind::<Text, _>(circle_id.as_str())
-                            .load::<FanoutActorRow>(&mut *conn)
-                            .await?
-                            .into_iter()
-                            .map(|row| fanout_actor(&row.actor_id))
-                            .collect::<PersistenceResult<BTreeSet<_>>>()?,
-                        None => BTreeSet::new(),
-                    };
-                    Some(NotificationStrandScope {
-                        active: strand.state == Some(arkret_wire::ObjectState::Active),
-                        realm_id: strand.realm_id,
-                        scope_circle_id: strand.scope_circle_id,
-                        circle_members,
-                    })
-                }
-                None => None,
-            };
+            let strand = strand.map(|strand| NotificationStrandScope {
+                active: strand.state == Some(arkret_wire::ObjectState::Active),
+                realm_id: strand.realm_id,
+            });
             let watch_levels = sql_query(FANOUT_WATCH_LEVELS_SQL)
                 .bind::<Text, _>(realm_id.as_str())
                 .bind::<Text, _>(strand_id.as_str())
@@ -671,13 +645,6 @@ const FANOUT_JOINED_MEMBERS_SQL: &str = "SELECT m.member_id AS actor_id \
              AND ce.envelope->>'event_id'= \
                e.envelope->'payload'->'agent_controller_binding'->>'controller_membership_generation_ref')) \
      ORDER BY m.member_id";
-
-const FANOUT_CIRCLE_MEMBERS_SQL: &str = "SELECT m.member_id AS actor_id \
-     FROM circle_member_state_current_states m \
-     JOIN circle_current_states c ON c.circle_id=m.circle_id AND c.realm_id=m.realm_id \
-     WHERE m.realm_id=$1 AND m.circle_id=$2 AND m.membership='join' \
-       AND circle_member_parent_join_current(m.realm_id,m.member_id,m.value) \
-       AND c.value->>'state'='active' ORDER BY m.member_id";
 
 const FANOUT_WATCH_LEVELS_SQL: &str = "SELECT watcher_actor_id AS actor_id, value->>'level' AS level \
      FROM strand_watch_current_states \

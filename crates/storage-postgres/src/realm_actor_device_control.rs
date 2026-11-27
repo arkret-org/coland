@@ -253,20 +253,13 @@ pub(crate) async fn admit(
             crate::policy_current_states::read_scoped_applet_management_policies_in_connection(
                 conn,
                 &event.realm_id,
-                scope.circle_id(),
             )
             .await?;
-        let mut resources =
+        let resources =
             vec![arkret_models_collaboration::governance::operation_wire::PolicyResourceSelector {
             kind:arkret_models_collaboration::governance::operation_wire::PolicyResourceKind::Realm,
             realm_id:Some(event.realm_id.clone()),resource_ref:Some(event.realm_id.to_string()),
         }];
-        if let Some(circle) = scope.circle_id() {
-            resources.push(arkret_models_collaboration::governance::operation_wire::PolicyResourceSelector {
-                kind:arkret_models_collaboration::governance::operation_wire::PolicyResourceKind::Object,
-                realm_id:Some(event.realm_id.clone()),resource_ref:Some(circle.to_string()),
-            });
-        }
         let requester = ActorId::service(registration.service_id.clone());
         for action in &entry.actions {
             let decision=arkret_policy::applet_management::select_applet_management(Some(&policies),&arkret_policy::applet_management::AppletManagementContext {

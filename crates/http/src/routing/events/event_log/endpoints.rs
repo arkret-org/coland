@@ -127,7 +127,7 @@ async fn native_committed_event(
 }
 
 /// A committed Event outside an ordinary Realm's Realm stream -- in a
-/// principal-control Realm, or on a Circle or Sidecar stream -- read in full
+/// principal-control Realm, or on a Sidecar stream -- read in full
 /// when visible to the session.
 async fn principal_control_or_scoped_event(
     state: &AppState,

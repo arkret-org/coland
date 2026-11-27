@@ -16,7 +16,7 @@ fn stamp_projection_operation_received_at(
 ) {
     if !matches!(
         &operation.event_kind,
-        arkret_wire::EventKind::MemberState | arkret_wire::EventKind::CircleMemberState
+        arkret_wire::EventKind::MemberState
     ) {
         return;
     }
@@ -460,7 +460,7 @@ impl SubmitOneError {
 ///
 /// A caller-signed Event that ordinary admission rejects has a real reason, and
 /// `context` names the surface that submitted it. Reducer rejection reasons (for
-/// example `circle_realm_mismatch` or `grant_exceeds_issuer_authority`) are
+/// example `cross_realm_structural_relation` or `grant_exceeds_issuer_authority`) are
 /// stable *reason* codes, not top-level error codes: one that is not a registered
 /// error code keeps its semantic HTTP class and travels in `reason_code` when it
 /// is a registered reason code (internal discriminators fall back to the unstable
@@ -478,12 +478,6 @@ pub(in crate::routing) fn submit_one_error_to_app_error(
         return crate::app_error!(ClaimRequired, message).with_reason_code(code);
     }
     if code == arkret_wire::ReasonCode::APPROVAL_NONCE_REUSED {
-        return crate::app_error!(FailedPrecondition, message).with_reason_code(code);
-    }
-    // The Circle subset invariant is a registered sub-reason of
-    // `failed_precondition`, not a top-level error code. Preserve the 422
-    // admission class and carry the exact reducer discriminator separately.
-    if code == arkret_wire::ReasonCode::CIRCLE_MEMBER_MUST_BE_REALM_MEMBER {
         return crate::app_error!(FailedPrecondition, message).with_reason_code(code);
     }
     // relation.md §4 and the error registry bind this reducer sub-reason to

@@ -632,7 +632,6 @@ fn signal_envelope(
             arkret_identifiers::DeviceId::new(sender_device.to_owned()).unwrap(),
         ),
         authority_commit_id: arkret_wire::RealmCommitId::from_digest([0xa; 32]),
-        parent_realm_authority_commit_id: None,
         signal_class: arkret_wire::SignalClass::Session,
         sent_at,
         expires_at: sent_at + chrono::Duration::seconds(ttl_seconds),

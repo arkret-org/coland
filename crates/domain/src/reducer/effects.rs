@@ -7,7 +7,7 @@ use arkret_models_collaboration::agent_operations::AgentLifecycleState;
 use arkret_wire::{AppletId, DidCoreId, EventKind};
 
 use super::{
-    CircleLifecycleState, ColandRelationState, MessageState, ObjectLifecycleState,
+    ColandRelationState, MessageState, ObjectLifecycleState,
     SpaceContainerLifecycleState,
 };
 
@@ -82,25 +82,6 @@ pub enum ProjectionEffect {
     MorphLifecycle {
         morph_id: String,
         new_state: ObjectLifecycleState,
-    },
-    /// AKP-0007 — Circle lifecycle transition accepted. Reflects
-    /// `ak.circle.create` / `update` / `archive` / `restore` / `tombstone`
-    /// projection writes; new state is reflected in
-    /// `ProjectionState::circles` (and the durable `projection_circles`
-    /// mirror once persistence is wired).
-    CircleLifecycle {
-        circle_id: String,
-        new_state: CircleLifecycleState,
-    },
-    /// AKP-0007 — Circle membership transition. `target_state` is the
-    /// `ak.circle.member.state` payload's `state` value (active / removed /
-    /// banned / left / invited). The reducer applies the membership write
-    /// only after the strict-subset invariant
-    /// (`Circle.members ⊆ Realm.members`) has been satisfied.
-    CircleMemberStateChanged {
-        circle_id: String,
-        member: String,
-        target_state: String,
     },
     /// Applet registry projection updated (registration or discovery).
     AppletProjectionUpdated {

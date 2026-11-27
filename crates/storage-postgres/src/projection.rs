@@ -1,6 +1,6 @@
 use super::{
-    AsyncConnection, Binary, Bool, CircleMemberProjectionRecord, CircleProjectionRecord,
-    CircleProjectionStore, Jsonb, MorphProjectionRecord, MorphProjectionStore, Nullable,
+    AsyncConnection, Binary, Bool,
+    Jsonb, MorphProjectionRecord, MorphProjectionStore, Nullable,
     OptionalExtension, PersistenceError, PersistenceResult, PgPool, PgTransactionError,
     ProjectionEventAppendOutcome, ProjectionEventRecord, ProjectionEventStore, QueryableByName,
     RealmMetaRecord, RealmMetaStore, RunQueryDsl, Text, Timestamptz, Uuid, Value, async_trait, ids,
@@ -10,7 +10,7 @@ use super::{
 #[cfg(test)]
 mod pg_tests;
 
-/// Morph and Circle are Event-derived kinds: their protocol id is
+/// Morph has an Event-derived protocol id:
 /// the create Event's 33-byte token, stored raw beside the local sequential
 /// `pk` that carries the physical ordering.
 fn token_bytes(kind: &str, typed: &str) -> Vec<u8> {
@@ -37,8 +37,6 @@ struct MorphProjectionRow {
     morph_id: Vec<u8>,
     #[diesel(sql_type = Text)]
     realm_id: String,
-    #[diesel(sql_type = Nullable<Binary>)]
-    scope_circle_id: Option<Vec<u8>>,
     #[diesel(sql_type = Text)]
     morph_kind: String,
     #[diesel(sql_type = Nullable<Text>)]
@@ -78,10 +76,7 @@ impl From<MorphProjectionRow> for MorphProjectionRecord {
         Self {
             morph_id: token_string("morph", &row.morph_id),
             realm_id: row.realm_id,
-            scope_circle_id: row
-                .scope_circle_id
-                .as_deref()
-                .map(|bytes| token_string("circle", bytes)),
+
             morph_kind: row.morph_kind,
             title: row.title,
             fields: row.fields,
@@ -101,7 +96,7 @@ impl From<MorphProjectionRow> for MorphProjectionRecord {
         }
     }
 }
-const MORPH_PROJECTION_COLUMNS: &str = "id AS morph_id, realm_id, scope_circle_id, morph_kind, title, fields, \
+const MORPH_PROJECTION_COLUMNS: &str = "id AS morph_id, realm_id, morph_kind, title, fields, \
      schema_refs, facets, versions, content, encrypted_content, state, state_changed_at, stage, stage_changed_at, \
      created_by AS created_by, created_at, updated_by AS updated_by, updated_at";
 #[async_trait]
@@ -126,12 +121,11 @@ impl MorphProjectionStore for PgMorphProjectionStore {
         crate::realm_identity::ensure_realm_pk(&mut conn, &record.realm_id).await?;
         sql_query(
             "INSERT INTO projection_morphs \
-             (id, realm_id, scope_circle_id, morph_kind, title, fields, schema_refs, facets, versions, content, encrypted_content, \
+             (id, realm_id, morph_kind, title, fields, schema_refs, facets, versions, content, encrypted_content, \
               state, state_changed_at, stage, stage_changed_at, created_by, created_at, updated_by, updated_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18) \
              ON CONFLICT (id) DO UPDATE SET \
                 realm_id = EXCLUDED.realm_id, \
-                scope_circle_id = EXCLUDED.scope_circle_id, \
                 morph_kind = EXCLUDED.morph_kind, \
                 title = EXCLUDED.title, \
                 fields = EXCLUDED.fields, \
@@ -149,12 +143,6 @@ impl MorphProjectionStore for PgMorphProjectionStore {
         )
         .bind::<Binary, _>(token_bytes("morph", &record.morph_id))
         .bind::<Text, _>(&record.realm_id)
-        .bind::<Nullable<Binary>, _>(
-            record
-                .scope_circle_id
-                .as_deref()
-                .map(|circle_id| token_bytes("circle", circle_id)),
-        )
         .bind::<Text, _>(&record.morph_kind)
         .bind::<Nullable<Text>, _>(&record.title)
         .bind::<Jsonb, _>(&record.fields)
@@ -518,270 +506,6 @@ impl ProjectionEventStore for PgProjectionEventStore {
         .load::<ProjectionEventRow>(&mut conn)
         .await
         .map(|rows| rows.into_iter().map(ProjectionEventRecord::from).collect())
-        .map_err(PersistenceError::database)
-    }
-}
-
-pub struct PgCircleProjectionStore {
-    pub pool: PgPool,
-}
-
-#[derive(QueryableByName)]
-struct CircleProjectionRow {
-    #[diesel(sql_type = Binary)]
-    circle_id: Vec<u8>,
-    #[diesel(sql_type = Text)]
-    realm_id: String,
-    #[diesel(sql_type = Nullable<Text>)]
-    profile_ref: Option<String>,
-    #[diesel(sql_type = Text)]
-    title: String,
-    #[diesel(sql_type = Nullable<Text>)]
-    summary: Option<String>,
-    #[diesel(sql_type = Jsonb)]
-    display: Value,
-    #[diesel(sql_type = Text)]
-    directory_visibility: String,
-    #[diesel(sql_type = Text)]
-    join_rule: String,
-    #[diesel(sql_type = Text)]
-    history_access: String,
-    #[diesel(sql_type = Text)]
-    encryption_profile: String,
-    #[diesel(sql_type = Nullable<Text>)]
-    mls_group_ref: Option<String>,
-    #[diesel(sql_type = Text)]
-    state: String,
-    #[diesel(sql_type = Nullable<Timestamptz>)]
-    state_changed_at: Option<chrono::DateTime<chrono::Utc>>,
-    #[diesel(sql_type = Jsonb)]
-    created_by: arkret_wire::ActorId,
-    #[diesel(sql_type = Nullable<Jsonb>)]
-    updated_by: Option<arkret_wire::ActorId>,
-    #[diesel(sql_type = Timestamptz)]
-    created_at: chrono::DateTime<chrono::Utc>,
-    #[diesel(sql_type = Nullable<Timestamptz>)]
-    updated_at: Option<chrono::DateTime<chrono::Utc>>,
-}
-
-impl From<CircleProjectionRow> for CircleProjectionRecord {
-    fn from(row: CircleProjectionRow) -> Self {
-        Self {
-            circle_id: token_string("circle", &row.circle_id),
-            realm_id: row.realm_id,
-            profile_ref: row.profile_ref,
-            title: row.title,
-            summary: row.summary,
-            display: row.display,
-            directory_visibility: row.directory_visibility,
-            join_rule: row.join_rule,
-            history_access: row.history_access,
-            encryption_profile: row.encryption_profile,
-            mls_group_ref: row.mls_group_ref,
-            state: row.state,
-            state_changed_at: row.state_changed_at,
-            created_by: row.created_by.to_string(),
-            updated_by: row.updated_by.map(|id| id.to_string()),
-            created_at: row.created_at,
-            updated_at: row.updated_at,
-        }
-    }
-}
-
-const CIRCLE_PROJECTION_COLUMNS: &str = "id AS circle_id, realm_id, profile_ref, title, summary, display, \
-     directory_visibility, join_rule, history_access, \
-     encryption_profile, mls_group_ref, state, state_changed_at, \
-     created_by AS created_by, updated_by AS updated_by, created_at, updated_at";
-
-#[derive(QueryableByName)]
-struct CircleMemberProjectionRow {
-    #[diesel(sql_type = Binary)]
-    circle_id: Vec<u8>,
-    #[diesel(sql_type = Text)]
-    actor_id: String,
-    #[diesel(sql_type = Text)]
-    state: String,
-    #[diesel(sql_type = Nullable<Timestamptz>)]
-    invited_at: Option<chrono::DateTime<chrono::Utc>>,
-    #[diesel(sql_type = Timestamptz)]
-    joined_at: chrono::DateTime<chrono::Utc>,
-    #[diesel(sql_type = Timestamptz)]
-    updated_at: chrono::DateTime<chrono::Utc>,
-}
-
-impl From<CircleMemberProjectionRow> for CircleMemberProjectionRecord {
-    fn from(row: CircleMemberProjectionRow) -> Self {
-        Self {
-            circle_id: token_string("circle", &row.circle_id),
-            actor_id: row.actor_id.to_string(),
-            state: row.state,
-            invited_at: row.invited_at,
-            joined_at: row.joined_at,
-            updated_at: row.updated_at,
-        }
-    }
-}
-
-#[async_trait]
-impl CircleProjectionStore for PgCircleProjectionStore {
-    async fn get(&self, circle_id: &str) -> PersistenceResult<Option<CircleProjectionRecord>> {
-        let mut conn = crate::pg_db(&self.pool);
-        sql_query(format!(
-            "SELECT {CIRCLE_PROJECTION_COLUMNS} FROM projection_circles WHERE id = $1"
-        ))
-        .bind::<Binary, _>(token_bytes("circle", circle_id))
-        .get_result::<CircleProjectionRow>(&mut conn)
-        .await
-        .optional()
-        .map(|row| row.map(CircleProjectionRecord::from))
-        .map_err(PersistenceError::database)
-    }
-
-    async fn put(&self, record: &CircleProjectionRecord) -> PersistenceResult<()> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
-        crate::realm_identity::ensure_realm_pk(&mut conn, &record.realm_id).await?;
-        sql_query(
-            "INSERT INTO projection_circles \
-             (id, realm_id, profile_ref, title, summary, display, directory_visibility, join_rule, \
-              history_access, encryption_profile, mls_group_ref, state, \
-              state_changed_at, created_by, \
-              updated_by, created_at, updated_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) \
-             ON CONFLICT (id) DO UPDATE SET \
-                realm_id = EXCLUDED.realm_id, \
-                profile_ref = EXCLUDED.profile_ref, \
-                title = EXCLUDED.title, \
-                summary = EXCLUDED.summary, \
-                display = EXCLUDED.display, \
-                directory_visibility = EXCLUDED.directory_visibility, \
-                join_rule = EXCLUDED.join_rule, \
-                history_access = EXCLUDED.history_access, \
-                encryption_profile = EXCLUDED.encryption_profile, \
-                mls_group_ref = EXCLUDED.mls_group_ref, \
-                state = EXCLUDED.state, \
-                state_changed_at = EXCLUDED.state_changed_at, \
-                updated_by = EXCLUDED.updated_by, \
-                updated_at = EXCLUDED.updated_at",
-        )
-        .bind::<Binary, _>(token_bytes("circle", &record.circle_id))
-        .bind::<Text, _>(&record.realm_id)
-        .bind::<Nullable<Text>, _>(&record.profile_ref)
-        .bind::<Text, _>(&record.title)
-        .bind::<Nullable<Text>, _>(&record.summary)
-        .bind::<Jsonb, _>(&record.display)
-        .bind::<Text, _>(&record.directory_visibility)
-        .bind::<Text, _>(&record.join_rule)
-        .bind::<Text, _>(&record.history_access)
-        .bind::<Text, _>(&record.encryption_profile)
-        .bind::<Nullable<Text>, _>(&record.mls_group_ref)
-        .bind::<Text, _>(&record.state)
-        .bind::<Nullable<Timestamptz>, _>(record.state_changed_at)
-        .bind::<Jsonb, _>(stored_actor(&record.created_by)?)
-        .bind::<Nullable<Jsonb>, _>(record.updated_by.as_deref().map(stored_actor).transpose()?)
-        .bind::<Timestamptz, _>(record.created_at)
-        .bind::<Nullable<Timestamptz>, _>(record.updated_at)
-        .execute(&mut *conn)
-        .await
-        .map(|_| ())
-        .map_err(PersistenceError::database)
-    }
-
-    async fn list_for_realm(
-        &self,
-        realm_id: &str,
-    ) -> PersistenceResult<Vec<CircleProjectionRecord>> {
-        let mut conn = crate::pg_db(&self.pool);
-        sql_query(format!(
-            "SELECT {CIRCLE_PROJECTION_COLUMNS} FROM projection_circles \
-             WHERE realm_id = $1 ORDER BY pk"
-        ))
-        .bind::<Text, _>(realm_id)
-        .load::<CircleProjectionRow>(&mut conn)
-        .await
-        .map(|rows| rows.into_iter().map(CircleProjectionRecord::from).collect())
-        .map_err(PersistenceError::database)
-    }
-
-    async fn snapshot_all(&self) -> PersistenceResult<Vec<CircleProjectionRecord>> {
-        let mut conn = crate::pg_db(&self.pool);
-        sql_query(format!(
-            "SELECT {CIRCLE_PROJECTION_COLUMNS} FROM projection_circles ORDER BY pk"
-        ))
-        .load::<CircleProjectionRow>(&mut conn)
-        .await
-        .map(|rows| rows.into_iter().map(CircleProjectionRecord::from).collect())
-        .map_err(PersistenceError::database)
-    }
-
-    async fn delete(&self, circle_id: &str) -> PersistenceResult<()> {
-        let mut conn = crate::pg_db(&self.pool);
-        sql_query("DELETE FROM projection_circles WHERE id = $1")
-            .bind::<Binary, _>(token_bytes("circle", circle_id))
-            .execute(&mut conn)
-            .await
-            .map(|_| ())
-            .map_err(PersistenceError::database)
-    }
-
-    async fn put_members(
-        &self,
-        circle_id: &str,
-        members: &[CircleMemberProjectionRecord],
-    ) -> PersistenceResult<()> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
-        let circle_token = token_bytes("circle", circle_id);
-        let members = members.to_vec();
-        conn.transaction::<_, PgTransactionError, _>(async move |conn| {
-            // Membership is a set, not a log: a member the reducer dropped
-            // has to disappear in the same commit that writes the
-            // survivors, or a removed actor stays inside the Circle
-            // boundary until the next full replay.
-            sql_query(
-                "DELETE FROM projection_circle_members \
-                     WHERE circle_pk = (SELECT pk FROM projection_circles WHERE id = $1)",
-            )
-            .bind::<Binary, _>(circle_token.clone())
-            .execute(&mut *conn)
-            .await?;
-            for member in &members {
-                sql_query(
-                    "INSERT INTO projection_circle_members \
-                         (circle_pk, actor_id, state, invited_at, joined_at, updated_at) \
-                         SELECT pk, $2, $3, $4, $5, $6 FROM projection_circles WHERE id = $1",
-                )
-                .bind::<Binary, _>(circle_token.clone())
-                .bind::<Text, _>(&member.actor_id)
-                .bind::<Text, _>(&member.state)
-                .bind::<Nullable<Timestamptz>, _>(member.invited_at)
-                .bind::<Timestamptz, _>(member.joined_at)
-                .bind::<Timestamptz, _>(member.updated_at)
-                .execute(&mut *conn)
-                .await?;
-            }
-            Ok(())
-        })
-        .await
-        .map_err(PgTransactionError::into_persistence)
-    }
-
-    async fn snapshot_all_members(&self) -> PersistenceResult<Vec<CircleMemberProjectionRecord>> {
-        let mut conn = crate::pg_db(&self.pool);
-        sql_query(
-            "SELECT c.id AS circle_id, m.actor_id, m.state, m.invited_at, m.joined_at, m.updated_at \
-             FROM projection_circle_members m JOIN projection_circles c ON c.pk = m.circle_pk \
-             ORDER BY m.pk",
-        )
-        .load::<CircleMemberProjectionRow>(&mut conn)
-        .await
-        .map(|rows| {
-            rows.into_iter()
-                .map(CircleMemberProjectionRecord::from)
-                .collect()
-        })
         .map_err(PersistenceError::database)
     }
 }

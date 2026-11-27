@@ -300,9 +300,6 @@ pub(crate) async fn check_event(
         ResourceSelectorKind::Realm => {
             matches!(&event.scope_ref, arkret_wire::ScopeRef::Realm { .. })
         }
-        ResourceSelectorKind::Circle => {
-            matches!(&event.scope_ref,arkret_wire::ScopeRef::Circle{circle_id,..} if gate.target.circle_id.as_ref()==Some(circle_id))
-        }
         ResourceSelectorKind::Strand => gate.target.strand_id.as_ref().is_some_and(|id| {
             event.payload.get("strand_id").and_then(Value::as_str) == Some(id.as_str())
         }),

@@ -280,24 +280,7 @@ async fn member(
     if !cut.actor_is_joined() {
         return Err(denied("claim endpoint is not a current Realm member"));
     }
-    if let ScopeRef::Circle {
-        realm_id,
-        circle_id,
-    } = scope
-    {
-        let basis =
-            crate::circle_current_states::locked_circle_basis(conn, realm_id, circle_id).await?;
-        if basis["value"]["state"] != "active"
-            || !crate::circle_current_states::effective_member_in_connection(
-                conn, realm_id, circle_id, actor,
-            )
-            .await?
-        {
-            return Err(denied(
-                "claim endpoint has no active exact Circle membership",
-            ));
-        }
-    }
+
     Ok(())
 }
 
@@ -575,7 +558,7 @@ pub(crate) async fn require_admission(
         .await?;
     }
     let (requester, target) = claim_participants(request)?;
-    // Managed Device scopes are actual existing Realm/Circle scopes. Direct
+    // Managed Device scopes are actual existing Realm scopes. Direct
     // founding without their current installation never becomes a shortcut.
     if request.claim_purpose == PeerKeyPackageClaimPurpose::RealmMembership || !endpoints.is_empty()
     {

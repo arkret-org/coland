@@ -437,7 +437,7 @@ pub(super) async fn read(
         || input.limit > 100
         || !matches!(
             endpoint.effective_scope,
-            ScopeRef::Realm { .. } | ScopeRef::Circle { .. }
+            ScopeRef::Realm { .. }
         )
     {
         return Err(denied("native queue request has no supported exact scope"));

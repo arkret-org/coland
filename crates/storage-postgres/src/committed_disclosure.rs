@@ -136,15 +136,10 @@ pub(crate) async fn full_event_for_member_in_connection(
         let owner = controller.as_account_id().ok_or_else(|| {
             PersistenceError::Conflict("failed_precondition: controller account unavailable".into())
         })?;
-        let circle = match &row.event.scope_ref {
-            arkret_wire::ScopeRef::Circle { circle_id, .. } => Some(circle_id),
-            _ => None,
-        };
         let resources = crate::agent_management_admission::event_content_resources(&row.event)?;
         crate::agent_management_admission::require_content_snapshot_in_connection(
             conn,
             &row.event.realm_id,
-            circle,
             owner,
             agent,
             arkret_models_collaboration::governance::operation_wire::AgentPolicyOperation::Read,
@@ -237,30 +232,6 @@ pub(crate) async fn member_event_visible_in_connection(
     }
     if author_private_source(event) {
         return Ok(&event.actor_id == caller);
-    }
-    let circle = if event.kind == arkret_wire::EventKind::CircleCreate {
-        Some(arkret_wire::CircleId::from_event_id(&event.event_id))
-    } else if let arkret_wire::ScopeRef::Circle { circle_id, .. } = &event.scope_ref {
-        Some(circle_id.clone())
-    } else {
-        None
-    };
-    if let Some(circle_id) = circle {
-        let Some(floor) = crate::account_stream_scan::caller_circle_floor_in_connection(
-            conn,
-            &event.realm_id,
-            &circle_id,
-            caller,
-        )
-        .await?
-        else {
-            return Ok(false);
-        };
-        if event.kind != arkret_wire::EventKind::CircleCreate
-            && row.commit.stream_position < floor.oldest_position
-        {
-            return Ok(false);
-        }
     }
     if event.kind == arkret_wire::EventKind::StrandWatchSet {
         let watch: arkret_models_collaboration::events_payloads::strand::StrandWatchSetPayload =

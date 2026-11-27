@@ -36,7 +36,7 @@ fn reject_lifecycle(code: coland_storage::ConflictCode, detail: &str) -> Persist
 }
 
 /// Resolve one active Strand from its accepted creation and current writer.
-/// A caller's metadata is never used to invent the object's Circle binding.
+/// The accepted creation establishes the Strand's Realm binding.
 pub(crate) async fn locked_active_strand_scope(
     conn: &mut AsyncPgConnection,
     realm: &arkret_wire::RealmId,
@@ -85,25 +85,10 @@ pub(crate) async fn locked_active_strand_scope(
     {
         return Err(reject("signed Strand is absent, inactive or inconsistent"));
     }
-    let scope = match object.scope_circle_id {
-        Some(circle_id) => arkret_wire::ScopeRef::Circle {
-            realm_id: realm.clone(),
-            circle_id,
-        },
-        None => arkret_wire::ScopeRef::Realm {
-            realm_id: realm.clone(),
-        },
-    };
+    let scope = arkret_wire::ScopeRef::Realm { realm_id: realm.clone() };
     let stream = match &scope {
         arkret_wire::ScopeRef::Realm { realm_id } => arkret_wire::CommitStreamRef::Realm {
             realm_id: realm_id.clone(),
-        },
-        arkret_wire::ScopeRef::Circle {
-            realm_id,
-            circle_id,
-        } => arkret_wire::CommitStreamRef::Circle {
-            realm_id: realm_id.clone(),
-            circle_id: circle_id.clone(),
         },
         _ => return Err(reject("signed Strand has an unsupported scope")),
     };
@@ -237,29 +222,16 @@ async fn commit_strand_create_current_state_with_authority_in_connection(
     crate::agent_participation_admission::require_child_tightens(
         conn,
         event.realm_id.as_str(),
-        value.get("scope_circle_id").and_then(Value::as_str),
         &value,
     )
     .await?;
     let expected_stream = match (
         &event.scope_ref,
-        value.get("scope_circle_id").and_then(Value::as_str),
+        value.get("scope_circle_id").filter(|legacy| !legacy.is_null()),
     ) {
         (arkret_wire::ScopeRef::Realm { realm_id }, None) if realm_id == &event.realm_id => {
             arkret_wire::CommitStreamRef::Realm {
                 realm_id: realm_id.clone(),
-            }
-        }
-        (
-            arkret_wire::ScopeRef::Circle {
-                realm_id,
-                circle_id,
-            },
-            Some(authored_circle),
-        ) if realm_id == &event.realm_id && circle_id.as_str() == authored_circle => {
-            arkret_wire::CommitStreamRef::Circle {
-                realm_id: realm_id.clone(),
-                circle_id: circle_id.clone(),
             }
         }
         _ => {
@@ -277,54 +249,7 @@ async fn commit_strand_create_current_state_with_authority_in_connection(
         )
         .await?;
     }
-    if matches!(event.scope_ref, arkret_wire::ScopeRef::Circle { .. }) {
-        crate::circle_current_states::require_active_author_in_connection(conn, event, commit)
-            .await?;
-        // Metadata-only portals use the shared exact-epoch MLS send gate.
-        // Other object/track content still needs its own admitted carrier.
-        let scope_key = String::from_utf8(
-            arkret_canonical::canonical_json_bytes(&event.scope_ref)
-                .map_err(PersistenceError::database)?,
-        )
-        .map_err(PersistenceError::database)?;
-        let activated = diesel::sql_query(
-            "SELECT EXISTS (SELECT 1 FROM mls_group_current_states WHERE scope_key=$1) AS present",
-        )
-        .bind::<Text, _>(scope_key)
-        .get_result::<PresentRow>(&mut *conn)
-        .await
-        .map_err(PersistenceError::database)?;
-        if activated.present {
-            let has_content = |object: &Value| {
-                ["content", "encrypted_content"]
-                    .iter()
-                    .any(|key| object.get(*key).is_some_and(|value| !value.is_null()))
-            };
-            if has_content(&value)
-                || value
-                    .get("tracks")
-                    .and_then(Value::as_object)
-                    .is_some_and(|tracks| tracks.values().any(has_content))
-                || value.get("encrypted_metadata").is_none_or(Value::is_null)
-            {
-                return Err(reject(
-                    "Circle Strand create needs an admitted MLS object carrier",
-                ));
-            }
-            crate::mls_group_current_states::require_mls_send_gate_in_connection(conn, event)
-                .await?;
-        } else if value
-            .get("encrypted_content")
-            .is_some_and(|value| !value.is_null())
-            || value
-                .get("encrypted_metadata")
-                .is_some_and(|value| !value.is_null())
-        {
-            return Err(reject(
-                "pre-Genesis Circle Strand cannot carry MLS ciphertext",
-            ));
-        }
-    }
+
     let stream_position = i64::try_from(commit.stream_position).map_err(|_| {
         PersistenceError::SchemaViolation("Strand stream position exceeds BIGINT".to_owned())
     })?;
@@ -369,23 +294,8 @@ pub(crate) async fn commit_strand_transition_in_connection(
     }
     arkret_schema::validate_event_for_submit(event)
         .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
-    let (expected_stream, expected_circle) = match &event.scope_ref {
-        arkret_wire::ScopeRef::Realm { realm_id } if realm_id == &event.realm_id => (
-            arkret_wire::CommitStreamRef::Realm {
-                realm_id: realm_id.clone(),
-            },
-            None,
-        ),
-        arkret_wire::ScopeRef::Circle {
-            realm_id,
-            circle_id,
-        } if realm_id == &event.realm_id => (
-            arkret_wire::CommitStreamRef::Circle {
-                realm_id: realm_id.clone(),
-                circle_id: circle_id.clone(),
-            },
-            Some(circle_id),
-        ),
+    let expected_stream = match &event.scope_ref {
+        arkret_wire::ScopeRef::Realm { realm_id } if realm_id == &event.realm_id => arkret_wire::CommitStreamRef::Realm { realm_id: realm_id.clone() },
         _ => {
             return Err(reject(
                 "Strand transition has an unsupported effective scope",
@@ -455,13 +365,9 @@ pub(crate) async fn commit_strand_transition_in_connection(
         serde_json::from_value(row.value.clone()).map_err(PersistenceError::database)?;
     if current.id.as_ref() != Some(&target)
         || current.realm_id != event.realm_id
-        || current.scope_circle_id.as_ref() != expected_circle
+
     {
         return Err(reject("Strand transition target identity or scope differs"));
-    }
-    if authorize && expected_circle.is_some() {
-        crate::circle_current_states::require_active_author_in_connection(conn, event, commit)
-            .await?;
     }
     if current.state == Some(arkret_wire::ObjectState::Redacted) {
         return Err(reject_lifecycle(
@@ -583,8 +489,6 @@ pub(crate) async fn commit_strand_update_current_state_in_connection(
         .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
     for (path, _) in payload.patch.iter() {
         // The narrative paths are distinct from track configuration.
-        // scope_circle_id is listed by the generic projection vocabulary but
-        // strand-and-message.md §5 explicitly forbids rebinding it.
         let root = path.split('.').next().unwrap_or(path);
         if root == "scope_circle_id" {
             return Err(reject("scope_rebind_forbidden"));
@@ -621,7 +525,7 @@ pub(crate) async fn commit_strand_update_current_state_in_connection(
             )
             .await?
             .is_none()
-            || current.scope_circle_id.is_some()
+
             || !arkret_models_collaboration::objects::profiles::resolve_primary_track(
                 &current.tracks,
                 None,
@@ -721,7 +625,6 @@ pub(crate) async fn commit_strand_update_current_state_in_connection(
     crate::agent_participation_admission::require_child_tightens(
         conn,
         event.realm_id.as_str(),
-        next.scope_circle_id.as_ref().map(|id| id.as_str()),
         &post,
     )
     .await?;
@@ -746,7 +649,7 @@ pub(crate) async fn commit_strand_update_current_state_in_connection(
     }
     if next.id != current.id
         || next.realm_id != current.realm_id
-        || next.scope_circle_id != current.scope_circle_id
+
         || retained_tracks != current.tracks
         || next.state != current.state
         || next.state_changed_at != current.state_changed_at
@@ -821,15 +724,7 @@ async fn lock_active_patch_target(
             ));
         }
     }
-    let expected_scope = match current.scope_circle_id.as_ref() {
-        Some(circle_id) => arkret_wire::ScopeRef::Circle {
-            realm_id: event.realm_id.clone(),
-            circle_id: circle_id.clone(),
-        },
-        None => arkret_wire::ScopeRef::Realm {
-            realm_id: event.realm_id.clone(),
-        },
-    };
+    let expected_scope = arkret_wire::ScopeRef::Realm { realm_id: current.realm_id.clone() };
     if event.scope_ref != expected_scope {
         return Err(reject("Strand patch Event scope differs from target scope"));
     }
@@ -903,15 +798,7 @@ pub(crate) async fn refresh_calendar_source_in_connection(
         .get_result::<SourceRow>(&mut *conn).await.map_err(PersistenceError::database)?;
     let strand: arkret_models_collaboration::objects::strand::Strand =
         serde_json::from_value(row.value.clone()).map_err(PersistenceError::database)?;
-    let scope = match strand.scope_circle_id {
-        Some(circle_id) => ScopeRef::Circle {
-            realm_id: event.realm_id.clone(),
-            circle_id,
-        },
-        None => ScopeRef::Realm {
-            realm_id: event.realm_id.clone(),
-        },
-    };
+    let scope = ScopeRef::Realm { realm_id: strand.realm_id.clone() };
     let mut source = row
         .calendar_schedule_source_value
         .map(serde_json::from_value::<CalendarScheduleSourceValue>)

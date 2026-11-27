@@ -1,10 +1,9 @@
 //! Scope policy admission, independent replacements and zero-write refusals.
-use ordinary_realm::circle_request;
 
 #[path = "support/ordinary_realm.rs"]
 #[allow(dead_code)]
 mod ordinary_realm;
-use arkret_wire::{CircleId, CommitStreamRef, CurrentSelector, CurrentState, EventKind, ScopeRef};
+use arkret_wire::{CommitStreamRef, CurrentSelector, CurrentState, EventKind};
 use coland_storage::{AuthorityCommitStore, EventCommitUnitOfWork};
 use coland_storage_postgres::test_database::TestDatabase;
 use coland_storage_postgres::{PgAuthorityCommitStore, PgEventCommitUnitOfWork};
@@ -26,166 +25,78 @@ async fn counts(pool: &coland_storage_postgres::PgPool) -> Counts {
         .get_result(&mut *pool.get().await.unwrap()).await.unwrap()
 }
 #[tokio::test]
-async fn scope_read_receipt_policy_independent_streams_and_atomic_refusals() {
+async fn each_realm_replaces_one_policy_and_rejects_invalid_writes_atomically() {
     let database = TestDatabase::lease().await;
     let pool = database.pool();
-    let discussion =
-        ordinary_realm::open_discussion(&pool, &uuid::Uuid::now_v7().to_string()).await;
-    let mut root = discussion.head.authority_commit;
-    let realm = root.event.realm_id.clone();
-    let actor = root.event.actor_id.clone();
-    let at = root.commit.committed_at;
+    let first = ordinary_realm::open_discussion(&pool, &uuid::Uuid::now_v7().to_string()).await;
+    let other = ordinary_realm::open_discussion(&pool, &uuid::Uuid::now_v7().to_string()).await;
+    let mut heads = [first.head.authority_commit, other.head.authority_commit];
     let uow = PgEventCommitUnitOfWork::new(pool.clone());
     let store = PgAuthorityCommitStore { pool: pool.clone() };
-    let mut circles = Vec::new();
-    for title in ["First", "Second"] {
-        let create = ordinary_realm::next_request_for_actor(
-            &root,
-            EventKind::CircleCreate,
-            actor.clone(),
-            json!({"object":{"schema":"ak.schema.circle.v1","realm_id":realm,"title":title,"display":{"short_name":title,"color_token":"blue","symbol":{"glyph":"lock"}},"directory_visibility":"members","join_rule":"public","history_access":"since_join","state":"active","created_by":actor,"created_at":arkret_canonical::format_timestamp_canonical(at)}}),
-            at,
-        );
-        uow.commit_event(create.clone()).await.unwrap();
-        root = create.authority_commit;
-        let circle = CircleId::from_event_id(&root.event.event_id);
-        let unauthorized = circle_request(
-            &root,
-            &circle,
+    for (i, disclosure) in [(0, "required"), (1, "disabled"), (0, "optional")] {
+        let head = &heads[i];
+        let request = ordinary_realm::next_request_for_actor(
+            head,
             EventKind::ScopeReadReceiptPolicy,
-            json!({"disclosure":"required"}),
+            head.event.actor_id.clone(),
+            json!({"disclosure":disclosure}),
+            head.commit.committed_at,
         );
-        let before = counts(&pool).await;
-        assert!(uow.commit_event(unauthorized).await.is_err());
-        assert_eq!(counts(&pool).await, before);
-        let join = circle_request(
-            &root,
-            &circle,
-            EventKind::CircleMemberState,
-            json!({"circle_id":circle,"member_id":actor,"membership":"join","parent_membership_revision":ordinary_realm::parent_membership_revision(&pool,&realm,&actor).await,"expected_membership":null}),
-        );
-        uow.commit_event(join.clone()).await.unwrap();
-        circles.push((circle, join.authority_commit));
-    }
-    let realm_scope = ScopeRef::Realm {
-        realm_id: realm.clone(),
-    };
-    let mut expected = Vec::new();
-    for (scope, value) in [
-        (
-            realm_scope.clone(),
-            json!({"disclosure":"disabled","visibility":"private"}),
-        ),
-        (
-            ScopeRef::Circle {
-                realm_id: realm.clone(),
-                circle_id: circles[0].0.clone(),
-            },
-            json!({"disclosure":"required","visibility":"public"}),
-        ),
-        (
-            ScopeRef::Circle {
-                realm_id: realm.clone(),
-                circle_id: circles[1].0.clone(),
-            },
-            json!({"disclosure":"optional","visibility":"members"}),
-        ),
-        (realm_scope.clone(), json!({"disclosure":"required"})),
-        (
-            ScopeRef::Circle {
-                realm_id: realm.clone(),
-                circle_id: circles[1].0.clone(),
-            },
-            json!({"visibility":"private"}),
-        ),
-    ] {
-        let request = if let ScopeRef::Circle { circle_id, .. } = &scope {
-            let previous = &circles.iter().find(|(id, _)| id == circle_id).unwrap().1;
-            circle_request(
-                previous,
-                circle_id,
-                EventKind::ScopeReadReceiptPolicy,
-                value.clone(),
-            )
-        } else {
-            ordinary_realm::next_request_for_actor(
-                &root,
-                EventKind::ScopeReadReceiptPolicy,
-                actor.clone(),
-                value.clone(),
-                at,
-            )
-        };
+        let request = ordinary_realm::source_request(&pool, request).await;
         uow.commit_event(request.clone()).await.unwrap();
-        if let ScopeRef::Circle { circle_id, .. } = &scope {
-            circles
-                .iter_mut()
-                .find(|(id, _)| id == circle_id)
-                .unwrap()
-                .1 = request.authority_commit.clone();
-        } else {
-            root = request.authority_commit.clone();
-        }
-        let selector = CurrentSelector::ScopeReadReceiptPolicy {
-            scope_ref: scope.clone(),
-        };
-        expected.retain(
-            |row| !matches!(row,CurrentState::Value {selector:found,..} if found==&selector),
-        );
-        expected.push(CurrentState::Value {
-            selector,
-            source_stream_ref: request.authority_commit.commit.stream_ref.clone(),
-            revision: arkret_wire::CurrentRevision {
-                commit_id: request.authority_commit.commit.commit_id.clone(),
-                stream_position: request.authority_commit.commit.stream_position,
-            },
-            value,
-        });
+        heads[i] = request.authority_commit;
+    }
+    for (head, disclosure) in heads.iter().zip(["optional", "disabled"]) {
+        let realm = &head.event.realm_id;
         let snapshot = store
-            .realm_state_snapshot_material_for_account(&realm, actor.as_account_id().unwrap())
+            .realm_state_snapshot_material_for_account(
+                realm,
+                head.event.actor_id.as_account_id().unwrap(),
+            )
             .await
             .unwrap()
             .unwrap();
-        let found: Vec<_> = snapshot
+        let policies: Vec<_> = snapshot
             .current_state_entries
-            .into_iter()
-            .filter(|row| {
-                matches!(
-                    row,
-                    CurrentState::Value {
-                        selector: CurrentSelector::ScopeReadReceiptPolicy { .. },
-                        ..
-                    }
-                )
+            .iter()
+            .filter_map(|row| match row {
+                CurrentState::Value {
+                    selector: CurrentSelector::ScopeReadReceiptPolicy,
+                    source_stream_ref,
+                    revision,
+                    value,
+                } => Some((source_stream_ref, revision, value)),
+                _ => None,
             })
             .collect();
-        assert_eq!(found.len(), expected.len());
-        for row in &expected {
-            assert!(found.contains(row), "missing {row:?}");
-        }
+        assert_eq!(policies.len(), 1);
+        let (stream, revision, value) = policies[0];
+        assert_eq!(stream, &head.commit.stream_ref);
+        assert_eq!(revision.commit_id, head.commit.commit_id);
+        assert_eq!(*value, json!({"disclosure":disclosure}));
     }
-    let mut wrong = circle_request(
-        &circles[0].1,
-        &circles[0].0,
-        EventKind::ScopeReadReceiptPolicy,
-        json!({"disclosure":"disabled"}),
-    );
-    wrong.authority_commit.commit.stream_ref = CommitStreamRef::Realm { realm_id: realm };
-    ordinary_realm::seal_final_commit(&mut wrong.authority_commit.commit);
-    let before = counts(&pool).await;
-    assert!(uow.commit_event(wrong).await.is_err());
-    assert_eq!(counts(&pool).await, before);
-    for payload in [
-        json!({}),
-        json!({"disclosure":null}),
-        json!({"disclosure":"optional","scope_overrides":{}}),
-    ] {
-        let invalid = circle_request(
-            &circles[1].1,
-            &circles[1].0,
+    let head = &heads[0];
+    let candidate = |payload| {
+        ordinary_realm::next_request_for_actor(
+            head,
             EventKind::ScopeReadReceiptPolicy,
+            head.event.actor_id.clone(),
             payload,
-        );
+            head.commit.committed_at,
+        )
+    };
+    let mut wrong = candidate(json!({"disclosure":"required"}));
+    wrong.authority_commit.commit.realm_id = heads[1].event.realm_id.clone();
+    wrong.authority_commit.commit.stream_ref = CommitStreamRef::Realm {
+        realm_id: heads[1].event.realm_id.clone(),
+    };
+    ordinary_realm::seal_final_commit(&mut wrong.authority_commit.commit);
+    for invalid in [
+        wrong,
+        candidate(json!({})),
+        candidate(json!({"disclosure":null})),
+        candidate(json!({"disclosure":"optional","scope_overrides":{}})),
+    ] {
         let before = counts(&pool).await;
         assert!(uow.commit_event(invalid).await.is_err());
         assert_eq!(counts(&pool).await, before);

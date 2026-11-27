@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use arkret_models_collaboration::objects::read_receipts::Notification;
 use arkret_models_collaboration::sync_frames::account_subscribe::NotificationDelta;
 use arkret_wire::events::EventKind;
-use arkret_wire::{ActorId, CircleId, DidCoreId, RealmId, StrandId};
+use arkret_wire::{ActorId, DidCoreId, RealmId, StrandId};
 
 use super::{AccountPk, PersistenceResult, async_trait};
 
@@ -55,10 +55,7 @@ pub struct NotificationStrandScope {
     pub realm_id: RealmId,
     /// Whether the Strand's current lifecycle state is `active`.
     pub active: bool,
-    pub scope_circle_id: Option<CircleId>,
-    /// Joined members of the scope Circle while that Circle is active; empty
-    /// for a Realm-scope Strand.
-    pub circle_members: BTreeSet<ActorId>,
+
 }
 
 /// AKP-0016 §9.4.5 — per-recipient notification projection (mention

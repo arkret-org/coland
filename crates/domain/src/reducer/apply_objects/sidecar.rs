@@ -163,7 +163,7 @@ impl ProjectionState {
     }
 
     /// The encrypted exchange log is projection-free. Admission binds it to
-    /// an existing native Sidecar context mapping; no Circle/Strand surrogate
+    /// an existing native Sidecar context mapping; no secondary Strand
     /// is consulted or created.
     pub(crate) fn apply_sidecar_exchange_control(
         &mut self,
@@ -222,7 +222,7 @@ mod tests {
     }
 
     #[test]
-    fn sidecar_create_retypes_event_and_never_creates_circle_membership() {
+    fn sidecar_create_retypes_the_accepted_event() {
         let mut state = ProjectionState::default();
         let first = create("AUbhLbszCE22Bm-rjOxxh9NLjudxjc1Jm38OX5PZttdw");
         match state.apply(&first, &ServerHlc::new("sidecar-test")) {
@@ -234,8 +234,6 @@ mod tests {
                 .sidecars
                 .contains_key("ak:sidecar:AUbhLbszCE22Bm-rjOxxh9NLjudxjc1Jm38OX5PZttdw")
         );
-        assert!(state.circles.is_empty());
-        assert!(state.circle_memberships.is_empty());
         assert_eq!(
             state
                 .sidecar_create_refs

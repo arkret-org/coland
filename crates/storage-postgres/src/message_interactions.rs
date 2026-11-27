@@ -93,16 +93,6 @@ async fn require_reference_visibility(
             .await?
             .map(|floor| floor.oldest_position)
         }
-        arkret_wire::ScopeRef::Circle { circle_id, .. } => {
-            crate::account_stream_scan::caller_circle_floor_in_connection(
-                conn,
-                &event.realm_id,
-                circle_id,
-                &event.actor_id,
-            )
-            .await?
-            .map(|floor| floor.oldest_position)
-        }
         arkret_wire::ScopeRef::Sidecar { sidecar_id, .. } => {
             crate::sidecar_authority_cut::caller_floor_in_connection(
                 conn,

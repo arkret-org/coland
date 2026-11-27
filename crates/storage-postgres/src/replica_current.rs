@@ -48,8 +48,6 @@ const MEMBER_STATION_FAMILIES: &[&str] = &[
     "sidecar_exchange_controls_current_states",
     "pin_current_states",
     "schema_definition_current_states",
-    "circle_member_state_current_states",
-    "circle_current_states",
     "call_state_current_states",
     "call_component_current_states",
     "realm_media_service_current_states",
@@ -111,36 +109,6 @@ fn require_one_current_write(changed: usize) -> PersistenceResult<()> {
             "failed_precondition: replica current belongs to another Realm, a later revision or a different value at this revision".to_owned(),
         ))
     }
-}
-
-#[derive(diesel::QueryableByName)]
-struct ExistingCircleCurrent {
-    #[diesel(sql_type = Text)]
-    realm_id: String,
-    #[diesel(sql_type = Text)]
-    create_event_id: String,
-    #[diesel(sql_type = Text)]
-    current_commit_id: String,
-    #[diesel(sql_type = BigInt)]
-    current_stream_position: i64,
-    #[diesel(sql_type = Jsonb)]
-    source_stream_ref: Value,
-    #[diesel(sql_type = Jsonb)]
-    value: Value,
-}
-
-#[derive(diesel::QueryableByName)]
-struct ExistingCircleMemberCurrent {
-    #[diesel(sql_type = Text)]
-    realm_id: String,
-    #[diesel(sql_type = Text)]
-    current_commit_id: String,
-    #[diesel(sql_type = BigInt)]
-    current_stream_position: i64,
-    #[diesel(sql_type = Jsonb)]
-    source_stream_ref: Value,
-    #[diesel(sql_type = Jsonb)]
-    value: Value,
 }
 
 #[derive(diesel::QueryableByName)]
@@ -239,7 +207,7 @@ async fn guard_snapshot_revisions(
                     ));
                 }
             }
-            S::ScopeReadReceiptPolicy { scope_ref } => {
+            S::ScopeReadReceiptPolicy => {
                 let current =
                     arkret_models_collaboration::events_payloads::CurrentScopeReadReceiptPolicy {
                         selector: selector.clone(),
@@ -248,8 +216,8 @@ async fn guard_snapshot_revisions(
                         value: serde_json::from_value(value.clone()).map_err(malformed)?,
                     };
                 current.validate().map_err(malformed)?;
-                let old = diesel::sql_query("SELECT current_commit_id,current_stream_position,source_stream_ref,value FROM scope_read_receipt_policy_current_states WHERE realm_id=$1 AND scope_ref=$2 FOR UPDATE")
-                    .bind::<Text,_>(realm_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(scope_ref).map_err(malformed)?)
+                let old = diesel::sql_query("SELECT current_commit_id,current_stream_position,source_stream_ref,value FROM scope_read_receipt_policy_current_states WHERE realm_id=$1 FOR UPDATE")
+                    .bind::<Text,_>(realm_id.as_str())
                     .get_result::<ExistingCurrent>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
                 if old.is_some_and(|old| {
                     old.source_stream_ref != source
@@ -438,60 +406,6 @@ async fn guard_snapshot_revisions(
                     }
                 }
             }
-            S::Circle { circle_id } => {
-                if *source_stream_ref
-                    != (arkret_wire::CommitStreamRef::Realm {
-                        realm_id: realm_id.clone(),
-                    })
-                    || value.get("id").and_then(Value::as_str) != Some(circle_id.as_str())
-                    || value.get("realm_id").and_then(Value::as_str) != Some(realm_id.as_str())
-                {
-                    return Err(malformed("Circle selector, source and value differ"));
-                }
-                let existing = diesel::sql_query("SELECT realm_id,create_event_id,current_commit_id,current_stream_position,source_stream_ref,value FROM circle_current_states WHERE circle_id=$1 FOR UPDATE")
-                    .bind::<Text,_>(circle_id.as_str())
-                    .get_result::<ExistingCircleCurrent>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
-                if let Some(old) = existing {
-                    let create_id = circle_id.as_str().replacen("ak:circle:", "ak:event:", 1);
-                    if old.realm_id != realm_id.as_str()
-                        || old.create_event_id != create_id
-                        || old.source_stream_ref != source
-                        || old.current_stream_position > incoming_position
-                        || (old.current_stream_position == incoming_position
-                            && (old.current_commit_id != revision.commit_id.as_str()
-                                || old.value != *value))
-                    {
-                        return Err(PersistenceError::Conflict("failed_precondition: Circle snapshot current revision or value differs".to_owned()));
-                    }
-                }
-            }
-            S::CircleMemberState {
-                circle_id,
-                member_actor_id,
-            } => {
-                if *source_stream_ref
-                    != (arkret_wire::CommitStreamRef::Circle {
-                        realm_id: realm_id.clone(),
-                        circle_id: circle_id.clone(),
-                    })
-                {
-                    return Err(malformed("Circle member selector and source differ"));
-                }
-                let existing = diesel::sql_query("SELECT realm_id,current_commit_id,current_stream_position,source_stream_ref,value FROM circle_member_state_current_states WHERE circle_id=$1 AND member_id=$2 FOR UPDATE")
-                    .bind::<Text,_>(circle_id.as_str())
-                    .bind::<Text,_>(member_actor_id.to_string())
-                    .get_result::<ExistingCircleMemberCurrent>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
-                if let Some(old) = existing
-                    && (old.realm_id != realm_id.as_str()
-                        || old.source_stream_ref != source
-                        || old.current_stream_position > incoming_position
-                        || (old.current_stream_position == incoming_position
-                            && (old.current_commit_id != revision.commit_id.as_str()
-                                || old.value != *value)))
-                {
-                    return Err(PersistenceError::Conflict("failed_precondition: Circle member snapshot current revision or value differs".to_owned()));
-                }
-            }
             _ => {}
         }
     }
@@ -518,7 +432,6 @@ async fn upsert_call_genesis(
         || !matches!(
             source,
             arkret_wire::CommitStreamRef::Realm { .. }
-                | arkret_wire::CommitStreamRef::Circle { .. }
         )
     {
         return Err(malformed(
@@ -914,7 +827,7 @@ pub(crate) async fn install_snapshot_at_heads_in_connection(
         #[diesel(sql_type=diesel::sql_types::Bool)]
         present: bool,
     }
-    let omitted = diesel::sql_query("SELECT EXISTS(SELECT 1 FROM scope_read_receipt_policy_current_states r WHERE r.realm_id=$1 AND EXISTS(SELECT 1 FROM jsonb_array_elements($3) h WHERE h->'stream_ref'=r.source_stream_ref) AND NOT EXISTS(SELECT 1 FROM jsonb_array_elements($2) incoming WHERE incoming->'selector'->>'kind'='scope_read_receipt_policy' AND incoming->'selector'->'scope_ref'=r.scope_ref)) AS present")
+    let omitted = diesel::sql_query("SELECT EXISTS(SELECT 1 FROM scope_read_receipt_policy_current_states r WHERE r.realm_id=$1 AND EXISTS(SELECT 1 FROM jsonb_array_elements($3) h WHERE h->'stream_ref'=r.source_stream_ref) AND NOT EXISTS(SELECT 1 FROM jsonb_array_elements($2) incoming WHERE incoming->'selector'->>'kind'='scope_read_receipt_policy' AND incoming->'source_stream_ref'=r.source_stream_ref)) AS present")
         .bind::<Text,_>(realm_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(entries).map_err(malformed)?)
         .bind::<Jsonb,_>(serde_json::to_value(visible_heads).map_err(malformed)?)
         .get_result::<PolicyOmitted>(&mut *conn).await.map_err(PersistenceError::database)?.present;
@@ -934,15 +847,6 @@ pub(crate) async fn install_snapshot_at_heads_in_connection(
         let source =
             serde_json::to_value(&source_head.stream_ref).map_err(PersistenceError::database)?;
         for table in MEMBER_STATION_FAMILIES {
-            // Account-scoped disclosure is not a negative statement about
-            // another hosted Account's private Circle. Retained rows remain
-            // subject to their own continuation proof, including after jumps.
-            if matches!(
-                *table,
-                "circle_current_states" | "circle_member_state_current_states"
-            ) {
-                continue;
-            }
             if *table == "message_reactions_current_states" {
                 // A tail may have advanced a row beyond its last Snapshot
                 // observation. Its retained source stream, not a historical
@@ -956,7 +860,7 @@ pub(crate) async fn install_snapshot_at_heads_in_connection(
                 .bind::<Text, _>(realm_id.as_str()).bind::<Jsonb, _>(&source).execute(&mut *conn).await.map_err(PersistenceError::database)?;
         }
         diesel::sql_query(
-            "DELETE FROM replica_authorization_rows WHERE realm_id=$1 AND source_stream_ref=$2 AND selector->>'kind' NOT IN ('circle','circle_member_state')",
+            "DELETE FROM replica_authorization_rows WHERE realm_id=$1 AND source_stream_ref=$2",
         )
         .bind::<Text, _>(realm_id.as_str())
         .bind::<Jsonb, _>(&source)
@@ -998,7 +902,7 @@ pub(crate) async fn install_snapshot_at_heads_in_connection(
                 value,
             )?;
         }
-        if let S::ScopeReadReceiptPolicy { .. } = selector {
+        if let S::ScopeReadReceiptPolicy = selector {
             let current =
                 arkret_models_collaboration::events_payloads::CurrentScopeReadReceiptPolicy {
                     selector: selector.clone(),
@@ -1137,36 +1041,6 @@ pub(crate) async fn install_snapshot_at_heads_in_connection(
                 let _:arkret_models_collaboration::events_payloads::RealmMediaServiceValue=serde_json::from_value(value.clone()).map_err(malformed)?;
                 let changed=diesel::sql_query("INSERT INTO realm_media_service_current_states(realm_id,source_stream_ref,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(realm_id) DO UPDATE SET current_commit_id=EXCLUDED.current_commit_id,current_stream_position=EXCLUDED.current_stream_position,value=EXCLUDED.value,updated_at=EXCLUDED.updated_at WHERE realm_media_service_current_states.source_stream_ref=EXCLUDED.source_stream_ref AND (realm_media_service_current_states.current_stream_position<EXCLUDED.current_stream_position OR (realm_media_service_current_states.current_stream_position=EXCLUDED.current_stream_position AND realm_media_service_current_states.current_commit_id=EXCLUDED.current_commit_id AND realm_media_service_current_states.value=EXCLUDED.value))")
                     .bind::<Text,_>(realm_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(source_stream_ref).map_err(malformed)?).bind::<Text,_>(row.commit_id).bind::<BigInt,_>(row.stream_position).bind::<Jsonb,_>(value).bind::<Timestamptz,_>(row.updated_at).execute(&mut *conn).await.map_err(PersistenceError::database)?;
-                require_one_current_write(changed)?;
-            }
-            S::Circle { circle_id } => {
-                let create_id = arkret_wire::EventId::new(circle_id.as_str().replacen(
-                    "ak:circle:",
-                    "ak:event:",
-                    1,
-                ))
-                .map_err(malformed)?;
-                let name = value
-                    .pointer("/display/short_name")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| malformed("Circle display name is absent"))?
-                    .to_ascii_lowercase();
-                let changed = diesel::sql_query("INSERT INTO circle_current_states (realm_id,circle_id,create_event_id,current_commit_id,current_stream_position,source_stream_ref,short_name_folded,value,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(circle_id) DO UPDATE SET current_commit_id=EXCLUDED.current_commit_id,current_stream_position=EXCLUDED.current_stream_position,source_stream_ref=EXCLUDED.source_stream_ref,short_name_folded=EXCLUDED.short_name_folded,value=EXCLUDED.value,updated_at=EXCLUDED.updated_at WHERE circle_current_states.realm_id=EXCLUDED.realm_id AND circle_current_states.create_event_id=EXCLUDED.create_event_id AND circle_current_states.source_stream_ref=EXCLUDED.source_stream_ref AND (circle_current_states.current_stream_position<EXCLUDED.current_stream_position OR (circle_current_states.current_stream_position=EXCLUDED.current_stream_position AND circle_current_states.current_commit_id=EXCLUDED.current_commit_id AND circle_current_states.value=EXCLUDED.value AND circle_current_states.short_name_folded=EXCLUDED.short_name_folded))")
-                    .bind::<Text, _>(realm_id.as_str()).bind::<Text, _>(circle_id.as_str()).bind::<Text, _>(create_id.as_str()).bind::<Text, _>(row.commit_id).bind::<BigInt, _>(row.stream_position).bind::<Jsonb, _>(serde_json::to_value(source_stream_ref).map_err(malformed)?).bind::<Text, _>(name).bind::<Jsonb, _>(value).bind::<Timestamptz, _>(installed_at).execute(&mut *conn).await.map_err(PersistenceError::database)?;
-                require_one_current_write(changed)?;
-            }
-            S::CircleMemberState {
-                circle_id,
-                member_actor_id,
-            } => {
-                let current: arkret_wire::CircleMemberStateValue =
-                    serde_json::from_value(value.clone()).map_err(malformed)?;
-                let membership = serde_json::to_value(current.membership).map_err(malformed)?;
-                let membership = membership
-                    .as_str()
-                    .ok_or_else(|| malformed("Circle membership is not a name"))?;
-                let changed = diesel::sql_query("INSERT INTO circle_member_state_current_states (realm_id,circle_id,member_id,membership,current_commit_id,current_stream_position,source_stream_ref,value,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(circle_id,member_id) DO UPDATE SET membership=EXCLUDED.membership,current_commit_id=EXCLUDED.current_commit_id,current_stream_position=EXCLUDED.current_stream_position,source_stream_ref=EXCLUDED.source_stream_ref,value=EXCLUDED.value,updated_at=EXCLUDED.updated_at WHERE circle_member_state_current_states.realm_id=EXCLUDED.realm_id AND circle_member_state_current_states.source_stream_ref=EXCLUDED.source_stream_ref AND (circle_member_state_current_states.current_stream_position<EXCLUDED.current_stream_position OR (circle_member_state_current_states.current_stream_position=EXCLUDED.current_stream_position AND circle_member_state_current_states.current_commit_id=EXCLUDED.current_commit_id AND circle_member_state_current_states.membership=EXCLUDED.membership AND circle_member_state_current_states.value=EXCLUDED.value))")
-                    .bind::<Text, _>(realm_id.as_str()).bind::<Text, _>(circle_id.as_str()).bind::<Text, _>(member_actor_id.to_string()).bind::<Text, _>(membership).bind::<Text, _>(row.commit_id).bind::<BigInt, _>(row.stream_position).bind::<Jsonb, _>(serde_json::to_value(source_stream_ref).map_err(malformed)?).bind::<Jsonb, _>(value).bind::<Timestamptz, _>(installed_at).execute(&mut *conn).await.map_err(PersistenceError::database)?;
                 require_one_current_write(changed)?;
             }
             S::ModerationState { target_ref } => {
@@ -1425,9 +1299,6 @@ pub(crate) async fn advance_in_connection(
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
 ) -> PersistenceResult<()> {
-    if crate::replica_authorization::circle_effect_covered(conn, commit).await? {
-        return Ok(());
-    }
     let commit_id = commit.commit_id.to_string();
     let row = Revision {
         commit_id: &commit_id,
@@ -1454,7 +1325,6 @@ pub(crate) async fn advance_in_connection(
         diesel::sql_query("DELETE FROM replica_authorization_rows WHERE realm_id=$1 AND selector->>'kind' IN ('realm_authority_root','realm_policy_bundle')").bind::<Text, _>(event.realm_id.as_str()).execute(&mut *conn).await.map_err(PersistenceError::database)?;
     }
 
-    let mut complete_circle_effects = true;
     match event.kind {
         arkret_wire::EventKind::MimiRoomBinding => {
             if event.realm_id != commit.realm_id
@@ -1604,9 +1474,6 @@ pub(crate) async fn advance_in_connection(
                 commit.committed_at,
             )
             .await?;
-        }
-        arkret_wire::EventKind::CircleCreate | arkret_wire::EventKind::CircleMemberState => {
-            crate::circle_current_states::commit_in_connection(conn, event, commit).await?;
         }
         arkret_wire::EventKind::AgentSidecarExchangeControl => {
             crate::sidecar_exchange_controls::commit_in_connection(conn, event, commit, false)
@@ -1968,15 +1835,7 @@ pub(crate) async fn advance_in_connection(
             )
             .await?;
         }
-        _ => {
-            // A Full envelope alone is not a reducer completeness proof.
-            // Unsupported Circle lifecycle effects must not recertify an
-            // old active value or manufacture a new snapshot observation.
-            complete_circle_effects = false;
-        }
-    }
-    if !complete_circle_effects {
-        crate::replica_authorization::invalidate_circle_continuation(conn, &event.realm_id).await?;
+        _ => {}
     }
     crate::replica_authorization::advance_verified_head(conn, commit).await?;
     if matches!(
@@ -2013,44 +1872,11 @@ pub(crate) async fn advance_in_connection(
         crate::replica_authorization::save_row(conn, &event.realm_id, &entry, commit.committed_at)
             .await?;
     }
-    if matches!(
-        event.kind,
-        arkret_wire::EventKind::CircleCreate | arkret_wire::EventKind::CircleMemberState
-    ) {
-        #[derive(diesel::QueryableByName)]
-        struct EffectRow {
-            #[diesel(sql_type=Jsonb)]
-            entry: Value,
-        }
-        let (circle, member) = if event.kind == arkret_wire::EventKind::CircleCreate {
-            (arkret_wire::CircleId::from_event_id(&event.event_id), None)
-        } else {
-            let body: arkret_models_collaboration::events_payloads::CircleMemberStatePayload =
-                serde_json::from_value(payload()?).map_err(malformed)?;
-            (body.circle_id, Some(body.member_id.to_string()))
-        };
-        let projected = diesel::sql_query("SELECT jsonb_build_object('selector',jsonb_build_object('kind','circle','circle_id',circle_id),'source_stream_ref',source_stream_ref,'revision',jsonb_build_object('commit_id',current_commit_id,'stream_position',current_stream_position),'value',value) AS entry FROM circle_current_states WHERE circle_id=$3 AND realm_id=$1 AND current_commit_id=$2 AND $4::text IS NULL UNION ALL SELECT jsonb_build_object('selector',jsonb_build_object('kind','circle_member_state','circle_id',circle_id,'member_actor_id',member_id::jsonb),'source_stream_ref',source_stream_ref,'revision',jsonb_build_object('commit_id',current_commit_id,'stream_position',current_stream_position),'value',value) AS entry FROM circle_member_state_current_states WHERE circle_id=$3 AND member_id=$4 AND realm_id=$1 AND current_commit_id=$2")
-            .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(commit.commit_id.as_str())
-            .bind::<Text,_>(circle.as_str()).bind::<diesel::sql_types::Nullable<Text>,_>(member)
-            .load::<EffectRow>(&mut *conn).await.map_err(PersistenceError::database)?;
-        if projected.len() != 1 {
-            return Err(malformed("Circle effect has no unique projected current"));
-        }
-        let entry = serde_json::from_value(projected.into_iter().next().unwrap().entry)
-            .map_err(malformed)?;
-        crate::replica_authorization::save_effect_row(
-            conn,
-            &event.realm_id,
-            &entry,
-            commit.committed_at,
-        )
-        .await?;
-    }
+
     Ok(())
 }
 
-#[cfg(test)]
-mod circle_revision_tests;
+
 
 #[cfg(test)]
 mod current_integrity_tests;
@@ -2337,9 +2163,9 @@ mod tests {
         let arkret_wire::CurrentState::Value {
             source_stream_ref, ..
         } = &mut foreign;
-        *source_stream_ref = arkret_wire::CommitStreamRef::Circle {
+        *source_stream_ref = arkret_wire::CommitStreamRef::Sidecar {
             realm_id: realm.clone(),
-            circle_id: arkret_wire::CircleId::from_event_id(&arkret_wire::EventId::from_digest(
+            sidecar_id: arkret_wire::SidecarId::from_event_id(&arkret_wire::EventId::from_digest(
                 arkret_canonical::DigestSuite::Sha256,
                 [0x62; 32],
             )),
@@ -2431,8 +2257,7 @@ mod tests {
         );
         assert_eq!(after.value["private_count"], 1);
         if kind != "agent" {
-            // A complete Realm cut cannot erase a visible Policy, but a Circle
-            // omitted from visible heads proves no authority over that stream.
+            // Reinstalling a complete Realm cut preserves the signed current.
             let current = arkret_wire::CurrentState::Value {
                 selector: arkret_wire::CurrentSelector::Policy {
                     policy_id: id.clone(),
@@ -2444,46 +2269,6 @@ mod tests {
                 },
                 value: next_value.clone(),
             };
-            let circle_source = arkret_wire::CommitStreamRef::Circle {
-                realm_id: realm.clone(),
-                circle_id: arkret_wire::CircleId::from_event_id(
-                    &arkret_wire::EventId::from_digest(
-                        arkret_canonical::DigestSuite::Sha256,
-                        [0x62; 32],
-                    ),
-                ),
-            };
-            let circle_head = arkret_wire::CommitStreamHead {
-                stream_ref: circle_source.clone(),
-                stream_position: 3,
-                commit_id: arkret_wire::RealmCommitId::from_digest([3; 32]),
-            };
-            let circle_id =
-                arkret_wire::PolicyId::new("ak:policy:0198ff00-0000-7000-8000-000000000002")
-                    .unwrap();
-            let mut circle_value = next_value;
-            circle_value["id"] = json!(circle_id);
-            let circle = arkret_wire::CurrentState::Value {
-                selector: arkret_wire::CurrentSelector::Policy {
-                    policy_id: circle_id,
-                },
-                source_stream_ref: circle_source,
-                revision: arkret_wire::CurrentRevision {
-                    commit_id: circle_head.commit_id.clone(),
-                    stream_position: 3,
-                },
-                value: circle_value,
-            };
-            install_snapshot_at_heads_in_connection(
-                &mut conn,
-                &realm,
-                &next_head,
-                &[next_head.clone(), circle_head],
-                &[current.clone(), circle],
-                at,
-            )
-            .await
-            .unwrap();
             install_snapshot_in_connection(&mut conn, &realm, &next_head, &[current], at)
                 .await
                 .unwrap();
@@ -3111,10 +2896,10 @@ mod tests {
             stored["create"],
             call.as_str().replacen("ak:call:", "ak:event:", 1)
         );
-        let other = arkret_wire::CommitStreamRef::Circle {
+        let other = arkret_wire::CommitStreamRef::Sidecar {
             realm_id: realm.clone(),
-            circle_id: arkret_wire::CircleId::new(
-                "ak:circle:AY6DJbBwavsGTQuBZZiqqw9MVcqPZ8QX8invQ3i2kpi7",
+            sidecar_id: arkret_wire::SidecarId::new(
+                "ak:sidecar:AY6DJbBwavsGTQuBZZiqqw9MVcqPZ8QX8invQ3i2kpi7",
             )
             .unwrap(),
         };
@@ -4221,11 +4006,7 @@ mod tests {
         };
         let policy = json!({"disclosure":"required","visibility":"private"});
         let entry = arkret_wire::CurrentState::Value {
-            selector: arkret_wire::CurrentSelector::ScopeReadReceiptPolicy {
-                scope_ref: arkret_wire::ScopeRef::Realm {
-                    realm_id: realm.clone(),
-                },
-            },
+            selector: arkret_wire::CurrentSelector::ScopeReadReceiptPolicy,
             source_stream_ref: stream.clone(),
             revision: arkret_wire::CurrentRevision {
                 commit_id,
@@ -4244,7 +4025,7 @@ mod tests {
             .await
             .unwrap();
         }
-        let actual:ValueRow = diesel::sql_query("SELECT value FROM scope_read_receipt_policy_current_states WHERE realm_id=$1 AND scope_ref->>'kind'='realm'")
+        let actual:ValueRow = diesel::sql_query("SELECT value FROM scope_read_receipt_policy_current_states WHERE realm_id=$1")
             .bind::<Text,_>(realm.as_str()).get_result(&mut conn).await.unwrap();
         assert_eq!(actual.value, policy);
         let mut changed_revision = entry.clone();
@@ -4312,9 +4093,9 @@ mod tests {
         let arkret_wire::CurrentState::Value {
             source_stream_ref, ..
         } = &mut foreign;
-        *source_stream_ref = arkret_wire::CommitStreamRef::Circle {
+        *source_stream_ref = arkret_wire::CommitStreamRef::Sidecar {
             realm_id: realm.clone(),
-            circle_id: arkret_wire::CircleId::from_event_id(&arkret_wire::EventId::from_digest(
+            sidecar_id: arkret_wire::SidecarId::from_event_id(&arkret_wire::EventId::from_digest(
                 arkret_canonical::DigestSuite::Sha256,
                 [0x79; 32],
             )),
@@ -4394,7 +4175,7 @@ mod tests {
         advance_in_connection(&mut conn, &event, &commit)
             .await
             .unwrap();
-        let actual:ValueRow = diesel::sql_query("SELECT value FROM scope_read_receipt_policy_current_states WHERE realm_id=$1 AND scope_ref->>'kind'='realm'")
+        let actual:ValueRow = diesel::sql_query("SELECT value FROM scope_read_receipt_policy_current_states WHERE realm_id=$1")
             .bind::<Text,_>(realm.as_str()).get_result(&mut conn).await.unwrap();
         assert_eq!(actual.value, json!({"disclosure":"disabled"}));
     }

@@ -290,17 +290,7 @@ pub(crate) async fn head_for_action(
         crate::realm_authorization_cut::RealmAuthorizationCut::read(conn, &current.realm_id, actor)
             .await?;
     cut.require_open_content_read()?;
-    if let arkret_wire::ScopeRef::Circle {
-        realm_id,
-        circle_id,
-    } = scope
-        && !crate::circle_current_states::joined_member_for_content_read_in_connection(
-            conn, realm_id, circle_id, actor,
-        )
-        .await?
-    {
-        return Err(unavailable("native predecessor Circle membership changed"));
-    }
+
     let preparation = super::prepare_input_in_connection(conn, &current, scope).await?;
     let record = &preparation.record;
     let row=sql_query("SELECT b.id,a.source,key_backup_list_metadata(b.payload) AS metadata FROM key_backups b JOIN realm_actor_backup_admissions a ON a.backup_id=b.id WHERE a.realm_id=$1 AND a.actor_id=$2 AND a.effective_scope=$3 AND b.payload->>'series_id'=$4 ORDER BY (b.payload->>'series_sequence')::bigint DESC LIMIT 1 FOR SHARE OF b,a")

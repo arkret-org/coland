@@ -1100,13 +1100,13 @@ fn read_receipt_policy_value_helper_extracts_only_its_exact_scope() {
     let value = serde_json::json!({"disclosure":"required","visibility":"members"});
     state.set_facet(
         scope.realm_id().as_str(),
-        FacetRef::new(
-            facet::SCOPE_READ_RECEIPT_POLICY,
-            String::from_utf8(arkret_canonical::canonical_json_bytes(&scope).unwrap()).unwrap(),
-        ),
+        FacetRef::singleton(facet::SCOPE_READ_RECEIPT_POLICY),
         value.clone(),
     );
-    assert_eq!(state.read_receipt_policy_value(&scope), Some(&value));
+    assert_eq!(
+        state.read_receipt_policy_value(scope.realm_id().as_str()),
+        Some(&value)
+    );
 }
 
 #[test]
@@ -1548,12 +1548,7 @@ fn read_receipt_policy_reaches_the_reducer_and_replaces_the_previous_value() {
         ),
         "read receipt policy must project its own effect, got {effect:?}"
     );
-    assert_eq!(
-        state.read_receipt_policy_value(&arkret_wire::ScopeRef::Realm {
-            realm_id: realm_id.parse().unwrap()
-        }),
-        Some(&strict)
-    );
+    assert_eq!(state.read_receipt_policy_value(realm_id), Some(&strict));
 
     // The registry projection is `set`, not write-once: a later accepted Event
     // replaces the settled value outright. A partial payload is projected
@@ -1571,12 +1566,7 @@ fn read_receipt_policy_reaches_the_reducer_and_replaces_the_previous_value() {
         ),
         "a second policy Event must be accepted, got {effect:?}"
     );
-    assert_eq!(
-        state.read_receipt_policy_value(&arkret_wire::ScopeRef::Realm {
-            realm_id: realm_id.parse().unwrap()
-        }),
-        Some(&partial)
-    );
+    assert_eq!(state.read_receipt_policy_value(realm_id), Some(&partial));
 }
 
 /// `read_receipt_policy_payload` is a closed object with `minProperties: 1`.
@@ -1606,12 +1596,7 @@ fn read_receipt_policy_rejects_the_empty_object_and_unknown_fields() {
             ),
             "{payload} must fail closed, got {effect:?}"
         );
-        assert_eq!(
-            state.read_receipt_policy_value(&arkret_wire::ScopeRef::Realm {
-                realm_id: realm_id.parse().unwrap()
-            }),
-            None
-        );
+        assert_eq!(state.read_receipt_policy_value(realm_id), None);
     }
 }
 
@@ -1761,7 +1746,7 @@ fn receipt_policy_operation(realm: &str, payload: Value) -> Operation {
 }
 
 #[test]
-fn read_receipt_circle_and_realm_replace_independent_values() {
+fn read_receipt_policy_is_independent_per_realm() {
     let realm = "ak:realm:AZ5nQ0y2uZ3d1tVvJ7mK8sXbR4fPcHlWgEoNiTaUdY6B";
     let realm_scope = arkret_wire::ScopeRef::Realm {
         realm_id: realm.parse().unwrap(),
@@ -1769,9 +1754,8 @@ fn read_receipt_circle_and_realm_replace_independent_values() {
     let mut state = ProjectionState::new();
     let mut scopes = vec![realm_scope];
     for byte in [21, 22] {
-        scopes.push(arkret_wire::ScopeRef::Circle {
-            realm_id: realm.parse().unwrap(),
-            circle_id: arkret_wire::CircleId::from_event_id(&arkret_wire::EventId::from_digest(
+        scopes.push(arkret_wire::ScopeRef::Realm {
+            realm_id: arkret_wire::RealmId::from_event_id(&arkret_wire::EventId::from_digest(
                 arkret_canonical::DigestSuite::Sha256,
                 [byte; 32],
             )),
@@ -1783,7 +1767,7 @@ fn read_receipt_circle_and_realm_replace_independent_values() {
         serde_json::json!({"visibility":"private"}),
     ];
     for (scope, value) in scopes.iter().zip(values.iter()) {
-        let mut operation = receipt_policy_operation(realm, value.clone());
+        let mut operation = receipt_policy_operation(scope.realm_id().as_str(), value.clone());
         operation.context.accepted_scope_ref = scope.clone();
         assert!(matches!(
             state.apply(&operation, &ServerHlc::new("test")),
@@ -1791,7 +1775,10 @@ fn read_receipt_circle_and_realm_replace_independent_values() {
         ));
     }
     for (scope, value) in scopes.iter().zip(values.iter()) {
-        assert_eq!(state.read_receipt_policy_value(scope), Some(value));
+        assert_eq!(
+            state.read_receipt_policy_value(scope.realm_id().as_str()),
+            Some(value)
+        );
     }
 }
 

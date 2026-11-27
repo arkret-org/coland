@@ -295,65 +295,6 @@ async fn terminal_child_consumer_case() {
     lifecycle_future(|| uow.commit_event(placement.clone()))
         .await
         .unwrap();
-    let create = realm_event_request_as(
-        &placement,
-        &actor,
-        arkret_wire::EventKind::CircleCreate,
-        serde_json::json!({"object":{"schema":"ak.schema.circle.v1","realm_id":realm,
-            "title":"Terminal child Circle","display":{"short_name":"Terminal","color_token":"blue","symbol":{"glyph":"lock"}},
-            "directory_visibility":"members","join_rule":"public","history_access":"since_join","state":"active",
-            "created_by":arkret_wire::ActorId::account(actor.clone()),"created_at":arkret_canonical::format_timestamp_canonical(at)}}),
-    );
-    let create = lifecycle_future(|| source_if_human(&pool, create)).await;
-    lifecycle_future(|| uow.commit_event(create.clone()))
-        .await
-        .unwrap();
-    let circle_id = arkret_wire::CircleId::from_event_id(&create.authority_commit.event.event_id);
-    let parent_join = unit
-        .transactions
-        .iter()
-        .find(|tx| tx.event.kind == arkret_wire::EventKind::MemberState)
-        .unwrap();
-    let parent_revision = serde_json::json!({"commit_id":parent_join.commit.commit_id,"stream_position":parent_join.commit.stream_position});
-    let joined = circle_self_member_request(
-        &create,
-        &actor,
-        &circle_id,
-        "join",
-        Some(serde_json::Value::Null),
-        Some(&parent_revision),
-    );
-    let joined = lifecycle_future(|| source_if_human(&pool, joined)).await;
-    lifecycle_future(|| uow.commit_event(joined.clone()))
-        .await
-        .unwrap();
-    let circle_scope = arkret_wire::ScopeRef::Circle {
-        realm_id: realm.clone(),
-        circle_id: circle_id.clone(),
-    };
-    let mut private_payload =
-        serde_json::to_value(&strand_create_request(&unit).authority_commit.event.payload).unwrap();
-    private_payload["object"]["scope_circle_id"] = serde_json::json!(circle_id);
-    private_payload["object"]["metadata"]["title"] = serde_json::json!("Private terminal Strand");
-    let private = scoped_event_request_as(
-        &joined,
-        &actor,
-        arkret_wire::EventKind::StrandCreate,
-        private_payload.clone(),
-        circle_scope.clone(),
-    );
-    let private = lifecycle_future(|| source_if_human(&pool, private)).await;
-    lifecycle_future(|| uow.commit_event(private.clone()))
-        .await
-        .unwrap();
-    let live_circle = store
-        .circle_view_for_actor(&circle_id, &arkret_wire::ActorId::account(actor.clone()))
-        .await
-        .unwrap();
-    assert!(
-        live_circle.is_some(),
-        "Circle fixture must reach the live production read"
-    );
     let nav = store
         .object_projection_lists_for_actor(
             &realm,
@@ -364,7 +305,7 @@ async fn terminal_child_consumer_case() {
         .unwrap()
         .unwrap();
     assert_eq!(nav.0.spaces.len(), 2);
-    assert_eq!(nav.1.strands.len(), 2);
+    assert_eq!(nav.1.strands.len(), 1);
     assert!(
         nav.1
             .strands
@@ -372,9 +313,7 @@ async fn terminal_child_consumer_case() {
             .any(|row| row.board_space_id.as_ref() == Some(&spaces[0])
                 && row.list_space_id.as_ref() == Some(&spaces[1]))
     );
-    // Circle commits advance only their own stream; the terminal follows create
-    // on the Realm stream and observes all child currents under the same lock.
-    strand = create;
+    strand = placement;
     let baseline = store
         .realm_state_snapshot_material(&realm)
         .await
@@ -480,20 +419,6 @@ async fn terminal_child_consumer_case() {
         .unwrap();
     assert!(navigation.0.spaces.is_empty());
     assert!(navigation.1.strands.is_empty());
-    assert!(
-        store
-            .circle_view_for_actor(&circle_id, &arkret_wire::ActorId::account(actor.clone()))
-            .await
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        store
-            .circle_views_for_actor(&realm, &arkret_wire::ActorId::account(actor.clone()))
-            .await
-            .unwrap()
-            .is_empty()
-    );
     assert!(material.current_state_entries.iter().any(|entry| matches!(
         entry,
         arkret_wire::CurrentState::Value {
@@ -557,10 +482,7 @@ async fn terminal_child_consumer_case() {
             arkret_wire::EventKind::StrandRestore,
             serde_json::json!({"target_ref":public_strand}),
         ),
-        (
-            arkret_wire::EventKind::CircleRestore,
-            serde_json::json!({"target_ref":circle_id}),
-        ),
+        (arkret_wire::EventKind::StrandCreate, serde_json::to_value(&strand_create_request(&unit).authority_commit.event.payload).unwrap()),
     ] {
         let request = realm_event_request_as(&terminal, &actor, kind, payload);
         let request = lifecycle_future(|| source_if_human(&pool, request)).await;
@@ -607,37 +529,6 @@ async fn terminal_child_consumer_case() {
             .event_inserted
     );
     assert_eq!(lifecycle_write_counts(&pool, &realm).await, terminal_counts);
-    for (kind, payload) in [
-        (arkret_wire::EventKind::StrandCreate, {
-            private_payload["object"]["metadata"]["title"] =
-                serde_json::json!("fresh terminal private write");
-            private_payload
-        }),
-        (
-            arkret_wire::EventKind::CircleMemberState,
-            serde_json::json!({"circle_id":circle_id,
-            "member_id":arkret_wire::ActorId::account(actor.clone()),"membership":"leave","expected_membership":"join"}),
-        ),
-    ] {
-        let request =
-            scoped_event_request_as(&private, &actor, kind, payload, circle_scope.clone());
-        let request = lifecycle_future(|| source_if_human(&pool, request)).await;
-        arkret_schema::validate_event_for_submit(&request.authority_commit.event).unwrap();
-        let error = lifecycle_future(|| uow.commit_event(request))
-            .await
-            .unwrap_err();
-        assert!(
-            error.to_string().contains("the Realm is terminal"),
-            "{error}"
-        );
-        assert_eq!(
-            error.conflict_code(),
-            Some(coland_storage::ConflictCode::FailedPrecondition),
-            "{error}"
-        );
-        assert!(!error.to_string().contains("realm_terminal_state"));
-        assert_eq!(lifecycle_write_counts(&pool, &realm).await, terminal_counts);
-    }
     assert!(
         store
             .committed_event(&strand.authority_commit.event.event_id)

@@ -100,12 +100,8 @@ pub(super) async fn event_pins(
         effective_scope: event.scope_ref.clone(),
         service_did_document: material.service_did_document.clone(),
     };
-    if event.kind == arkret_wire::EventKind::CircleMemberState {
-        crate::applet_device_admission::require_business_binding(conn, event, &guard, at).await?;
-    } else {
         crate::applet_device_admission::require_installation_binding(conn, event, &guard, at)
             .await?;
-    }
     let (registration, installation) =
         crate::applet_device_admission::installation(conn, event, &guard, at).await?;
     let cut = crate::realm_authorization_cut::RealmAuthorizationCut::read(
@@ -144,37 +140,7 @@ pub(super) async fn event_pins(
         .bind::<diesel::sql_types::Array<Text>,_>(ids).load::<JsonRow>(&mut *conn).await.map_err(PersistenceError::database)?;
     let membership=sql_query("SELECT to_jsonb(m) AS value FROM member_state_current_states m WHERE realm_id=$1 AND member_id=$2 FOR SHARE")
         .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(event.actor_id.to_string()).get_result::<JsonRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
-    let circle = match &event.scope_ref {
-        ScopeRef::Circle { circle_id, .. } => {
-            let circle =
-                crate::circle_current_states::locked_circle_basis(conn, &event.realm_id, circle_id)
-                    .await?;
-            let member = crate::circle_current_states::locked_membership_basis(
-                conn,
-                &event.realm_id,
-                circle_id,
-                &event.actor_id,
-                None,
-            )
-            .await?;
-            let parent = crate::member_state_admission::locked_membership_revision(
-                conn,
-                &event.realm_id,
-                &event.actor_id,
-            )
-            .await?;
-            let payload: arkret_models_collaboration::events_payloads::circle::CircleMemberStatePayload = serde_json::from_value(json!(&event.payload)).map_err(invalid)?;
-            if !matches!(parent, Some((arkret_wire::MembershipState::Join, ref revision)) if payload.parent_membership_revision.as_ref() == Some(revision))
-            {
-                return Err(refused(
-                    "failed_precondition",
-                    "native Circle review parent revision differs",
-                ));
-            }
-            Some(json!({"circle":circle,"membership":member}))
-        }
-        _ => None,
-    };
+
     let mut pending = std::collections::BTreeSet::from([event
         .authorization_ref
         .as_ref()
@@ -207,7 +173,7 @@ pub(super) async fn event_pins(
         json!({"producer":source,"original_proof":event.producer_proof,"scope":event.scope_ref,
         "device_scopes":authority.scopes,"device_expires_at":authority.expires_at,"device_generation":authority.current_device_generation_ref,
         "registration":registration,"installation_status":installation["status"],"package":installation["package"],"registration_event":installation["registration_event"],
-        "scope_profile":scope_profile,"circle":circle,"resolution":identity.value.resolution,"resolution_source":identity.current_event,"profile":profile,"membership":membership.map(|r|r.value),
+        "scope_profile":scope_profile,"resolution":identity.value.resolution,"resolution_source":identity.current_event,"profile":profile,"membership":membership.map(|r|r.value),
         "grant_revisions":grants,"authority_root":root.value,"policies":policies,"policy_revisions":revisions.into_iter().map(|r|r.value).collect::<Vec<_>>() }),
         decision.review_requirements,
     ))
@@ -362,15 +328,11 @@ pub(super) async fn select_current_creation(
     };
     let candidate = crate::realm_actor_control::creation(event)?.ok_or_else(hidden)?;
     let scope = &candidate.creation_scope;
-    let circle = match scope {
-        ScopeRef::Circle { circle_id, .. } => Some(circle_id),
-        _ => None,
-    };
+
     let policies =
         crate::policy_current_states::read_scoped_applet_management_policies_in_connection(
             conn,
             scope.realm_id(),
-            circle,
         )
         .await?;
     let resources = vec![PolicyResourceSelector {

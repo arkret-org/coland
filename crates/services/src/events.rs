@@ -21,14 +21,13 @@ pub struct RealmDirectoryQuery {
 }
 
 pub use coland_storage::{
-    CircleMemberProjectionRecord, CircleProjectionRecord, RealmOrganizationStatementRecord,
+    RealmOrganizationStatementRecord,
 };
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MorphProjectionRecord {
     pub morph_id: String,
     pub realm_id: String,
-    pub scope_circle_id: Option<String>,
     pub morph_kind: String,
     pub title: Option<String>,
     pub fields: BTreeMap<String, Value>,
@@ -552,8 +551,8 @@ use crate::federation::FederationDeliveryRecord;
 #[derive(Clone, Debug)]
 pub struct CommitAcceptedEventCommand {
     pub verified_media_participant: Option<arkret_signatures::media::VerifiedCallParticipant>,
-    /// Current-authority transaction that orders this Event on its Realm,
-    /// Circle or Sidecar stream. One `RealmCommit` accepts exactly one Event,
+    /// Current-authority transaction that orders this Event on its Realm
+    /// or Sidecar stream. One `RealmCommit` accepts exactly one Event,
     /// so the signed commit travels with the Event it admits.
     pub authority_commit: coland_storage::AuthorityCommitTransaction,
     pub self_producer_guard: Option<coland_storage::SelfProducerCommitGuard>,
@@ -683,12 +682,6 @@ pub trait EventReadPort: Send + Sync {
 
 #[async_trait::async_trait]
 pub trait ProjectionWritePort: Send + Sync {
-    /// Persist one Circle row together with its complete membership set.
-    async fn store_circle_projection(
-        &self,
-        record: &CircleProjectionRecord,
-        members: &[CircleMemberProjectionRecord],
-    ) -> ServiceResult<()>;
     async fn store_morph_projection(&self, record: &MorphProjectionRecord) -> ServiceResult<()>;
     async fn store_realm_organization_statement(
         &self,
@@ -1138,15 +1131,6 @@ impl EventQueryService {
         self.projections.store_morph_projection(record).await
     }
 
-    pub async fn store_circle_projection(
-        &self,
-        record: &CircleProjectionRecord,
-        members: &[CircleMemberProjectionRecord],
-    ) -> ServiceResult<()> {
-        self.projections
-            .store_circle_projection(record, members)
-            .await
-    }
 
     pub async fn store_realm_organization_statement(
         &self,

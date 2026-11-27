@@ -645,7 +645,7 @@ mod tests {
                         member_id: arkret_wire::ActorId::service(
                             DidCoreId::new("ak:did_core:web:member.example").unwrap(),
                         ),
-                        circle_membership_event_ref: None,
+
                         membership_event_ref: DELIVERY_EVENT_ID.to_owned(),
                     }],
                 }),

@@ -82,7 +82,7 @@ async fn strand_scope_rebind_returns_the_contract_reason_without_writes() {
         arkret_wire::EventKind::StrandUpdate,
         head.event.actor_id.signing_principal_id(),
         json!({"strand_id":discussion.strand_id,"patch":{
-            "scope_circle_id":{"$op":"set","value":arkret_wire::CircleId::from_event_id(&head.event.event_id)}
+            "scope_circle_id":{"$op":"set","value":"retired-private-scope"}
         }}),
         head.commit.committed_at,
     ))).await;

@@ -38,7 +38,7 @@ async fn require_current(
         || record.endpoint_verification_method.is_some()
         || !matches!(
             guard.effective_scope,
-            ScopeRef::Realm { .. } | ScopeRef::Circle { .. }
+            ScopeRef::Realm { .. }
         )
     {
         return Err(denied(
@@ -113,33 +113,10 @@ async fn require_current(
     if !cut.actor_is_joined() {
         return Err(denied("KeyPackage owner is not joined to its target Realm"));
     }
-    let circle = match scope {
-        ScopeRef::Circle { circle_id, .. } => Some(circle_id),
-        _ => None,
-    };
-    if let Some(circle) = circle {
-        let basis =
-            crate::circle_current_states::locked_circle_basis(conn, scope.realm_id(), circle)
-                .await?;
-        if basis["value"]["state"] != "active"
-            || !crate::circle_current_states::effective_member_in_connection(
-                conn,
-                scope.realm_id(),
-                circle,
-                &actor,
-            )
-            .await?
-        {
-            return Err(denied(
-                "KeyPackage owner has no active exact Circle membership",
-            ));
-        }
-    }
     let policies =
         crate::policy_current_states::read_scoped_applet_management_policies_in_connection(
             conn,
             scope.realm_id(),
-            circle,
         )
         .await?;
     let mut resources = vec![PolicyResourceSelector {
@@ -147,13 +124,6 @@ async fn require_current(
         realm_id: Some(scope.realm_id().clone()),
         resource_ref: Some(scope.realm_id().to_string()),
     }];
-    if let Some(circle) = circle {
-        resources.push(PolicyResourceSelector {
-            kind: PolicyResourceKind::Object,
-            realm_id: Some(scope.realm_id().clone()),
-            resource_ref: Some(circle.to_string()),
-        });
-    }
     if let Some(strand) = publication.and_then(|body| body.strand_id.as_ref()) {
         resources.push(PolicyResourceSelector {
             kind: PolicyResourceKind::Strand,
@@ -329,7 +299,7 @@ pub(crate) async fn require_existing_group(
     }
     // Membership can advance the typed current revision without replacing
     // the accepted MLS head. Verify both writers at their actual positions.
-    let original = sql_query("SELECT e.envelope AS value FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk JOIN realm_commits revision ON revision.realm_id=c.realm_id AND revision.stream_ref=c.stream_ref JOIN canonical_events writer ON writer.pk=revision.event_pk WHERE e.state='committed' AND e.kind IN ('ak.mls.genesis','ak.mls.commit') AND e.envelope->>'event_id'=$1 AND revision.commit_id=$2 AND revision.stream_position=$3 AND c.stream_position<=revision.stream_position AND c.realm_id=$4 AND e.envelope->'scope_ref'=$5 AND writer.state='committed' AND writer.kind IN ('ak.mls.genesis','ak.mls.commit','ak.member.state','ak.invite.accept','ak.realm_invite_link.accept','ak.circle.member.state') AND writer.envelope->'scope_ref'=$5")
+    let original = sql_query("SELECT e.envelope AS value FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk JOIN realm_commits revision ON revision.realm_id=c.realm_id AND revision.stream_ref=c.stream_ref JOIN canonical_events writer ON writer.pk=revision.event_pk WHERE e.state='committed' AND e.kind IN ('ak.mls.genesis','ak.mls.commit') AND e.envelope->>'event_id'=$1 AND revision.commit_id=$2 AND revision.stream_position=$3 AND c.stream_position<=revision.stream_position AND c.realm_id=$4 AND e.envelope->'scope_ref'=$5 AND writer.state='committed' AND writer.kind IN ('ak.mls.genesis','ak.mls.commit','ak.member.state','ak.invite.accept','ak.realm_invite_link.accept') AND writer.envelope->'scope_ref'=$5")
         .bind::<Text,_>(group.value.current_mls_commit_event_ref.as_str()).bind::<Text,_>(group.current_commit_id.as_str())
         .bind::<BigInt,_>(i64::try_from(group.current_stream_position).map_err(PersistenceError::database)?)
         .bind::<Text,_>(scope.realm_id().as_str()).bind::<Jsonb,_>(json!(scope))

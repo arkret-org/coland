@@ -245,13 +245,12 @@ pub(super) async fn get_read_cursors(
 }
 
 fn validate_read_scope(scope: &ReadCursorScope) -> Result<(), AppError> {
-    // A read cursor supports only the realm/circle/space/strand/thread subset of
+    // A read cursor supports only the realm/space/strand/thread subset of
     // the shared read-scope discriminator family (read-cursor.schema.json §2.2).
-    // view/message/morph are receipt-only and MUST be rejected here so Circle and
-    // Space read isolation can be expressed without admitting receipt-only kinds.
+    // The view/message/morph kinds belong only to receipts.
     if !scope.kind.valid_for_read_cursor() {
         return Err(AppError::param_invalid(
-            "read_scope.kind must be one of realm/circle/space/strand/thread for a read cursor",
+            "read_scope.kind must be one of realm/space/strand/thread for a read cursor",
         ));
     }
     match &scope.kind {
@@ -293,14 +292,13 @@ fn validate_read_scope(scope: &ReadCursorScope) -> Result<(), AppError> {
 
 fn validate_scope_ref(kind: &ReadScopeKind, object_ref: &str) -> Result<(), AppError> {
     let expected_prefix = match kind {
-        ReadScopeKind::Circle => "ak:circle:",
         ReadScopeKind::Space => "ak:space:",
         ReadScopeKind::Strand => "ak:strand:",
         ReadScopeKind::Thread => "ak:message:",
         ReadScopeKind::Realm => return Ok(()),
         _ => {
             return Err(AppError::param_invalid(
-                "read_scope.kind must be one of realm/circle/space/strand/thread for a read cursor",
+                "read_scope.kind must be one of realm/space/strand/thread for a read cursor",
             ));
         }
     };

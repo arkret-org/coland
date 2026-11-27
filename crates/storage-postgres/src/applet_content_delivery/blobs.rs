@@ -133,28 +133,7 @@ pub(super) async fn prepare(
         if !context.cut.actor_is_joined() {
             return Err(refused("native Blob uploader is not a Realm member"));
         }
-        if let ScopeRef::Circle {
-            realm_id,
-            circle_id,
-        } = &endpoint.effective_scope
-        {
-            let basis =
-                crate::circle_current_states::locked_circle_basis(conn, realm_id, circle_id)
-                    .await?;
-            if basis["value"]["state"] != "active"
-                || !crate::circle_current_states::effective_member_in_connection(
-                    conn,
-                    realm_id,
-                    circle_id,
-                    &endpoint.authority.actor_id,
-                )
-                .await?
-            {
-                return Err(refused(
-                    "native Blob upload target has no active Circle membership",
-                ));
-            }
-        }
+
         let mut operation = scope_operation(&context);
         operation.action = action;
         return Ok(ReadProof {

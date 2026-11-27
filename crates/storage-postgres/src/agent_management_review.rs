@@ -426,7 +426,6 @@ async fn pins(
         crate::policy_current_states::read_scoped_agent_management_policies_in_connection(
             conn,
             &event.realm_id,
-            None,
         )
         .await?;
     let required = requirements(
@@ -473,13 +472,6 @@ fn management_resource(scope: &ScopeRef) -> PersistenceResult<arkret_wire::WireR
         ScopeRef::Realm { realm_id } => {
             Ok(arkret_wire::WireResourceSelector::realm(realm_id.clone()))
         }
-        ScopeRef::Circle {
-            realm_id,
-            circle_id,
-        } => Ok(arkret_wire::WireResourceSelector::circle(
-            realm_id.clone(),
-            circle_id.clone(),
-        )),
         _ => Err(hidden()),
     }
 }

@@ -179,7 +179,7 @@ ordering is `timeline_order.rs` and the `realm_timeline_order` table above.
   `crates/domain/src/reducer.rs` projects `StreamRow` only;
   `crates/storage/src/authority_commit.rs::AuthorityCommitTransaction::validate`
   rejects a commit whose stream disagrees with the Event scope.
-- [x] Realm, Circle, and Sidecar each use an independent `CommitStreamRef`.
+- [x] Realm and Sidecar each use an independent `CommitStreamRef`.
   `realm_commits.stream_key` is the serialized `CommitStreamRef`, and
   `realm_commits_position_key UNIQUE (stream_key, stream_position)` makes a
   global position unrepresentable
@@ -240,7 +240,7 @@ peer-merge graph.
   `apply_invites.rs` and `apply_history_access.rs` are wired and compile. Join
   bootstrap itself is still missing its assembler (see the unchecked invariant
   above).
-- [~] Circles, Sidecars, Spaces, Strands, Morphs, and applet integration.
+- [~] Sidecars, Spaces, Strands, Morphs, and applet integration.
   `crates/domain/src/reducer/apply_objects/` is wired and compiles. The Sidecar
   projection no longer carries an encryption profile; a Sidecar scope activates
   RFC 9420 through its own accepted `ak.mls.genesis`.

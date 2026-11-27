@@ -928,41 +928,6 @@ diesel::table! {
 }
 
 diesel::table! {
-    projection_circle_members (pk) {
-        pk -> Int8,
-        circle_pk -> Int8,
-        actor_id -> Text,
-        state -> Text,
-        invited_at -> Nullable<Timestamptz>,
-        joined_at -> Timestamptz,
-        updated_at -> Timestamptz,
-    }
-}
-
-diesel::table! {
-    projection_circles (pk) {
-        pk -> Int8,
-        id -> Bytea,
-        realm_id -> Text,
-        profile_ref -> Nullable<Text>,
-        title -> Text,
-        summary -> Nullable<Text>,
-        display -> Jsonb,
-        directory_visibility -> Text,
-        join_rule -> Text,
-        history_access -> Text,
-        encryption_profile -> Text,
-        mls_group_ref -> Nullable<Text>,
-        state -> Text,
-        state_changed_at -> Nullable<Timestamptz>,
-        created_by -> Jsonb,
-        updated_by -> Nullable<Jsonb>,
-        created_at -> Timestamptz,
-        updated_at -> Nullable<Timestamptz>,
-    }
-}
-
-diesel::table! {
     projection_events (pk) {
         pk -> Int8,
         event_pk -> Int8,
@@ -997,7 +962,6 @@ diesel::table! {
         versions -> Jsonb,
         content -> Nullable<Jsonb>,
         encrypted_content -> Nullable<Jsonb>,
-        scope_circle_id -> Nullable<Bytea>,
         created_at -> Timestamptz,
         updated_at -> Nullable<Timestamptz>,
     }
@@ -1395,7 +1359,6 @@ diesel::joinable!(canonical_events -> canonical_realms (realm_pk));
 diesel::joinable!(projection_events -> canonical_realms (realm_pk));
 diesel::joinable!(event_federation_outbox -> federation_outbox (outbox_id));
 diesel::joinable!(account_status_propagation_targets -> account_status_propagations (account_status_record_id));
-diesel::joinable!(projection_circle_members -> projection_circles (circle_pk));
 diesel::allow_tables_to_appear_in_same_query!(
     agent_recipient_delivery_ack_tokens,
     account_status_affected_services,
@@ -1460,8 +1423,6 @@ diesel::allow_tables_to_appear_in_same_query!(
     principal_resolution_events,
     principal_resolutions,
     policy_current_states,
-    projection_circle_members,
-    projection_circles,
     projection_events,
     projection_morphs,
     push_devices,

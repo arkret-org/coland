@@ -118,7 +118,6 @@ pub(crate) fn require_session_content_ceiling(
 pub(crate) async fn read_controller_in_connection(
     conn: &mut diesel_async::AsyncPgConnection,
     realm: &RealmId,
-    circle: Option<&arkret_wire::CircleId>,
     actor: &arkret_wire::ActorId,
 ) -> PersistenceResult<Option<arkret_wire::ActorId>> {
     if !crate::committed_disclosure::ordinary_agent_read_ceiling(
@@ -137,7 +136,6 @@ pub(crate) async fn read_controller_in_connection(
     require_member_event_read_in_connection(
         conn,
         realm,
-        circle,
         controller
             .as_account_id()
             .ok_or_else(|| unavailable("controller Account is missing"))?,
@@ -155,14 +153,13 @@ pub(crate) async fn read_controller_in_connection(
 pub(crate) async fn require_member_event_read_in_connection(
     conn: &mut diesel_async::AsyncPgConnection,
     realm: &RealmId,
-    circle: Option<&arkret_wire::CircleId>,
     controller: &AccountId,
     agent: &AccountId,
     at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<()> {
     let policies =
         crate::policy_current_states::read_scoped_agent_management_policy_snapshot_in_connection(
-            conn, realm, circle,
+            conn, realm,
         )
         .await?;
     require_member_event_read(&policies, realm, controller, agent, at)
@@ -334,8 +331,6 @@ pub(crate) fn content_capability_targets(
             target = Selector::strand(realm.clone(), id);
         } else if let Ok(id) = reference.parse::<arkret_wire::SpaceId>() {
             target = Selector::space(realm.clone(), id);
-        } else if let Ok(id) = reference.parse::<arkret_wire::CircleId>() {
-            target = Selector::circle(realm.clone(), id);
         } else if let Ok(id) = reference.parse::<arkret_wire::MessageId>() {
             target.kind = Kind::Message;
             target.message_id = Some(id);
@@ -408,7 +403,6 @@ pub(crate) fn selector_content_resources(
     for reference in [
         target.message_id.as_ref().map(ToString::to_string),
         target.event_id.as_ref().map(ToString::to_string),
-        target.circle_id.as_ref().map(ToString::to_string),
         target.relation_id.as_ref().map(ToString::to_string),
         target.view_id.as_ref().map(ToString::to_string),
         target.morph_id.as_ref().map(ToString::to_string),
@@ -435,7 +429,6 @@ pub(crate) fn selector_content_resources(
 pub(crate) async fn require_content_snapshot_in_connection(
     conn: &mut diesel_async::AsyncPgConnection,
     realm: &RealmId,
-    circle: Option<&arkret_wire::CircleId>,
     controller: &AccountId,
     agent: &AccountId,
     operation: AgentPolicyOperation,
@@ -445,7 +438,7 @@ pub(crate) async fn require_content_snapshot_in_connection(
 ) -> PersistenceResult<()> {
     let policies =
         crate::policy_current_states::read_scoped_agent_management_policy_snapshot_in_connection(
-            conn, realm, circle,
+            conn, realm,
         )
         .await?;
     require_content_policy(
@@ -505,40 +498,13 @@ pub(crate) async fn require_join_in_connection(
 ) -> PersistenceResult<()> {
     let policies =
         crate::policy_current_states::read_scoped_agent_management_policies_in_connection(
-            conn, realm, None,
+            conn, realm,
         )
         .await?;
     qualify_review_intent(
         require_join(&policies, realm, controller, agent, at),
         event,
         review,
-    )
-}
-
-pub(crate) async fn require_circle_join_in_connection(
-    conn: &mut diesel_async::AsyncPgConnection,
-    realm: &RealmId,
-    circle: &arkret_wire::CircleId,
-    controller: &AccountId,
-    agent: &AccountId,
-    at: chrono::DateTime<chrono::Utc>,
-) -> PersistenceResult<()> {
-    let policies =
-        crate::policy_current_states::read_scoped_agent_management_policies_in_connection(
-            conn,
-            realm,
-            Some(circle),
-        )
-        .await?;
-    // There is no Circle review carrier. A parent Realm review requirement
-    // cannot be consumed by an unrelated Circle membership candidate.
-    require_realm_intent(
-        &policies,
-        realm,
-        controller,
-        agent,
-        at,
-        AgentPolicyOperation::Join,
     )
 }
 
@@ -575,7 +541,7 @@ pub(crate) fn require_publish_in_connection<'a>(
     Box::pin(async move {
         let policies =
             crate::policy_current_states::read_scoped_agent_management_policies_in_connection(
-                conn, realm, None,
+                conn, realm,
             )
             .await?;
         qualify_review_intent(
@@ -711,25 +677,6 @@ pub(crate) async fn require_authorization_in_connection(
             conn, realm,
         )
         .await?;
-    let mut resolved = Vec::new();
-    let need_circle_scope = domains.iter().any(|(policy, source)| {
-        matches!(source, arkret_wire::CommitStreamRef::Circle { .. })
-            && !policy.not_before.is_some_and(|start| at < start)
-            && !policy.expires_at.is_some_and(|end| at >= end)
-            && (policy.default_effect != PolicyEffect::Allow
-                || policy.rules.iter().any(|rule| {
-                    possibly_applicable_rule(
-                        rule,
-                        controller,
-                        agent,
-                        &[AgentPolicyOperation::Authorize],
-                    ) && rule
-                        .actions
-                        .as_ref()
-                        .is_none_or(|named| actions.iter().any(|action| named.contains(action)))
-                        && rule.effect != PolicyEffect::Allow
-                }))
-    });
     // Validate the complete accepted set before excluding an unrelated carrier.
     let all = domains
         .iter()
@@ -758,77 +705,20 @@ pub(crate) async fn require_authorization_in_connection(
         )
         .map_err(unavailable)?;
     }
-    for resource in resources {
-        let scope = if need_circle_scope {
-            crate::policy_current_states::authorization_object_scope_in_connection(
-                conn, realm, resource,
-            )
-            .await?
-        } else {
-            None
-        };
-        if let Some(arkret_wire::ScopeRef::Circle { circle_id, .. }) = &scope {
-            if resource
-                .circle_id
-                .as_ref()
-                .is_some_and(|claimed| claimed != circle_id)
-            {
-                return Err(unavailable(
-                    "Agent authorization Circle differs from its accepted object",
-                ));
-            }
-        } else if matches!(scope, Some(arkret_wire::ScopeRef::Realm { .. }))
-            && resource.circle_id.is_some()
-        {
-            return Err(unavailable(
-                "Agent authorization claims Circle for a Realm object",
-            ));
-        }
-        resolved.push((resource.clone(), scope));
-    }
     for (policy, source) in domains {
-        let selected = resolved
-            .iter()
-            .filter(|(resource, scope)| match &source {
-                arkret_wire::CommitStreamRef::Realm { realm_id } => realm_id == realm,
-                arkret_wire::CommitStreamRef::Circle {
-                    realm_id,
-                    circle_id,
-                } => {
-                    realm_id == realm
-                        && match scope {
-                            Some(arkret_wire::ScopeRef::Realm { .. }) => false,
-                            Some(arkret_wire::ScopeRef::Circle {
-                                circle_id: actual, ..
-                            }) => actual == circle_id,
-                            Some(_) => true,
-                            None => resource
-                                .circle_id
-                                .as_ref()
-                                .is_none_or(|actual| actual == circle_id),
-                        }
-                }
-                _ => true,
-            })
-            .map(|(resource, _)| resource.clone())
-            .collect::<Vec<_>>();
-        if !matches!(
-            source,
-            arkret_wire::CommitStreamRef::Realm { .. }
-                | arkret_wire::CommitStreamRef::Circle { .. }
-        ) {
+        if !matches!(source, arkret_wire::CommitStreamRef::Realm { ref realm_id } if realm_id == realm) {
             return Err(unavailable(
                 "Agent authorization governance carrier is unavailable",
             ));
         }
-        if !selected.is_empty() {
+        if !resources.is_empty() {
             require_authorization(
                 std::slice::from_ref(&policy),
                 realm,
                 controller,
                 agent,
                 actions,
-                &selected,
+                resources,
                 at,
             )?;
         }
@@ -996,7 +886,6 @@ fn management_selector_coverage(
         PolicyResourceKind::Object => match grant.kind {
             Kind::Strand => grant.strand_id.as_ref().map(ToString::to_string),
             Kind::Space => grant.space_id.as_ref().map(ToString::to_string),
-            Kind::Circle => grant.circle_id.as_ref().map(ToString::to_string),
             Kind::Message => grant.message_id.as_ref().map(ToString::to_string),
             Kind::Morph => grant.morph_id.as_ref().map(ToString::to_string),
             Kind::Relation => grant.relation_id.as_ref().map(ToString::to_string),
@@ -1035,7 +924,6 @@ fn management_selector_coverage(
         || matches!(
             grant.kind,
             Kind::Space
-                | Kind::Circle
                 | Kind::Strand
                 | Kind::Message
                 | Kind::Morph
@@ -1178,27 +1066,10 @@ pub(crate) async fn executable_actions_in_connection<'a>(
         )
         .await?;
     }
-    let fact_circle = operation
-        .facts
-        .circle_id
-        .as_ref()
-        .map(|id| id.parse::<arkret_wire::CircleId>())
-        .transpose()
-        .map_err(unavailable)?;
-    if operation
-        .target
-        .circle_id
-        .as_ref()
-        .zip(fact_circle.as_ref())
-        .is_some_and(|(target, fact)| target != fact)
-    {
-        return Err(unavailable("Agent management Circle facts conflict"));
-    }
     let policies =
         crate::policy_current_states::read_scoped_agent_management_policies_in_connection(
             conn,
             realm,
-            operation.target.circle_id.as_ref().or(fact_circle.as_ref()),
         )
         .await?;
     executable_actions(&policies, realm, controller, agent, operation, event)
@@ -1215,18 +1086,7 @@ fn require_execution_event_scope(
     {
         return Err(unavailable("Agent execution differs from its signed scope"));
     }
-    if let arkret_wire::ScopeRef::Circle { circle_id, .. } = &event.scope_ref
-        && (operation
-            .target
-            .circle_id
-            .as_ref()
-            .is_some_and(|target| target != circle_id)
-            || operation.facts.circle_id.as_deref() != Some(circle_id.as_str()))
-    {
-        return Err(unavailable(
-            "Agent execution Circle differs from its signed scope",
-        ));
-    }
+
     Ok(())
 }
 
@@ -1447,8 +1307,7 @@ pub(crate) fn require_native_message_reply_policy(
                             || (resource.kind == PolicyResourceKind::Object
                                 && resource.resource_ref.as_deref().is_some_and(|id| {
                                     Some(id) != target.strand_id.as_ref().map(|id| id.as_str())
-                                        && Some(id)
-                                            != target.circle_id.as_ref().map(|id| id.as_str())
+
                                 }))
                     })
                 })
@@ -1783,7 +1642,6 @@ mod key_scope_content_tests {
         let suffix = "AZ6GqZWWvnQ2KFwbBD-MenomzWNz-31MUAuKzBXIP0zv";
         for (kind, field, reference) in [
             ("space", "space_id", format!("ak:space:{suffix}")),
-            ("circle", "circle_id", format!("ak:circle:{suffix}")),
             ("strand", "strand_id", STRAND.into()),
             ("message", "message_id", MESSAGE.into()),
             ("morph", "morph_id", format!("ak:morph:{suffix}")),

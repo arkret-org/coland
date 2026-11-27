@@ -58,30 +58,6 @@ pub(crate) fn action(event: &Event) -> PersistenceResult<CapabilityActionId> {
     {
         return Ok(CapabilityActionId::AppletPublish);
     }
-    if event.kind == EventKind::CircleMemberState && event.executed_by.is_none() {
-        let payload: arkret_models_collaboration::events_payloads::circle::CircleMemberStatePayload =
-            serde_json::from_value(json!(&event.payload))
-                .map_err(|e| PersistenceError::SchemaViolation(e.to_string()))?;
-        if payload.member_id != event.actor_id
-            || !matches!(&event.scope_ref, ScopeRef::Circle {realm_id,circle_id}
-                if realm_id == &event.realm_id && circle_id == &payload.circle_id)
-        {
-            return Err(denied(
-                "native Circle membership must retain its own Account and actual Circle",
-            ));
-        }
-        return match payload.membership {
-            arkret_models_collaboration::governance::circle::CircleMembership::Join => {
-                Ok(CapabilityActionId::AppletJoin)
-            }
-            arkret_models_collaboration::governance::circle::CircleMembership::Leave => {
-                Ok(CapabilityActionId::CircleMemberAdd)
-            }
-            _ => Err(denied(
-                "native Circle membership has no implemented self transition",
-            )),
-        };
-    }
     if event.kind != EventKind::MemberState || event.executed_by.is_some() {
         return Err(denied("native Event has no implemented business consumer"));
     }
@@ -107,12 +83,8 @@ pub(crate) fn action(event: &Event) -> PersistenceResult<CapabilityActionId> {
 }
 
 pub(crate) fn device_actions(event: &Event) -> PersistenceResult<Vec<CapabilityActionId>> {
-    let actual = action(event)?;
-    let mut actions = vec![actual];
-    if event.kind == EventKind::CircleMemberState && actual == CapabilityActionId::AppletJoin {
-        actions.push(CapabilityActionId::CircleMemberAdd);
-    }
-    Ok(actions)
+    Ok(vec![action(event)?])
+
 }
 
 pub(crate) async fn installation(
@@ -125,10 +97,7 @@ pub(crate) async fn installation(
     let actual_action = action(event)?;
     let encrypted=sql_query("SELECT to_jsonb(EXISTS(SELECT 1 FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk WHERE e.state='committed' AND e.kind='ak.mls.genesis' AND c.realm_id=$1 AND e.envelope->'scope_ref'=$2)) AS value")
         .bind::<Text,_>(event.realm_id.as_str()).bind::<Jsonb,_>(json!(event.scope_ref)).get_result::<JsonRow>(&mut *conn).await.map_err(PersistenceError::database)?;
-    let mls_join = matches!(
-        event.kind,
-        EventKind::MemberState | EventKind::CircleMemberState
-    ) && actual_action == CapabilityActionId::AppletJoin
+    let mls_join = event.kind == EventKind::MemberState && actual_action == CapabilityActionId::AppletJoin
         && encrypted.value.as_bool() != Some(false);
 
     if event.actor_id != authority.actor_id
@@ -174,7 +143,7 @@ pub(crate) async fn installation_for_device(
     at: chrono::DateTime<chrono::Utc>,
     writer: bool,
 ) -> PersistenceResult<(arkret_models_integration::AppletRegistrationPayload, Value)> {
-    if !matches!(scope, ScopeRef::Realm { .. } | ScopeRef::Circle { .. })
+    if !matches!(scope, ScopeRef::Realm { .. })
         || !authority.scopes.permits(scope, actions)
     {
         return Err(denied("native resource exceeds its original Device pair"));
@@ -195,7 +164,7 @@ pub(crate) async fn installation_for_keypackage_publication(
     at: chrono::DateTime<chrono::Utc>,
     writer: bool,
 ) -> PersistenceResult<(arkret_models_integration::AppletRegistrationPayload, Value)> {
-    if !matches!(scope, ScopeRef::Realm { .. } | ScopeRef::Circle { .. })
+    if !matches!(scope, ScopeRef::Realm { .. })
         || !authority.scopes.contains_scope(scope)
     {
         return Err(denied(
@@ -428,20 +397,10 @@ pub(crate) async fn select_management(
 )> {
     let operation = match event.kind {
         EventKind::MemberState => AppletPolicyOperation::Join,
-        EventKind::CircleMemberState if action(event)? == CapabilityActionId::AppletJoin => {
-            AppletPolicyOperation::Join
-        }
         EventKind::MessageCreate
         | EventKind::MessageRedact
-        | EventKind::StrandCreate
-        | EventKind::CircleMemberState
-        | EventKind::MlsGenesis
-        | EventKind::MlsCommit => AppletPolicyOperation::Execute,
+        | EventKind::StrandCreate | EventKind::MlsGenesis | EventKind::MlsCommit => AppletPolicyOperation::Execute,
         _ => AppletPolicyOperation::Publish,
-    };
-    let circle = match &event.scope_ref {
-        ScopeRef::Circle { circle_id, .. } => Some(circle_id),
-        _ => None,
     };
     let service = ActorId::service(registration.service_id.clone());
     // A complete authoritative read is mandatory even when no Policy exists.
@@ -449,17 +408,9 @@ pub(crate) async fn select_management(
         crate::policy_current_states::read_scoped_applet_management_policies_in_connection(
             conn,
             &event.realm_id,
-            circle,
         )
         .await?;
-    let mut resources = crate::agent_management_admission::event_content_resources(event)?;
-    if let Some(circle) = circle {
-        resources.push(PolicyResourceSelector {
-            kind: PolicyResourceKind::Object,
-            realm_id: Some(event.realm_id.clone()),
-            resource_ref: Some(circle.to_string()),
-        });
-    }
+    let resources = crate::agent_management_admission::event_content_resources(event)?;
     let decision = arkret_policy::applet_management::select_applet_management(
         Some(&policies),
         &arkret_policy::applet_management::AppletManagementContext {
@@ -498,7 +449,6 @@ pub(crate) fn business_action(event: &Event) -> PersistenceResult<CapabilityActi
         EventKind::MessageCreate => Ok(CapabilityActionId::MessageCreate),
         EventKind::MessageRedact => Ok(CapabilityActionId::MessageRedact),
         EventKind::StrandCreate => Ok(CapabilityActionId::StrandCreate),
-        EventKind::CircleMemberState => Ok(CapabilityActionId::CircleMemberAdd),
         EventKind::MlsGenesis => Ok(CapabilityActionId::MlsGenesis),
         EventKind::MlsCommit => Ok(CapabilityActionId::MlsCommit),
         _ => Err(denied("native business action has no domain consumer")),

@@ -20,7 +20,7 @@ use arkret_wire::{EventEffectOwnership, EventKind, EventWireScope};
 use serde_json::Value;
 
 use super::{
-    CircleLifecycleState, ObjectLifecycleTransition, ProjectionEffect, ProjectionState,
+    ObjectLifecycleTransition, ProjectionEffect, ProjectionState,
     RealmLinkState, SpaceContainerLifecycleTransition,
 };
 use crate::hlc::ServerHlc;
@@ -491,49 +491,6 @@ fn apply_morph_restore_dispatch(
 ) -> ProjectionEffect {
     s.apply_morph_lifecycle(op, op.created_at, ObjectLifecycleTransition::Restore)
 }
-// AKP-0007 — Circle dispatch wrappers.
-fn apply_circle_create_dispatch(
-    s: &mut ProjectionState,
-    op: &Operation,
-    _hlc: &ServerHlc,
-) -> ProjectionEffect {
-    s.apply_circle_create(op, op.created_at)
-}
-fn apply_circle_update_dispatch(
-    s: &mut ProjectionState,
-    op: &Operation,
-    _hlc: &ServerHlc,
-) -> ProjectionEffect {
-    s.apply_circle_update(op, op.created_at)
-}
-fn apply_circle_archive_dispatch(
-    s: &mut ProjectionState,
-    op: &Operation,
-    _hlc: &ServerHlc,
-) -> ProjectionEffect {
-    s.apply_circle_lifecycle(op, op.created_at, CircleLifecycleState::Archived)
-}
-fn apply_circle_restore_dispatch(
-    s: &mut ProjectionState,
-    op: &Operation,
-    _hlc: &ServerHlc,
-) -> ProjectionEffect {
-    s.apply_circle_lifecycle(op, op.created_at, CircleLifecycleState::Active)
-}
-fn apply_circle_tombstone_dispatch(
-    s: &mut ProjectionState,
-    op: &Operation,
-    _hlc: &ServerHlc,
-) -> ProjectionEffect {
-    s.apply_circle_lifecycle(op, op.created_at, CircleLifecycleState::Tombstoned)
-}
-fn apply_circle_member_state_dispatch(
-    s: &mut ProjectionState,
-    op: &Operation,
-    _hlc: &ServerHlc,
-) -> ProjectionEffect {
-    s.apply_circle_member_state(op, projection_received_at(op))
-}
 
 fn apply_realm_history_access_dispatch(
     s: &mut ProjectionState,
@@ -543,13 +500,6 @@ fn apply_realm_history_access_dispatch(
     s.apply_realm_history_access(op)
 }
 
-fn apply_circle_history_access_dispatch(
-    s: &mut ProjectionState,
-    op: &Operation,
-    _hlc: &ServerHlc,
-) -> ProjectionEffect {
-    s.apply_circle_history_access(op)
-}
 
 fn apply_sidecar_create_dispatch(
     s: &mut ProjectionState,

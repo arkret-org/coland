@@ -1057,9 +1057,9 @@ async fn realm_mls_material_peer_uses_joined_target_cut_not_prejoin_genesis_cut(
                 wrong.effective_scope = realm_scope(&wrong.realm_id);
             }
             "scope" => {
-                wrong.effective_scope = arkret_wire::ScopeRef::Circle {
+                wrong.effective_scope = arkret_wire::ScopeRef::Sidecar {
                     realm_id: realm_id.clone(),
-                    circle_id: arkret_wire::CircleId::from_event_id(
+                    sidecar_id: arkret_wire::SidecarId::from_event_id(
                         &wrong_genesis.group_state_event_id,
                     ),
                 }

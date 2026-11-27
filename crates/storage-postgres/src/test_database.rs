@@ -277,8 +277,6 @@ async fn reset(connection: &mut AsyncPgConnection) {
         DROP FUNCTION IF EXISTS public.fail_native_profile_source();
         DROP TRIGGER IF EXISTS fail_native_message ON public.message_revision_current_states;
         DROP FUNCTION IF EXISTS public.fail_native_message();
-        DROP TRIGGER IF EXISTS fail_native_circle ON public.circle_member_state_current_states;
-        DROP FUNCTION IF EXISTS public.fail_native_circle();
         DROP TRIGGER IF EXISTS fail_native_keypackage_insert ON public.mls_key_packages;
         DROP FUNCTION IF EXISTS public.fail_native_keypackage_insert();
         DROP TRIGGER IF EXISTS fail_native_keypackage_claim ON public.peer_keypackage_claims;

@@ -2,7 +2,7 @@
 //!
 //! Supported create carriers are plaintext or MLS ciphertext Messages under
 //! the same-cut send gate, in an active discussion Strand of the exact Realm
-//! or Circle source stream, by a joined author the same-cut evaluator admits
+//! source stream, by a joined author the same-cut evaluator admits
 //! for `ak.message.create`. Other Message forms remain closed.
 //!
 //! `ak.message.revise` replaces the chain's current carrier with the same text
@@ -325,10 +325,7 @@ async fn commit_message_create_current_state_in_connection_inner(
             forwarded,
         )
         .await?;
-    if matches!(event.scope_ref, arkret_wire::ScopeRef::Circle { .. }) {
-        crate::circle_current_states::require_active_author_in_connection(conn, event, commit)
-            .await?;
-    }
+
     // A Direct Conversation Message names its profile authority source,
     // which the profile table already decided at this cut.
     if !cut.is_direct_conversation()
@@ -472,8 +469,20 @@ async fn admit_sidecar_message(
             .actor_id
             .as_account_id()
             .ok_or_else(|| conflict("private Agent account required"))?;
-        let proof = event.producer_proof.as_ref().ok_or_else(|| conflict("signed private reply required"))?;
-        if !crate::sidecar_access::can_reply_in_connection(conn, &event.realm_id, sidecar_id, agent, &proof.verification_method, None).await? {
+        let proof = event
+            .producer_proof
+            .as_ref()
+            .ok_or_else(|| conflict("signed private reply required"))?;
+        if !crate::sidecar_access::can_reply_in_connection(
+            conn,
+            &event.realm_id,
+            sidecar_id,
+            agent,
+            &proof.verification_method,
+            None,
+        )
+        .await?
+        {
             return Err(conflict("private reply permission is unavailable"));
         }
     }
@@ -573,7 +582,7 @@ async fn require_active_strand_track(
            AND c.stream_ref=$4 \
            AND e.state='committed' AND e.kind IN ('ak.strand.create','ak.strand.update','ak.strand.archive','ak.strand.restore','ak.strand.stage.set') \
            AND created.kind='ak.strand.create' AND created.state='committed' \
-           AND creation.stream_ref=c.stream_ref \
+           AND created.envelope #>> '{payload,object,scope_circle_id}' IS NULL AND creation.stream_ref=c.stream_ref \
            AND creation.stream_position<=c.stream_position \
          FOR SHARE OF s",
     )
@@ -596,10 +605,6 @@ async fn require_active_strand_track(
             "Message target Strand identity has no creating Event",
         ));
     }
-    let expected_circle = match scope {
-        arkret_wire::ScopeRef::Circle { circle_id, .. } => Some(circle_id.as_str()),
-        _ => None,
-    };
     match strand.value.get("state").and_then(Value::as_str) {
         Some("active") => {}
         Some("redacted") => {
@@ -615,7 +620,11 @@ async fn require_active_strand_track(
             ));
         }
     }
-    if strand.value.get("scope_circle_id").and_then(Value::as_str) != expected_circle {
+    if strand
+        .value
+        .get("scope_circle_id")
+        .is_some_and(|legacy| !legacy.is_null())
+    {
         return Err(conflict("Message target Strand is outside the Realm scope"));
     }
     let track = strand
@@ -657,13 +666,6 @@ fn message_scope_stream(
                 realm_id: realm_id.clone(),
             })
         }
-        arkret_wire::ScopeRef::Circle {
-            realm_id,
-            circle_id,
-        } if realm_id == realm => Ok(arkret_wire::CommitStreamRef::Circle {
-            realm_id: realm_id.clone(),
-            circle_id: circle_id.clone(),
-        }),
         arkret_wire::ScopeRef::Sidecar {
             realm_id,
             sidecar_id,
@@ -969,11 +971,6 @@ async fn commit_message_revise_current_state_in_connection_inner(
     if encrypted {
         crate::mls_group_current_states::require_mls_send_gate_in_connection(conn, event).await?;
     } else {
-        if matches!(&event.scope_ref, arkret_wire::ScopeRef::Circle { .. }) {
-            return Err(conflict(
-                "Circle Message revision requires its admitted MLS carrier",
-            ));
-        }
         require_plaintext_message_service(conn, &event.realm_id, commit).await?;
     }
     let replaced = diesel::sql_query(

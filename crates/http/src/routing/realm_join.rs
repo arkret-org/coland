@@ -253,26 +253,6 @@ async fn peer_bootstrap(
             .is_some_and(|payload| {
                 payload.member_id == member && payload.membership == MembershipPayloadState::Join
             }),
-        EventKind::CircleMemberState => {
-            let arkret_wire::ScopeRef::Circle {
-                realm_id,
-                circle_id,
-            } = &event.scope_ref
-            else {
-                return Err(AppError::not_found("Realm join bootstrap not found"));
-            };
-            realm_id == &body.realm_id
-                && event.actor_id == member
-                && event.payload.get("circle_id").and_then(Value::as_str)
-                    == Some(circle_id.as_str())
-                && event.payload.get("membership").and_then(Value::as_str) == Some("join")
-                && event
-                    .payload
-                    .get("member_id")
-                    .and_then(|value| serde_json::from_value::<ActorId>(value.clone()).ok())
-                    .as_ref()
-                    == Some(&member)
-        }
         EventKind::InviteAccept | EventKind::RealmInviteLinkAccept => event.actor_id == member,
         _ => false,
     };

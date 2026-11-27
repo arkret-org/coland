@@ -50,24 +50,6 @@ pub(crate) async fn in_connection(
         }
         let floor = match &stream {
             CommitStreamRef::Realm { .. } => realm_floor.clone(),
-            CommitStreamRef::Circle { circle_id, .. } => {
-                if crate::account_stream_scan::caller_circle_floor_in_connection(
-                    conn, realm, circle_id, caller,
-                )
-                .await?
-                .is_none()
-                {
-                    continue;
-                }
-                match crate::account_stream_scan::replica_circle_floor_in_connection(
-                    conn, realm, circle_id, caller,
-                )
-                .await?
-                {
-                    Ok(floor) => floor,
-                    Err(reason) => return Ok(AccountRealmStreamList::Unproved(reason)),
-                }
-            }
             _ => continue,
         };
         let position = u64::try_from(head.stream_position).map_err(|_| {

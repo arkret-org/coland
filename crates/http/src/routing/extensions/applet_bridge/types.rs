@@ -306,15 +306,6 @@ impl AppletRecord {
         }
         let expected_resource = match &self.effective_scope {
             ScopeRef::Realm { realm_id } => WireResourceSelector::realm(realm_id.clone()),
-            ScopeRef::Circle {
-                realm_id,
-                circle_id,
-            } => {
-                let mut selector =
-                    WireResourceSelector::circle(realm_id.clone(), circle_id.clone());
-                selector.match_scope = Some(ResourceMatchScope::Exact);
-                selector
-            }
             _ => return Err("stored Applet effective scope is unsupported".to_owned()),
         };
         let expected_constraint = GrantConstraint::applet_authority(

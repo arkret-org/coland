@@ -17,9 +17,7 @@
 //! Invite acceptance is decided with its Invite lifecycle by
 //! [`crate::invite_current_states`], which reuses this module's member row
 //! lock and Realm role check. Agent controller joins bind accepted ownership
-//! and the controller's exact joined generation. Circle and Strand scoped
-//! membership and join policies
-//! whose proof gates need a same-cut re-evaluation stay closed.
+//! and the controller's exact joined generation.
 
 use arkret_models_collaboration::governance::membership_invite::{
     MembershipPayload, MembershipPayloadState,
@@ -311,64 +309,6 @@ async fn membership_at_cut(
         .optional()
         .map_err(PersistenceError::database)?
         .map_or_else(|| "leave".to_owned(), |row| row.membership))
-}
-
-#[derive(diesel::QueryableByName)]
-struct MembershipRevisionRow {
-    #[diesel(sql_type = Text)]
-    membership: String,
-    #[diesel(sql_type = Text)]
-    current_commit_id: String,
-    #[diesel(sql_type = diesel::sql_types::BigInt)]
-    current_stream_position: i64,
-}
-
-/// The locked parent Realm `member_state` current of `member` with its exact
-/// typed revision on the Realm stream, under the same lock as
-/// [`locked_membership`]. `None` when the actor has no Realm member row.
-pub(crate) async fn locked_membership_revision(
-    conn: &mut AsyncPgConnection,
-    realm_id: &arkret_wire::RealmId,
-    member: &arkret_wire::ActorId,
-) -> PersistenceResult<Option<(arkret_wire::MembershipState, arkret_wire::CurrentRevision)>> {
-    let member_key = member.to_string();
-    crate::unit_of_work::advisory_lock(
-        conn,
-        format!(
-            "parent-membership:member:{}:{member_key}",
-            realm_id.as_str()
-        ),
-    )
-    .await?;
-    let Some(row) = sql_query(
-        "SELECT m.membership,m.current_commit_id,m.current_stream_position \
-         FROM member_state_current_states m \
-         JOIN realm_commits c ON c.commit_id=m.current_commit_id \
-         WHERE m.realm_id=$1 AND m.member_id=$2 \
-           AND c.realm_id=m.realm_id AND c.stream_position=m.current_stream_position \
-           AND c.stream_ref->>'kind'='realm' AND c.stream_ref->>'realm_id'=m.realm_id \
-         FOR UPDATE OF m",
-    )
-    .bind::<Text, _>(realm_id.as_str())
-    .bind::<Text, _>(&member_key)
-    .get_result::<MembershipRevisionRow>(&mut *conn)
-    .await
-    .optional()
-    .map_err(PersistenceError::database)?
-    else {
-        return Ok(None);
-    };
-    let membership = serde_json::from_value(Value::String(row.membership))
-        .map_err(PersistenceError::database)?;
-    let revision = arkret_wire::CurrentRevision {
-        commit_id: row
-            .current_commit_id
-            .parse()
-            .map_err(PersistenceError::database)?,
-        stream_position: u64::try_from(row.current_stream_position)
-            .map_err(PersistenceError::database)?,
-    };
-    Ok(Some((membership, revision)))
 }
 
 async fn realm_current_value(

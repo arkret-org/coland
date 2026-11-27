@@ -150,7 +150,7 @@ async fn cut_in_connection(
     if let Some(caller) = caller
         && !entries
             .iter()
-            .any(|row| row.parent_membership_revision(realm, caller).is_some())
+            .any(|row| row.active_realm_member_revision(realm, caller).is_some())
     {
         return Ok(None);
     }

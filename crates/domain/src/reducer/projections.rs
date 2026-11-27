@@ -10,7 +10,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use arkret_event_draft::ProjectedEventOperation as Operation;
 use arkret_models_collaboration::events_payloads::ContentBlock;
 use arkret_models_collaboration::objects::profiles::StrandTrack;
-use arkret_models_collaboration::objects::space::ChildScopePolicy;
 use arkret_wire::{AppletId, DidCoreId, EventId, Hash, ObjectStage};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -181,8 +180,7 @@ pub struct SpaceContainerProjection {
     pub kind: String,
     pub title: String,
     pub fields: BTreeMap<String, Value>,
-    pub scope_circle_id: Option<String>,
-    pub child_scope_policy: Option<ChildScopePolicy>,
+    pub child_scope_policy: Option<bool>,
     pub parent_ref: Option<String>,
     pub rank: Option<String>,
     pub state: SpaceContainerLifecycleState,
@@ -279,11 +277,6 @@ pub struct StrandProjection {
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_by: Option<String>,
     pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
-    /// AKP-0007 — the Circle this Strand is scoped to, if any (`ak:circle:…`).
-    /// A message's effective circle-scope is derived from its Strand's
-    /// `scope_circle_id` (spec: `scope_circle_id` is a Strand field, not a
-    /// message field); messages never carry their own scope.
-    pub scope_circle_id: Option<String>,
     /// `schema_refs` — the profile activation axis. Its calendar entry and the
     /// `metadata.fields.calendar` subtree co-occur in both directions.
     pub schema_refs: Vec<String>,
@@ -299,47 +292,8 @@ pub(crate) fn default_strand_tracks() -> BTreeMap<String, StrandTrack> {
     )])
 }
 
-/// AKP-0007 — server-side Circle state cache. Mirrors `projection_circles` +
-/// `projection_circle_members` (see migration
-/// `20260526010000_add_circles`).
-///
-/// `members` is the authoritative active-member set; the wire validator and
-/// the `ak.circle.member.state` handler use it to enforce the
-/// `Circle.members ⊆ Realm.members` invariant
-/// (`circle_member_must_be_realm_member`).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CircleProjection {
-    pub circle_id: String,
-    /// Parent Realm id. Create-locked — a Circle never re-binds to another
-    /// Realm. Spec `circle.schema.json` §`realm_id`.
-    pub realm_id: String,
-    /// Optional create-locked Circle semantic profile discriminator.
-    pub profile_ref: Option<String>,
-    pub title: String,
-    pub summary: Option<String>,
-    pub display: Value,
-    pub directory_visibility: String,
-    pub join_rule: String,
-    pub history_access: String,
-    /// Reducer-derived MLS group binding, installed by this Circle's own accepted
-    /// `ak.mls.genesis`. `None` means the Circle scope is still plaintext; once set, the Circle is
-    /// irreversibly activated as standard RFC 9420 and the wire actor MUST NOT submit this.
-    pub mls_group_ref: Option<String>,
-    pub state: CircleLifecycleState,
-    pub state_changed_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub created_by: String,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub updated_by: Option<String>,
-    pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
-    /// Active Circle members. Maintained by `ak.circle.member.state`
-    /// transitions (`active` -> insert, `removed`/`banned`/`left` ->
-    /// remove). Always a strict subset of the parent Realm's active
-    /// member set.
-    pub members: BTreeSet<String>,
-}
 
-/// First-class Agent Sidecar aggregate. Sidecars are not Circles and
-/// never acquire Circle membership or a hidden Circle/Strand backing object.
+/// Personal Agent Sidecar aggregate owned by the controller’s home Station.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SidecarProjection {
     pub sidecar_id: String,
@@ -364,48 +318,14 @@ pub struct SidecarContextProjection {
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CircleMembershipState {
-    pub circle_id: String,
-    pub member: String,
-    pub state: String,
-    pub invited_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub joined_at: chrono::DateTime<chrono::Utc>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
-}
 
-/// AKP-0007 — Circle lifecycle state. Matches spec `circle.schema.json`
-/// `state` enum (active / archived / tombstoned). Distinct from
-/// [`ObjectLifecycleState`] (which carries the redacted/deleted forms used
-/// by Strand / Morph); Circle has no redaction path because the canonical
-/// terminal action is `ak.circle.tombstone`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum CircleLifecycleState {
-    #[default]
-    Active,
-    Archived,
-    Tombstoned,
-}
 
-impl CircleLifecycleState {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Active => "active",
-            Self::Archived => "archived",
-            Self::Tombstoned => "tombstoned",
-        }
-    }
-}
 
 /// Server-side Morph state cache. Mirrors `projection_morphs` table.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MorphProjection {
     pub morph_id: String,
     pub realm_id: String,
-    /// AKP-0007 - the Circle this Morph is scoped to, if any (`ak:circle:...`).
-    /// Morph updates and lifecycle writes must satisfy the same Circle
-    /// membership conjunct as creates.
-    pub scope_circle_id: Option<String>,
     pub morph_kind: String,
     pub title: Option<String>,
     pub fields: BTreeMap<String, Value>,
@@ -587,7 +507,7 @@ pub struct PinProjection {
 pub struct PollState {
     pub message_event_id: arkret_wire::EventId,
     pub realm_id: arkret_wire::RealmId,
-    pub scope_circle_id: Option<arkret_wire::CircleId>,
+    pub effective_scope: arkret_wire::ScopeRef,
     pub definition: arkret_models_collaboration::events_payloads::PollBlock,
     /// Current selection set of each responder. A poll response is an ordinary
     /// Event on the same commit stream as the poll, so the latest accepted
@@ -604,7 +524,6 @@ pub struct ColandRelationState {
     pub relation_id: String,
     pub realm_id: String,
     pub relation_kind: String,
-    pub scope_circle_id: Option<String>,
     pub from_ref: Option<arkret_models_collaboration::objects::relation::RelationEndpoint>,
     pub to_ref: Option<arkret_models_collaboration::objects::relation::RelationEndpoint>,
     pub rank: Option<String>,

@@ -2,7 +2,7 @@
 //!
 //! Producers do not declare predecessors. Ordering is supplied exclusively by
 //! the current governance Station's [`arkret_wire::RealmCommit`]: the Realm,
-//! each Circle and each Sidecar carry independent linear streams, and this
+//! each Sidecar carry independent linear streams, and this
 //! module never derives order from a producer Event or from a peer-merge
 //! graph. [`CommitStreamProjection`] owns the per-stream succession check;
 //! [`ProjectionState`] folds the accepted [`arkret_wire::CommittedEventFullView`] into the
@@ -27,7 +27,6 @@ mod apply_realm_organization;
 mod apply_realm_policy;
 mod apply_relations;
 mod apply_space_container;
-mod capability_helpers;
 pub mod mls;
 pub mod realm_links;
 // Top-level projection types, free helpers, the dispatch registry, and the
@@ -50,7 +49,6 @@ pub use apply_realm_policy::{
 };
 use arkret_event_draft::ProjectedEventOperation as Operation;
 use arkret_models_collaboration::agent_operations::AgentLifecycleState;
-pub(crate) use capability_helpers::*;
 pub use commit_stream::{CommitStreamEffect, CommitStreamProjection};
 pub(crate) use dispatch::{APPLY_REGISTRY, upsert_realm_link};
 pub use dispatch::{ApplyFn, assert_effect_dispatch_contract, default_apply_registry};
@@ -70,7 +68,7 @@ pub(crate) use policy_validation::*;
 pub use projection_state::ProjectionState;
 pub(crate) use projections::space_container_id_from_payload;
 pub use projections::{
-    AppletProjection, CircleLifecycleState, CircleMembershipState, CircleProjection,
+    AppletProjection,
     ColandMembershipState, ColandRealmState, ColandRelationState, DocumentVersionProjection,
     KeyPackageLifetimeProjection, MessageState, MlsKeyPackageProjection, MorphProjection,
     ObjectLifecycleState, PendingReplayEntry, PinProjection, PollState, ProjectedMessageView,

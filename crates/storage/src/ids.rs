@@ -63,7 +63,7 @@ fn decode_lower_hex_32(value: &str) -> Option<[u8; EVENT_DIGEST_BYTES]> {
 
 /// Recover the 33-byte token behind any Event-derived typed id.
 ///
-/// `kind` is the registry kind, not the prefix: `"circle"`, not `"ak:circle:"`.
+/// `kind` is the registry kind, not the prefix: `"circle"`, not `"ak:strand:"`.
 /// Every Event-derived kind retypes the creating Event's token unchanged, so
 /// one decoder serves all of them and the suite code plus canonical Base64URL
 /// spelling are enforced in a single place.

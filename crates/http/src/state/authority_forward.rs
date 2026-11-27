@@ -1033,22 +1033,6 @@ async fn require_live_forward(state: &AppState, event: &arkret_wire::Event) -> S
     {
         return Ok(());
     }
-    // circle.md section 9.1 permits the member's explicit cleanup of a stale
-    // parent-bound Circle join; governing admission still verifies that cut.
-    if event.kind == arkret_wire::EventKind::CircleMemberState {
-        let payload: arkret_models_collaboration::events_payloads::CircleMemberStatePayload =
-            serde_json::from_value(
-                serde_json::to_value(&event.payload)
-                    .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?,
-            )
-            .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
-        if payload.membership
-            == arkret_models_collaboration::governance::circle::CircleMembership::Leave
-            && payload.member_id == event.actor_id
-        {
-            return Ok(());
-        }
-    }
     let stream =
         arkret_wire::CommitStreamRef::from_scope(&event.scope_ref, Some(event.realm_id.clone()))
             .map_err(wire_refusal)?;

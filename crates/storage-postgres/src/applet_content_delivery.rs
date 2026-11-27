@@ -334,7 +334,7 @@ pub(crate) async fn acquire(
         || &endpoint.authority.governance_service_id != station
         || !matches!(
             endpoint.effective_scope,
-            ScopeRef::Realm { .. } | ScopeRef::Circle { .. }
+            ScopeRef::Realm { .. }
         )
         || input.stream_scans.len() > 1
         || input.keypackage_claims.len() > 1
@@ -749,7 +749,6 @@ async fn operation_context(
         crate::policy_current_states::read_scoped_applet_management_policies_for_delivery(
             conn,
             scope.realm_id(),
-            scope.circle_id(),
         )
         .await?;
     Ok(ReadContext {
@@ -772,33 +771,19 @@ fn scope_resources(scope: &ScopeRef) -> Vec<PolicyResourceSelector> {
         realm_id: Some(scope.realm_id().clone()),
         resource_ref: Some(scope.realm_id().to_string()),
     }];
-    if let ScopeRef::Circle {
-        realm_id,
-        circle_id,
-    } = scope
-    {
-        resources.push(PolicyResourceSelector {
-            kind: PolicyResourceKind::Object,
-            realm_id: Some(realm_id.clone()),
-            resource_ref: Some(circle_id.to_string()),
-        });
-    }
+
     resources
 }
 fn scope_operation(context: &ReadContext) -> ReadOperation {
     let scope = &context.endpoint.effective_scope;
     let target = match scope {
-        ScopeRef::Circle {
-            realm_id,
-            circle_id,
-        } => WireResourceSelector::circle(realm_id.clone(), circle_id.clone()),
         _ => WireResourceSelector::realm(scope.realm_id().clone()),
     };
     ReadOperation {
         action: CapabilityActionId::EventRead,
         targets: vec![target],
         facts: OperationFacts {
-            circle_id: scope.circle_id().map(ToString::to_string),
+
             applet_id: Some(context.registration.applet_id.to_string()),
             registration_epoch: Some(context.registration.registration_epoch.to_string()),
             ..OperationFacts::default()
@@ -910,7 +895,7 @@ fn source_read_proof(
     let mut operations = Vec::new();
     for &action in actions {
         let (target, mut facts) = context.cut.content_scope_facts(source, action)?;
-        facts.circle_id = scope.circle_id().map(ToString::to_string);
+
         facts.applet_id = Some(context.registration.applet_id.to_string());
         facts.registration_epoch = Some(context.registration.registration_epoch.to_string());
         let mut targets = crate::agent_management_admission::content_capability_targets(
@@ -920,16 +905,7 @@ fn source_read_proof(
         if !targets.contains(&target) {
             targets.push(target);
         }
-        if let ScopeRef::Circle {
-            realm_id,
-            circle_id,
-        } = scope
-        {
-            let circle = WireResourceSelector::circle(realm_id.clone(), circle_id.clone());
-            if !targets.contains(&circle) {
-                targets.push(circle);
-            }
-        }
+
         operations.push(ReadOperation {
             action,
             targets,
@@ -974,25 +950,7 @@ pub(crate) async fn mls_scope_read_proof(
     if !context.cut.actor_is_joined() {
         return Err(refused("native MLS reader is not a Realm member"));
     }
-    if let ScopeRef::Circle {
-        realm_id,
-        circle_id,
-    } = &endpoint.effective_scope
-    {
-        let basis =
-            crate::circle_current_states::locked_circle_basis(conn, realm_id, circle_id).await?;
-        if basis["value"]["state"] != "active"
-            || !crate::circle_current_states::effective_member_in_connection(
-                conn,
-                realm_id,
-                circle_id,
-                &endpoint.authority.actor_id.clone(),
-            )
-            .await?
-        {
-            return Err(refused("native MLS reader has no active Circle membership"));
-        }
-    }
+
     let mut proof = stream_proof(context);
     if let Some(strand) = strand {
         let actual = crate::strand_current_states::locked_active_strand_scope(

@@ -79,7 +79,7 @@ pub struct AppletEventProducerGuard {
 pub struct EventCommitRequest {
     pub verified_media_participant: Option<arkret_signatures::media::VerifiedCallParticipant>,
     /// Current-authority transaction that orders the producer Event on its
-    /// Realm, Circle, or Sidecar stream.
+    /// Realm, or Sidecar stream.
     pub authority_commit: crate::AuthorityCommitTransaction,
     /// Current producer authorization rechecked under this same Event/Commit,
     /// projection and CAS transaction for self submissions.
@@ -151,8 +151,8 @@ pub struct AppletIdentityCommit {
 }
 
 /// Stable storage coordinate for one effective Applet installation. The
-/// canonical scope JSON, rather than an ad-hoc realm/circle concatenation,
-/// keeps Realm and Circle installs disjoint and gives every backend the same
+/// canonical scope JSON, rather than an ad-hoc realm concatenation,
+/// keeps installs in different scopes disjoint and gives every backend the same
 /// composite-key derivation.
 pub fn applet_effective_scope_key(scope: &arkret_wire::ScopeRef) -> PersistenceResult<String> {
     arkret_canonical::canonical_sha256(scope).map_err(|error| {

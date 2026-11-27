@@ -284,7 +284,7 @@ pub(crate) async fn retained_project_history_candidate(
         WHERE s.realm_id=$1 AND i.account_id=$2 AND s.snapshot_id=$3
         AND current_device_inventory_station()=$4 AND a.service_id<>$4
         AND s.snapshot_json->>'purpose'='stream_history'
-        AND s.snapshot_json#>>'{history_basis,stream_ref,kind}' IN ('realm','circle')",
+        AND s.snapshot_json#>>'{history_basis,stream_ref,kind}' = 'realm'",
     )
     .bind::<Text, _>(realm.as_str())
     .bind::<Text, _>(account_key(account)?)
@@ -602,11 +602,6 @@ pub(crate) fn require_observed_cut(
                 actor_id: arkret_wire::ActorId::account(basis.account_id.clone()),
             };
             let parent = match &basis.stream_ref {
-                arkret_wire::CommitStreamRef::Circle { circle_id, .. } => {
-                    Some(arkret_wire::CurrentSelector::Circle {
-                        circle_id: circle_id.clone(),
-                    })
-                }
                 arkret_wire::CommitStreamRef::Sidecar { sidecar_id, .. } => {
                     Some(arkret_wire::CurrentSelector::Sidecar {
                         sidecar_id: sidecar_id.clone(),
@@ -623,8 +618,7 @@ pub(crate) fn require_observed_cut(
                 (source_stream_ref == &basis.stream_ref
                     && !matches!(
                         selector,
-                        arkret_wire::CurrentSelector::Circle { .. }
-                            | arkret_wire::CurrentSelector::Sidecar { .. }
+                        arkret_wire::CurrentSelector::Sidecar { .. }
                     ))
                     || (parent.is_some()
                         && (selector == &member || Some(selector) == parent.as_ref()))
@@ -757,8 +751,8 @@ fn require_fresh_sidecar_join(
     let join = current
         .current_state_entries
         .iter()
-        .find_map(|row| row.parent_membership_revision(&snapshot.realm_id, &actor));
-    if join.is_none() || snapshot.parent_membership_revision(&actor) != join {
+        .find_map(|row| row.active_realm_member_revision(&snapshot.realm_id, &actor));
+    if join.is_none() || snapshot.active_realm_member_revision(&actor) != join {
         return Err(undisclosable(
             "fresh Sidecar bootstrap parent join changed during request",
         ));
@@ -1349,9 +1343,6 @@ pub(crate) async fn disclosed_basis_from_snapshot(
             }
             return Ok(Some(basis));
         }
-        CommitStreamRef::Circle { circle_id, .. } => vec![CurrentSelector::Circle {
-            circle_id: circle_id.clone(),
-        }],
         CommitStreamRef::Sidecar { sidecar_id, .. } => vec![CurrentSelector::Sidecar {
             sidecar_id: sidecar_id.clone(),
         }],
@@ -1605,9 +1596,6 @@ async fn stream_history_original(
         actor_id: arkret_wire::ActorId::account(account.clone()),
     };
     let parent = match stream {
-        arkret_wire::CommitStreamRef::Circle { circle_id, .. } => Some(CurrentSelector::Circle {
-            circle_id: circle_id.clone(),
-        }),
         arkret_wire::CommitStreamRef::Sidecar { sidecar_id, .. } => {
             Some(CurrentSelector::Sidecar {
                 sidecar_id: sidecar_id.clone(),
@@ -1627,7 +1615,7 @@ async fn stream_history_original(
             (source_stream_ref == stream
                 && !matches!(
                     selector,
-                    CurrentSelector::Circle { .. } | CurrentSelector::Sidecar { .. }
+                    CurrentSelector::Sidecar { .. }
                 ))
                 || (parent.is_some() && (selector == &member || Some(selector) == parent.as_ref()))
         })
@@ -2376,9 +2364,9 @@ mod tests {
         }];
         for i in 0..65u8 {
             heads.push(CommitStreamHead {
-                stream_ref: CommitStreamRef::Circle {
+                stream_ref: CommitStreamRef::Sidecar {
                     realm_id: realm_id.clone(),
-                    circle_id: arkret_wire::CircleId::from_event_id(&EventId::from_digest(
+                    sidecar_id: arkret_wire::SidecarId::from_event_id(&EventId::from_digest(
                         arkret_canonical::DigestSuite::Sha256,
                         [i; 32],
                     )),
@@ -2394,8 +2382,8 @@ mod tests {
         assert_eq!(default.len(), 64);
         assert!(limited);
         assert!(default.iter().any(|head| head.stream_ref == realm_ref));
-        let mut expected_circles = heads[1..].to_vec();
-        expected_circles
+        let mut expected_sidecars = heads[1..].to_vec();
+        expected_sidecars
             .sort_by_key(|head| arkret_canonical::canonical_json_bytes(&head.stream_ref).unwrap());
         assert_eq!(
             default
@@ -2403,9 +2391,9 @@ mod tests {
                 .filter(|head| head.stream_ref != realm_ref)
                 .cloned()
                 .collect::<Vec<_>>(),
-            expected_circles[..63],
+            expected_sidecars[..63],
         );
-        let omitted = expected_circles[63].stream_ref.clone();
+        let omitted = expected_sidecars[63].stream_ref.clone();
         let (explicit, limited) =
             select_window_heads(&realm_id, &heads, Some(std::slice::from_ref(&omitted))).unwrap();
         assert_eq!(explicit.len(), 1);

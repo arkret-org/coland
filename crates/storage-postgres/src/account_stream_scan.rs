@@ -147,10 +147,6 @@ pub(crate) async fn scan_stream_for_actor_in_connection(
         (CommitStreamRef::Realm { .. }, true) => {
             caller_realm_floor_in_connection(conn, &request.realm_id, &caller_actor).await?
         }
-        (CommitStreamRef::Circle { circle_id, .. }, true) => {
-            caller_circle_floor_in_connection(conn, &request.realm_id, circle_id, &caller_actor)
-                .await?
-        }
         (CommitStreamRef::Sidecar { sidecar_id, .. }, true) => {
             crate::sidecar_authority_cut::public_material_floor_in_connection(
                 conn,
@@ -166,19 +162,6 @@ pub(crate) async fn scan_stream_for_actor_in_connection(
                 Err(reason) => return Ok(AccountStreamScan::Unproved(reason)),
             }
         }
-        (CommitStreamRef::Circle { circle_id, .. }, false) => {
-            match replica_circle_floor_in_connection(
-                conn,
-                &request.realm_id,
-                circle_id,
-                &caller_actor,
-            )
-            .await?
-            {
-                Ok(floor) => Some(floor),
-                Err(reason) => return Ok(AccountStreamScan::Unproved(reason)),
-            }
-        }
         (CommitStreamRef::Sidecar { .. }, false) => return Ok(AccountStreamScan::NotAuthorized),
         _ => {
             return Ok(AccountStreamScan::Unproved(
@@ -189,7 +172,7 @@ pub(crate) async fn scan_stream_for_actor_in_connection(
     let Some(floor) = floor else {
         if matches!(
             request.stream_ref,
-            CommitStreamRef::Circle { .. } | CommitStreamRef::Sidecar { .. }
+            CommitStreamRef::Sidecar { .. }
         ) {
             return Ok(AccountStreamScan::NotAuthorized);
         }
@@ -602,7 +585,7 @@ pub(crate) async fn caller_realm_floor_in_connection(
     caller: &ActorId,
 ) -> PersistenceResult<Option<ReadableFloor>> {
     let controller = crate::agent_management_admission::read_controller_in_connection(
-        conn, realm_id, None, caller,
+        conn, realm_id, caller,
     )
     .await?;
     let Some(mut floor) = member_realm_floor_in_connection(conn, realm_id, caller).await? else {
@@ -694,248 +677,6 @@ struct ReplicaAnchorRow {
     anchor_commit_id: Option<String>,
     #[diesel(sql_type = BigInt)]
     join_position: i64,
-}
-
-async fn circle_history_access(
-    conn: &mut AsyncPgConnection,
-    realm_id: &arkret_wire::RealmId,
-    circle_id: &arkret_wire::CircleId,
-) -> PersistenceResult<Option<arkret_wire::HistoryAccess>> {
-    let Some(row) =
-        sql_query("SELECT value FROM circle_current_states WHERE realm_id=$1 AND circle_id=$2")
-            .bind::<Text, _>(realm_id.as_str())
-            .bind::<Text, _>(circle_id.as_str())
-            .get_result::<ValueRow>(&mut *conn)
-            .await
-            .optional()
-            .map_err(PersistenceError::database)?
-    else {
-        return Ok(None);
-    };
-    let circle: arkret_models_collaboration::governance::circle::Circle =
-        serde_json::from_value(row.value).map_err(PersistenceError::database)?;
-    if circle.id.as_ref() != Some(circle_id) || circle.realm_id != *realm_id {
-        return Err(PersistenceError::SchemaViolation(
-            "Circle history subject differs from its accepted current".to_owned(),
-        ));
-    }
-    Ok(Some(circle.history_access))
-}
-
-async fn current_circle_join(
-    conn: &mut AsyncPgConnection,
-    stream: &CommitStreamRef,
-    caller: &ActorId,
-) -> PersistenceResult<Option<JoinRow>> {
-    let CommitStreamRef::Circle {
-        realm_id,
-        circle_id,
-    } = stream
-    else {
-        return Ok(None);
-    };
-    sql_query(
-        "SELECT m.membership,m.current_commit_id,m.current_stream_position \
-        FROM circle_member_state_current_states m \
-        WHERE m.realm_id=$1 AND m.circle_id=$2 AND m.member_id=$3 AND m.membership='join' \
-        AND m.value->>'membership'='join' AND m.source_stream_ref=$5 \
-        AND circle_member_parent_join_current(m.realm_id,m.member_id,m.value) \
-        AND (EXISTS (SELECT 1 FROM realm_commits c WHERE c.realm_id=m.realm_id \
-             AND c.commit_id=m.current_commit_id AND c.stream_position=m.current_stream_position \
-             AND c.stream_key=$4 AND c.stream_ref=m.source_stream_ref) \
-          OR EXISTS (SELECT 1 FROM replica_stream_anchors a WHERE a.realm_id=m.realm_id \
-             AND a.stream_key=$4 AND a.anchor_commit_id IS NOT NULL \
-             AND a.anchor_stream_position>=m.current_stream_position))",
-    )
-    .bind::<Text, _>(realm_id.as_str())
-    .bind::<Text, _>(circle_id.as_str())
-    .bind::<Text, _>(caller.to_string())
-    .bind::<Text, _>(crate::authority_commit::stream_key(stream)?)
-    .bind::<Jsonb, _>(serde_json::to_value(stream).map_err(PersistenceError::database)?)
-    .get_result::<JoinRow>(&mut *conn)
-    .await
-    .optional()
-    .map_err(PersistenceError::database)
-}
-
-async fn circle_join_floor(
-    conn: &mut AsyncPgConnection,
-    stream: &CommitStreamRef,
-    join: &JoinRow,
-    history: arkret_wire::HistoryAccess,
-) -> PersistenceResult<Option<ReadableFloor>> {
-    let join_position = u64::try_from(join.current_stream_position).map_err(|_| {
-        PersistenceError::SchemaViolation("Circle join position is negative".to_owned())
-    })?;
-    // A since-join replica is not entitled to download the private prefix
-    // before its opening join. The exact proven join is its readable floor;
-    // requiring a locally held position zero would reject that valid interval.
-    if history == arkret_wire::HistoryAccess::SinceJoin && join_position > 0 {
-        return Ok(Some(ReadableFloor {
-            oldest_position: join_position,
-            floor_commit_id: join
-                .current_commit_id
-                .parse()
-                .map_err(PersistenceError::database)?,
-            floor_reason: ReadableFloorReason::MembershipJoin,
-        }));
-    }
-    let Some(genesis) = crate::authority_commit::stream_page_in_connection(
-        conn,
-        &StreamScanRequestBody {
-            realm_id: stream.realm_id().clone(),
-            stream_ref: stream.clone(),
-            direction: arkret_wire::StreamScanDirection::After(None),
-            limit: 1,
-        },
-    )
-    .await?
-    .readable_floor
-    else {
-        return Ok(None);
-    };
-    match history {
-        arkret_wire::HistoryAccess::AllHistoryForCurrentMembers => Ok(Some(genesis)),
-        arkret_wire::HistoryAccess::SinceJoin => {
-            let join_position = u64::try_from(join.current_stream_position).map_err(|_| {
-                PersistenceError::SchemaViolation("Circle join position is negative".to_owned())
-            })?;
-            if genesis.oldest_position > join_position {
-                return Ok(Some(genesis));
-            }
-            if join_position == 0 {
-                if join.current_commit_id != genesis.floor_commit_id.as_str() {
-                    return Err(PersistenceError::SchemaViolation(
-                        "Circle opening join does not match its stream-start Commit".to_owned(),
-                    ));
-                }
-                return Ok(Some(genesis));
-            }
-            Ok(Some(ReadableFloor {
-                oldest_position: join_position,
-                floor_commit_id: join
-                    .current_commit_id
-                    .parse()
-                    .map_err(PersistenceError::database)?,
-                floor_reason: ReadableFloorReason::MembershipJoin,
-            }))
-        }
-    }
-}
-
-/// A Circle's interval requires current parent-Realm and exact Circle joins.
-/// Each Circle position is independent of the parent's Realm position.
-pub(crate) async fn caller_circle_floor_in_connection(
-    conn: &mut AsyncPgConnection,
-    realm_id: &arkret_wire::RealmId,
-    circle_id: &arkret_wire::CircleId,
-    caller: &ActorId,
-) -> PersistenceResult<Option<ReadableFloor>> {
-    let controller = crate::agent_management_admission::read_controller_in_connection(
-        conn,
-        realm_id,
-        Some(circle_id),
-        caller,
-    )
-    .await?;
-    let Some(mut floor) =
-        member_circle_floor_in_connection(conn, realm_id, circle_id, caller).await?
-    else {
-        return Ok(None);
-    };
-    if let Some(controller) = controller {
-        let Some(controller_floor) =
-            member_circle_floor_in_connection(conn, realm_id, circle_id, &controller).await?
-        else {
-            return Ok(None);
-        };
-        if controller_floor.oldest_position > floor.oldest_position {
-            floor = controller_floor;
-        }
-    }
-    Ok(Some(floor))
-}
-
-pub(crate) async fn member_circle_floor_in_connection(
-    conn: &mut AsyncPgConnection,
-    realm_id: &arkret_wire::RealmId,
-    circle_id: &arkret_wire::CircleId,
-    caller: &ActorId,
-) -> PersistenceResult<Option<ReadableFloor>> {
-    if !crate::authority_commit::accepted_current_member_joined_in_connection(
-        conn, realm_id, caller,
-    )
-    .await?
-    {
-        return Ok(None);
-    }
-    let stream = CommitStreamRef::Circle {
-        realm_id: realm_id.clone(),
-        circle_id: circle_id.clone(),
-    };
-    let Some(join) = current_circle_join(conn, &stream, caller).await? else {
-        return Ok(None);
-    };
-    crate::circle_current_states::require_member_current_in_connection(
-        conn, realm_id, circle_id, caller,
-    )
-    .await?;
-    let Some(history) = circle_history_access(conn, realm_id, circle_id).await? else {
-        return Ok(None);
-    };
-    circle_join_floor(conn, &stream, &join, history).await
-}
-
-pub(crate) async fn replica_circle_floor_in_connection(
-    conn: &mut AsyncPgConnection,
-    realm_id: &arkret_wire::RealmId,
-    circle_id: &arkret_wire::CircleId,
-    caller: &ActorId,
-) -> PersistenceResult<Result<ReadableFloor, &'static str>> {
-    let stream = CommitStreamRef::Circle {
-        realm_id: realm_id.clone(),
-        circle_id: circle_id.clone(),
-    };
-    let Some(anchor) = sql_query(
-        "SELECT a.anchor_commit_id,c.stream_position AS join_position \
-        FROM replica_stream_anchors a JOIN realm_commits c ON c.commit_id=a.join_commit_id \
-        WHERE a.realm_id=$1 AND a.stream_key=$2 AND c.stream_key=a.stream_key",
-    )
-    .bind::<Text, _>(realm_id.as_str())
-    .bind::<Text, _>(crate::authority_commit::stream_key(&stream)?)
-    .get_result::<ReplicaAnchorRow>(&mut *conn)
-    .await
-    .optional()
-    .map_err(PersistenceError::database)?
-    else {
-        return Ok(Err("the Circle stream is not held here"));
-    };
-    if anchor.anchor_commit_id.is_none() {
-        return Ok(Err("the Circle stream is pending its bootstrap anchor"));
-    }
-    let history = circle_history_access(conn, realm_id, circle_id).await?;
-    let Some(join) = current_circle_join(conn, &stream, caller).await? else {
-        return Ok(Err("the caller has no held Circle join"));
-    };
-    crate::circle_current_states::require_member_current_in_connection(
-        conn, realm_id, circle_id, caller,
-    )
-    .await?;
-    if history == Some(arkret_wire::HistoryAccess::SinceJoin)
-        && join.current_stream_position < anchor.join_position
-    {
-        return Ok(Err("the caller's Circle join precedes the held stream"));
-    }
-    let Some(floor) = caller_circle_floor_in_connection(conn, realm_id, circle_id, caller).await?
-    else {
-        return Ok(Err("the held Circle membership scope is unproved"));
-    };
-    if history == Some(arkret_wire::HistoryAccess::AllHistoryForCurrentMembers)
-        && floor.oldest_position != 0
-    {
-        return Ok(Err("the Circle's complete history is not held here"));
-    }
-    Ok(Ok(floor))
 }
 
 /// The caller's readable floor on a Realm stream this member Station holds
@@ -1200,99 +941,6 @@ async fn peer_intervals(
     Ok((intervals, joined))
 }
 
-/// A Circle replication interval uses only coordinates on that Circle.
-/// A parent membership is a prerequisite, never a child-stream cursor.
-async fn peer_circle_intervals(
-    conn: &mut AsyncPgConnection,
-    realm_id: &arkret_wire::RealmId,
-    circle_id: &arkret_wire::CircleId,
-    peer: &DidCoreId,
-) -> PersistenceResult<(Vec<PeerInterval>, Vec<ActorId>)> {
-    let stream = CommitStreamRef::Circle {
-        realm_id: realm_id.clone(),
-        circle_id: circle_id.clone(),
-    };
-    let key = crate::authority_commit::stream_key(&stream)?;
-    let Some(history) = circle_history_access(conn, realm_id, circle_id).await? else {
-        return Ok((Vec::new(), Vec::new()));
-    };
-    let rows = sql_query(
-        "SELECT m.member_id,m.membership,m.current_commit_id,m.current_stream_position \
-         FROM circle_member_state_current_states m JOIN realm_commits c \
-           ON c.commit_id=m.current_commit_id AND c.realm_id=m.realm_id \
-           AND c.stream_position=m.current_stream_position AND c.stream_ref=m.source_stream_ref \
-         WHERE m.realm_id=$1 AND m.circle_id=$2 AND c.stream_key=$3 \
-           AND m.value->>'membership'=m.membership \
-           AND (m.membership<>'join' \
-             OR circle_member_parent_join_current(m.realm_id,m.member_id,m.value)) \
-         ORDER BY m.member_id",
-    )
-    .bind::<Text, _>(realm_id.as_str())
-    .bind::<Text, _>(circle_id.as_str())
-    .bind::<Text, _>(&key)
-    .load::<HostedMemberRow>(&mut *conn)
-    .await
-    .map_err(PersistenceError::database)?;
-    let mut intervals = Vec::new();
-    let mut joined = Vec::new();
-    for row in rows {
-        let member: ActorId =
-            serde_json::from_str(&row.member_id).map_err(PersistenceError::database)?;
-        if member.fixed_route_service_id() != Some(peer)
-            || !crate::authority_commit::accepted_current_member_joined_in_connection(
-                conn, realm_id, &member,
-            )
-            .await?
-        {
-            continue;
-        }
-        let (join, last) = match row.membership.as_str() {
-            "join" => (
-                JoinRow {
-                    membership: row.membership.clone(),
-                    current_commit_id: row.current_commit_id.clone(),
-                    current_stream_position: row.current_stream_position,
-                },
-                None,
-            ),
-            "leave" | "ban" => {
-                let Some(prior) = sql_query(
-                    "SELECT c.commit_id,c.stream_position,e.kind,e.envelope->'payload'->>'membership' AS membership \
-                     FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk \
-                     WHERE c.stream_key=$1 AND c.stream_position<$2 AND e.state='committed' \
-                       AND e.kind='ak.circle.member.state' AND e.envelope->'payload'->'member_id'=$3::jsonb \
-                     ORDER BY c.stream_position DESC LIMIT 1",
-                ).bind::<Text,_>(&key).bind::<BigInt,_>(row.current_stream_position).bind::<Text,_>(&row.member_id)
-                    .get_result::<PriorJoinRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
-                else { continue; };
-                if prior.membership.as_deref() != Some("join") {
-                    continue;
-                }
-                (
-                    JoinRow {
-                        membership: "join".to_owned(),
-                        current_commit_id: prior.commit_id,
-                        current_stream_position: prior.stream_position,
-                    },
-                    Some(u64::try_from(row.current_stream_position).map_err(|_| {
-                        PersistenceError::SchemaViolation(
-                            "Circle terminal position is negative".to_owned(),
-                        )
-                    })?),
-                )
-            }
-            _ => continue,
-        };
-        if let Some(floor) = circle_join_floor(conn, &stream, &join, history).await? {
-            intervals.push(PeerInterval { floor, last });
-            if last.is_none() {
-                joined.push(member);
-            }
-        }
-    }
-    Ok((intervals, joined))
-}
-
 async fn peer_stream_intervals(
     conn: &mut AsyncPgConnection,
     stream: &CommitStreamRef,
@@ -1301,10 +949,6 @@ async fn peer_stream_intervals(
     match stream {
         CommitStreamRef::RealmControl { .. } => Ok((Vec::new(), Vec::new())),
         CommitStreamRef::Realm { realm_id } => peer_intervals(conn, realm_id, peer).await,
-        CommitStreamRef::Circle {
-            realm_id,
-            circle_id,
-        } => peer_circle_intervals(conn, realm_id, circle_id, peer).await,
         _ => Ok((Vec::new(), Vec::new())),
     }
 }
@@ -1352,7 +996,7 @@ async fn peer_holds_full_event(
     // member ceases to be current; no content right follows from it.
     if matches!(
         event.kind,
-        arkret_wire::EventKind::MemberState | arkret_wire::EventKind::CircleMemberState
+        arkret_wire::EventKind::MemberState
     ) && matches!(
         event
             .payload
@@ -1368,7 +1012,6 @@ async fn peer_holds_full_event(
         }
     }
     if matches!(event.scope_ref, arkret_wire::ScopeRef::Realm { .. })
-        && !matches!(event.kind, arkret_wire::EventKind::CircleCreate)
         && crate::snapshot_disclosure_gate::member_shared_event_kind(&event.kind)
     {
         return Ok(true);
@@ -1562,42 +1205,7 @@ pub(crate) async fn committed_event_for_member_in_connection(
     {
         return Ok(Read::PendingAnchor);
     }
-    if let CommitStreamRef::Circle { circle_id, .. } = &commit.stream_ref {
-        let Some(tenure) = sql_query("SELECT service_id FROM realm_authorities WHERE realm_id=$1")
-            .bind::<Text, _>(realm_id.as_str())
-            .get_result::<TenureRow>(&mut *conn)
-            .await
-            .optional()?
-        else {
-            return Ok(Read::NotVisible);
-        };
-        let floor = if tenure.service_id == issuer.as_str() {
-            caller_circle_floor_in_connection(conn, &realm_id, circle_id, caller).await?
-        } else {
-            replica_circle_floor_in_connection(conn, &realm_id, circle_id, caller)
-                .await?
-                .ok()
-        };
-        if floor.is_none_or(|floor| commit.stream_position < floor.oldest_position) {
-            return Ok(Read::NotVisible);
-        }
-        return Ok(Read::Read(Box::new(match event {
-            Some(event) => single_row(
-                crate::committed_disclosure::disclose_to_member_in_connection(
-                    conn,
-                    vec![arkret_wire::CommittedEventFullView { commit, event }],
-                    caller,
-                )
-                .await?,
-            )?,
-            None => CommittedEventView::Withheld(arkret_wire::CommittedEventWithheldView {
-                commit,
-                event_disclosure: arkret_wire::EventDisclosure {
-                    status: arkret_wire::EventDisclosureStatus::Withheld,
-                },
-            }),
-        })));
-    }
+
     if let CommitStreamRef::Sidecar { sidecar_id, .. } = &commit.stream_ref {
         let Some(tenure) = sql_query("SELECT service_id FROM realm_authorities WHERE realm_id=$1")
             .bind::<Text, _>(realm_id.as_str())
@@ -1656,7 +1264,6 @@ pub(crate) async fn committed_event_for_member_in_connection(
     };
     if let Some(event) = &event
         && &event.actor_id == caller
-        && event.kind != arkret_wire::EventKind::CircleCreate
         && event.kind != arkret_wire::EventKind::RealmCreate
     {
         let full = arkret_wire::CommittedEventFullView {

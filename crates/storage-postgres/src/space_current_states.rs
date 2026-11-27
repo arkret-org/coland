@@ -113,16 +113,6 @@ pub(crate) fn space_create_current_values(
     if object.parent_space_id.as_ref() == Some(&space_id) {
         return Err(reject("space_parent_cycle"));
     }
-    if matches!(
-        object.child_scope_policy.as_ref(),
-        Some(
-            arkret_models_collaboration::objects::space::ChildScopePolicy::RequireScopeCircleId { .. }
-        )
-    ) {
-        return Err(reject(
-            "Circle-targeting child policy needs a confirmed Circle authority cut",
-        ));
-    }
     let parent = json!({"parent_space_id": object.parent_space_id.as_ref()});
     let child_scope_policy =
         serde_json::to_value(&object.child_scope_policy).map_err(PersistenceError::database)?;
@@ -142,22 +132,13 @@ pub(crate) fn space_create_current_values(
     })
 }
 
-/// Prove the parent from complete same-Realm current rows. The standalone
-/// Realm-scope slice refuses Circle-scoped metadata until a Circle authority
-/// cut supplies its scope/readability proof. It also refuses a missing or
-/// mismatched sibling family rather than treating it as a root or allow-any.
-async fn require_parent_in_connection(
+/// Verify the target's lifecycle, hierarchy and policy at one locked Realm cut.
+pub(crate) async fn require_parent_in_connection(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     position: i64,
-    values: &SpaceCreateValues,
+    parent_id: &str,
 ) -> PersistenceResult<()> {
-    if values.space.get("scope_circle_id").is_some() {
-        return Err(reject("Circle-scoped Space needs a Circle authority cut"));
-    }
-    let Some(parent_id) = values.parent["parent_space_id"].as_str() else {
-        return Ok(());
-    };
     let parent = diesel::sql_query(
         "SELECT s.realm_id,s.value AS space,\
                 p.current_commit_id AS parent_commit_id,\
@@ -202,13 +183,28 @@ async fn require_parent_in_connection(
     {
         return Err(reject("space_parent_unreadable"));
     }
-    match &parent.policy {
-        Value::Null => {}
-        Value::Object(policy) if policy.get("kind") == Some(&json!("allow_any")) => {}
-        Value::Object(policy) if policy.get("kind") == Some(&json!("require_same_scope")) => {}
-        _ => return Err(reject(arkret_wire::ErrorCode::POLICY_VIOLATION)),
+    require_encrypted_placement(conn, &event.realm_id, &parent.policy).await
+}
+
+pub(crate) async fn require_encrypted_placement(
+    conn: &mut AsyncPgConnection,
+    realm: &arkret_wire::RealmId,
+    requirement: &Value,
+) -> PersistenceResult<()> {
+    match requirement {
+        Value::Null | Value::Bool(false) => Ok(()),
+        Value::Bool(true) => {
+            let scope = arkret_wire::ScopeRef::Realm { realm_id: realm.clone() };
+            let key = crate::mls_group_current_states::scope_key(&scope)?;
+            let group = crate::mls_group_current_states::locked_group(conn, &key).await?;
+            if group.is_some_and(|group| group.value.effective_scope == scope) {
+                Ok(())
+            } else {
+                Err(reject(arkret_wire::ErrorCode::POLICY_VIOLATION))
+            }
+        }
+        _ => Err(reject(arkret_wire::ErrorCode::SCHEMA_VIOLATION)),
     }
-    Ok(())
 }
 
 pub(crate) async fn commit_space_create_current_states_in_connection(
@@ -237,7 +233,9 @@ pub(crate) async fn commit_space_create_current_states_in_connection(
     let values = space_create_current_values(event)?;
     let position = i64::try_from(commit.stream_position)
         .map_err(|_| reject("invalid Space stream position"))?;
-    require_parent_in_connection(conn, event, position, &values).await?;
+    if let Some(parent_id) = values.parent["parent_space_id"].as_str() {
+        require_parent_in_connection(conn, event, position, parent_id).await?;
+    }
     let rows = [
         ("space_current_states", &values.space),
         ("space_parent_current_states", &values.parent),
@@ -353,9 +351,6 @@ pub(crate) async fn commit_space_transition_in_connection(
     if current.id.as_ref() != Some(&space_id) || current.realm_id != event.realm_id {
         return Err(reject("Space lifecycle target identity differs"));
     }
-    if current.scope_circle_id.is_some() {
-        return Err(reject("Circle-scoped Space needs a Circle authority cut"));
-    }
     if authorize && event.kind == EventKind::SpaceTombstone {
         require_no_live_dependents_in_connection(conn, &event.realm_id, &space_id).await?;
     }
@@ -421,7 +416,7 @@ pub(crate) async fn commit_space_update_in_connection(
     prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<()> {
     use arkret_models_collaboration::events_payloads::space::SpacePatchPayload;
-    use arkret_models_collaboration::objects::space::{ChildScopePolicy, Space};
+    use arkret_models_collaboration::objects::space::Space;
     if event.kind != arkret_wire::EventKind::SpaceUpdate {
         return Ok(());
     }
@@ -459,7 +454,6 @@ pub(crate) async fn commit_space_update_in_connection(
         .map_err(|_| reject("invalid Space stream position"))?;
     if current.id.as_ref() != Some(&payload.space_id)
         || current.realm_id != event.realm_id
-        || current.scope_circle_id.is_some()
         || row.current_stream_position >= position
     {
         return Err(reject(
@@ -482,14 +476,6 @@ pub(crate) async fn commit_space_update_in_connection(
         }
     }
     if let Some(policy) = &payload.child_scope_policy {
-        if let ChildScopePolicy::RequireScopeCircleId { scope_circle_id } = policy {
-            let circle = diesel::sql_query("SELECT current_commit_id,current_stream_position,value FROM circle_current_states WHERE realm_id=$1 AND circle_id=$2 FOR SHARE")
-                .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(scope_circle_id.as_str())
-                .get_result::<SpaceCurrentRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
-            if !circle.is_some_and(|row| row.value.get("state") == Some(&json!("active"))) {
-                return Err(reject("child scope policy Circle is absent or inactive"));
-            }
-        }
         let value = serde_json::to_value(policy).map_err(PersistenceError::database)?;
         let changed = diesel::sql_query("UPDATE space_child_scope_policy_current_states SET current_commit_id=$3,current_stream_position=$4,value=$5,updated_at=$6 WHERE realm_id=$1 AND space_id=$2 AND current_stream_position<$4")
             .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(payload.space_id.as_str())
@@ -557,7 +543,7 @@ async fn foreign_parent_is_readable(
     event: &arkret_wire::Event,
     parent_id: &arkret_wire::SpaceId,
 ) -> PersistenceResult<bool> {
-    use arkret_models_collaboration::objects::space::{ChildScopePolicy, Space};
+    use arkret_models_collaboration::objects::space::Space;
     #[derive(diesel::QueryableByName)]
     struct Candidate {
         #[diesel(sql_type = Text)]
@@ -589,7 +575,6 @@ async fn foreign_parent_is_readable(
     if space.validate().is_err()
         || space.id.as_ref() != Some(parent_id)
         || space.realm_id.as_str() != candidate.realm_id
-        || space.scope_circle_id.is_some()
         || space.parent_space_id.is_some()
         || space.child_scope_policy.is_some()
         || candidate
@@ -600,7 +585,7 @@ async fn foreign_parent_is_readable(
             candidate.parent["parent_space_id"].clone(),
         )
         .is_err()
-        || serde_json::from_value::<Option<ChildScopePolicy>>(candidate.policy.clone()).is_err()
+        || serde_json::from_value::<Option<bool>>(candidate.policy.clone()).is_err()
     {
         return Ok(false);
     }
@@ -706,7 +691,6 @@ pub(crate) async fn commit_space_parent_in_connection(
         serde_json::from_value(metadata.value.clone()).map_err(PersistenceError::database)?;
     if child.id.as_ref() != Some(&payload.space_id)
         || child.realm_id != event.realm_id
-        || child.scope_circle_id.is_some()
     {
         return Err(reject("space_parent_unreadable"));
     }
@@ -739,7 +723,9 @@ pub(crate) async fn commit_space_parent_in_connection(
     {
         return Err(reject("space_realm_mismatch"));
     }
-    require_parent_in_connection(conn, event, position, &values).await?;
+    if let Some(parent_id) = values.parent["parent_space_id"].as_str() {
+        require_parent_in_connection(conn, event, position, parent_id).await?;
+    }
     let mut next = payload.parent_space_id.clone();
     let mut seen = std::collections::BTreeSet::new();
     while let Some(id) = next {
@@ -752,7 +738,7 @@ pub(crate) async fn commit_space_parent_in_connection(
             .ok_or_else(|| reject("space_parent_unreadable"))?;
         let ancestor_space: Space =
             serde_json::from_value(ancestor.space).map_err(PersistenceError::database)?;
-        if ancestor_space.scope_circle_id.is_some()
+        if ancestor_space.id.as_ref() != Some(&id) || ancestor_space.realm_id != event.realm_id
             || ancestor.parent_position >= position
             || ancestor.policy_position >= position
         {

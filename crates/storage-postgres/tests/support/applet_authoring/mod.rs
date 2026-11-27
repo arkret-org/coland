@@ -294,30 +294,18 @@ impl Fixture {
             )
             .await;
         assert_eq!(status, StatusCode::OK, "Human Profile: {body}");
-        fixture.new_realm().await;
+        let realm = fixture.create_realm().await;
+        fixture.authority_event_ref = Some(realm.event_id());
+        fixture.realm = realm;
         *fixture
     }
 
-    async fn new_circle_scope(&self) -> ScopeRef {
-        let create = self.admin_event(EventKind::CircleCreate, ScopeRef::Realm { realm_id: self.realm.clone() }, json!({"object":{
-            "schema":"ak.schema.circle.v1","realm_id":self.realm,"title":"Applet scope","display":{"short_name":format!("Applet-{}",&uuid::Uuid::now_v7().simple().to_string()[24..]),"color_token":"blue","symbol":{"glyph":"lock"}},
-            "directory_visibility":"members","join_rule":"public","history_access":"since_join","state":"active","created_by":ActorId::account(self.pcr.history.account.clone()),"created_at":arkret_canonical::format_timestamp_canonical(chrono::Utc::now())
-        }}));
-        let circle_id = arkret_wire::CircleId::from_event_id(&create.event_id);
-        realm_native_fixture::boxed_step(|| accepted_admin_domain_event(self, create)).await;
-        ScopeRef::Circle {
-            realm_id: self.realm.clone(),
-            circle_id,
-        }
-    }
-
-    async fn new_realm(&mut self) {
+    async fn create_realm(&self) -> RealmId {
         let mut unit = Box::new(ordinary_realm::bootstrap_unit_for_account(
             &uuid::Uuid::now_v7().to_string(),
             &self.pcr.history.account,
             &self.state.service_did(),
         ));
-        self.realm = unit.transactions[0].event.realm_id.clone();
         let source = PgAuthorityCommitStore {
             pool: self.pool.clone(),
         };
@@ -359,8 +347,8 @@ impl Fixture {
         .admit_ordinary_realm_bootstrap_unit(&unit, unit.transactions[0].commit.committed_at)
         .await
         .unwrap();
-        self.authority_event_ref = Some(unit.transactions[0].event.event_id.clone());
         self.state.hydrate().await.unwrap();
+        unit.transactions[0].event.realm_id.clone()
     }
 
     fn sign_admin(&self, mut event: Event) -> Event {
@@ -385,11 +373,6 @@ impl Fixture {
             chrono::Utc::now(),
         )
         .unwrap();
-        if kind == EventKind::CircleCreate {
-            event.payload.get_mut("object").unwrap()["created_at"] = json!(
-                arkret_canonical::format_timestamp_canonical(event.created_at)
-            );
-        }
         self.sign_admin(event)
     }
 
@@ -1113,7 +1096,6 @@ async fn admin_domain_request(
     let store = PgAuthorityCommitStore {
         pool: fixture.pool.clone(),
     };
-    assert_eq!(event.realm_id, fixture.realm);
     let stream =
         arkret_wire::CommitStreamRef::from_scope(&event.scope_ref, Some(event.realm_id.clone()))
             .unwrap();
@@ -1125,7 +1107,7 @@ async fn admin_domain_request(
         // it is never represented as this scope's head or historical source.
         None => store
             .stream_head(&arkret_wire::CommitStreamRef::Realm {
-                realm_id: fixture.realm.clone(),
+                realm_id: event.realm_id.clone(),
             })
             .await
             .unwrap()
@@ -1138,7 +1120,7 @@ async fn admin_domain_request(
         .unwrap();
     let previous = coland_storage::AuthorityCommitTransaction {
         expected_authority: store
-            .current_authority(&fixture.realm)
+            .current_authority(&event.realm_id)
             .await
             .unwrap()
             .unwrap(),
@@ -1249,10 +1231,9 @@ impl AppletAuthoringFactory {
         if let Some(scope) = scopes.get(label) {
             return scope.clone();
         }
-        // The original contract covers a Realm install and a distinct Circle
-        // install under the same identity, including the last-scope fence race.
+        // Independent installations can share an Applet identity across Realms.
         let scope = if label.ends_with(":scope-right") || label.ends_with(":scope-conflict") {
-            realm_native_fixture::boxed_step(|| self.fixture.new_circle_scope()).await
+            ScopeRef::realm(realm_native_fixture::boxed_step(|| self.fixture.create_realm()).await)
         } else {
             ScopeRef::Realm {
                 realm_id: self.fixture.realm.clone(),
@@ -1371,21 +1352,26 @@ impl AppletAuthoringFactory {
             .unwrap();
         let mut payload: CapabilityGrantPayload =
             serde_json::from_value(serde_json::to_value(&original.payload).unwrap()).unwrap();
-        let ScopeRef::Circle {
-            realm_id,
-            circle_id,
-        } = extra_scope
-        else {
-            panic!("the independent generic parent needs a second actual Circle scope");
-        };
+        let realm = original.realm_id.clone();
+        assert_ne!(extra_scope.realm_id(), &realm);
+        let strand = self.fixture.admin_event(EventKind::StrandCreate, ScopeRef::realm(realm.clone()), json!({"object":{
+            "schema":"ak.schema.strand.v1","realm_id":realm,"tracks":{"discussion":{"is_primary":true,"profile":"discussion"}},
+            "metadata":{"title":"Generic grant resource"},"state":"active","created_by":original.actor_id,
+            "created_at":arkret_canonical::format_timestamp_canonical(chrono::Utc::now())
+        }}));
+        let mut strand = strand;
+        strand.payload.get_mut("object").unwrap()["created_at"] = json!(arkret_canonical::format_timestamp_canonical(strand.created_at));
+        let strand = self.fixture.sign_admin(strand);
+        let strand_id = arkret_wire::StrandId::from_event_id(&strand.event_id);
+        realm_native_fixture::boxed_step(|| accepted_admin_domain_event(&self.fixture, strand)).await;
         payload.grant.resources = vec![
-            arkret_wire::WireResourceSelector::realm(self.fixture.realm.clone()),
-            arkret_wire::WireResourceSelector::circle(realm_id.clone(), circle_id.clone()),
+            arkret_wire::WireResourceSelector::realm(realm.clone()),
+            arkret_wire::WireResourceSelector::strand(realm.clone(), strand_id),
         ];
         payload.grant.issued_at = chrono::Utc::now();
         let event = self.fixture.admin_event(
             EventKind::CapabilityGrant,
-            ScopeRef::realm(self.fixture.realm.clone()),
+            ScopeRef::realm(realm),
             serde_json::to_value(payload).unwrap(),
         );
         let id = arkret_wire::GrantId::from_event_id(&event.event_id);
@@ -1525,6 +1511,7 @@ impl AppletFormalCommitFactory for AppletAuthoringFactory {
         scope_label: &str,
     ) -> AppletFormalCommitUnit {
         let scope = self.scope(scope_label).await;
+        let realm = scope.realm_id();
         let mut packages = self.packages.lock().await;
         let package = packages
             .entry(applet_id.to_string())
@@ -1554,7 +1541,7 @@ impl AppletFormalCommitFactory for AppletAuthoringFactory {
         let (status, current) = self.fixture.admin_post(
             "/_arkret/self/current-state/exact",
             arkret_wire::ServiceOperationId::SELF_CURRENT_STATE_READ_EXACT_V1,
-            &json!({"realm_id":self.fixture.realm,"selector":{"kind":"applet_registration","applet_id":package.applet_id,"service_id":package.service_id}}),
+            &json!({"realm_id":realm,"selector":{"kind":"applet_registration","applet_id":package.applet_id,"service_id":package.service_id}}),
             None,
         ).await;
         assert_eq!(
@@ -1572,7 +1559,7 @@ impl AppletFormalCommitFactory for AppletAuthoringFactory {
         };
         let registration = self.fixture.admin_event(
             EventKind::AppletRegistration,
-            ScopeRef::realm(self.fixture.realm.clone()),
+            ScopeRef::realm(realm.clone()),
             serde_json::to_value(
                 package
                     .to_registration(&evidence, expected_commit_id)
@@ -1610,40 +1597,19 @@ impl AppletFormalCommitFactory for AppletAuthoringFactory {
             .map(|action| {
                 let grant = CapabilityGrantCreateBody {
                     schema: arkret_wire::SchemaId::CAPABILITY_V1.to_owned(),
-                    realm_id: Some(self.fixture.realm.clone()),
+                    realm_id: Some(realm.clone()),
                     issuer_id: ActorId::account(self.fixture.pcr.history.account.clone()),
                     subject: CapabilitySubject::Actor(ActorId::service(package.service_id.clone())),
                     actions: vec![(*action).to_owned()],
-                    resources: vec![match &scope {
-                        ScopeRef::Realm { realm_id } => {
-                            arkret_wire::WireResourceSelector::realm(realm_id.clone())
-                        }
-                        ScopeRef::Circle {
-                            realm_id,
-                            circle_id,
-                        } => {
-                            let mut resource = arkret_wire::WireResourceSelector::circle(
-                                realm_id.clone(),
-                                circle_id.clone(),
-                            );
-                            resource.match_scope = Some(arkret_wire::ResourceMatchScope::Exact);
-                            resource
-                        }
-                        _ => panic!("fixture only supports Realm/Circle"),
-                    }],
+                    resources: vec![arkret_wire::WireResourceSelector::realm(realm.clone())],
                     constraints: vec![GrantConstraint::applet_authority(
                         package.applet_id.clone(),
                         ActorId::service(package.service_id.clone()),
                         package.registration_epoch.clone(),
                     )],
                     issuer_authority_refs: vec![IssuerAuthorityRef::RealmRoot {
-                        realm_id: self.fixture.realm.clone(),
-                        authority_event_ref: self
-                            .fixture
-                            .authority_event_ref
-                            .as_ref()
-                            .expect("accepted Realm genesis authority")
-                            .clone(),
+                        realm_id: realm.clone(),
+                        authority_event_ref: realm.event_id(),
                         authority_generation: 0,
                     }],
                     issued_at: chrono::Utc::now(),
@@ -1651,7 +1617,7 @@ impl AppletFormalCommitFactory for AppletAuthoringFactory {
                 self.fixture.admin_event(
                     EventKind::CapabilityGrant,
                     ScopeRef::Realm {
-                        realm_id: self.fixture.realm.clone(),
+                        realm_id: realm.clone(),
                     },
                     serde_json::to_value(CapabilityGrantPayload { grant }).unwrap(),
                 )
@@ -6614,8 +6580,7 @@ mod realm_native_fixture {
                     }
                     "scope" => {
                         uploads[0]["effective_scope"] = json!({
-                            "kind":"circle","realm_id":fixture.realm,
-                            "circle_id":format!("ak:circle:{}", uuid::Uuid::now_v7())
+                            "kind":"realm","realm_id":arkret_wire::RealmId::from_event_id(&arkret_wire::EventId::from_digest(arkret_canonical::DigestSuite::Sha256,[17;32]))
                         });
                     }
                     "missing_binding" => {
@@ -6999,14 +6964,14 @@ mod realm_native_fixture {
 
     pub(super) fn run_bridge(
         pool: PgPool,
-        circle: bool,
+        check_restricted_device: bool,
         bot: bool,
         rotate_during_reply: bool,
         recovery_scenario: Option<RecoveryScenario>,
     ) -> impl std::future::Future<Output = ()> {
         run_bridge_case(
             pool,
-            circle,
+            check_restricted_device,
             bot,
             rotate_during_reply,
             recovery_scenario,
@@ -7062,8 +7027,8 @@ mod realm_native_fixture {
         );
     }
 
-    pub(super) async fn run_bridge_recipient_mode(pool: PgPool, circle: bool, mode: u8) {
-        boxed_step(|| run_bridge_case(pool, circle, false, false, None, false, mode, false)).await;
+    pub(super) async fn run_bridge_recipient_mode(pool: PgPool, check_restricted_device: bool, mode: u8) {
+        boxed_step(|| run_bridge_case(pool, check_restricted_device, false, false, None, false, mode, false)).await;
     }
 
     #[allow(
@@ -7072,7 +7037,7 @@ mod realm_native_fixture {
     )]
     pub(super) fn run_bridge_case(
         pool: PgPool,
-        circle: bool,
+        check_restricted_device: bool,
         bot: bool,
         rotate_during_reply: bool,
         recovery_scenario: Option<RecoveryScenario>,
@@ -7082,7 +7047,7 @@ mod realm_native_fixture {
     ) -> impl std::future::Future<Output = ()> {
         run_bridge_case_with_consumer(
             pool,
-            circle,
+            check_restricted_device,
             bot,
             rotate_during_reply,
             recovery_scenario,
@@ -7099,7 +7064,7 @@ mod realm_native_fixture {
     )]
     pub(super) async fn run_bridge_case_with_consumer(
         pool: PgPool,
-        circle: bool,
+        check_restricted_device: bool,
         bot: bool,
         rotate_during_reply: bool,
         recovery_scenario: Option<RecoveryScenario>,
@@ -7900,22 +7865,9 @@ mod realm_native_fixture {
             .lock()
             .await
             .insert(id.to_string(), native.package.clone());
-        let install_label = if circle {
-            "bridge-native-runtime:scope-right"
-        } else {
-            "bridge-native-runtime"
-        };
-        let install = boxed_step(|| factory.prepare_install(&id, install_label)).await;
+        let install = boxed_step(|| factory.prepare_install(&id, "bridge-native-runtime")).await;
         let content_scope = install.effective_scope.clone();
         install.commit(&PgAppletStore { pool }).await.unwrap();
-        let parent_installation = if circle {
-            let parent =
-                boxed_step(|| factory.prepare_install(&id, "bridge-parent-admission")).await;
-            let outcome = boxed_step(|| commit_install_http(&factory.fixture, &parent)).await;
-            Some((parent.effective_scope.clone(), outcome))
-        } else {
-            None
-        };
         let package = &native.package;
         let did = applet_service_did(package);
         let config: arkret_bridge_runtime::Config = serde_json::from_value(json!({
@@ -7929,7 +7881,7 @@ mod realm_native_fixture {
                 "verification_method_fragment":"#applet-service-key", "trusted_server_did":factory.fixture.state.service_did(),
                 "applet_namespaces":package.namespaces,
                 "managed_actor_authoring":{"principal_endpoint":package.base_url,"key_encryption_key_hex":"53".repeat(32),
-                    "device":{"actions":["ak.applet.join","ak.circle.member.add","ak.event.read","ak.message.create","ak.message.redact","ak.mls.commit","ak.object.read_content","ak.self.blob.resource.get.v1","ak.self.blob.command.presign.v1","ak.self.blob.upload.create.v1","ak.strand.create",
+                    "device":{"actions":["ak.applet.join","ak.event.read","ak.message.create","ak.message.redact","ak.mls.commit","ak.object.read_content","ak.self.blob.resource.get.v1","ak.self.blob.command.presign.v1","ak.self.blob.upload.create.v1","ak.strand.create",
                         "ak.self.keys.backups.resource.replace.v1","ak.self.keys.backups.read.list.v1","ak.self.keys.backups.command.issue_unlock_challenge.v1","ak.self.keys.backups.command.unlock.v1"],
                         "lifetime_seconds":3600,"mls":true,"key_package_inventory_target":2}}
             }
@@ -8142,7 +8094,7 @@ mod realm_native_fixture {
             // Establish the read fixture's standing-manager pointer before the
             // host's immediate maintenance tick and Device control writes race.
             // This is a real first attempt; contention/recovery is a separate
-            // contract, and Circle still requires its original known-scope gate.
+            // contract and the accepted installation scope.
             boxed_step(|| manager.maintain_backup_series(&actor, &content_scope))
                 .await
                 .unwrap();
@@ -8283,24 +8235,6 @@ mod realm_native_fixture {
         drop(edge);
         let edge = make_edge();
         let devices = ManagedDeviceRuntime::new(edge.clone()).unwrap();
-        if let Some((scope, outcome)) = &parent_installation {
-            boxed_step(|| devices.remember_installation_outcome(scope, outcome))
-                .await
-                .unwrap();
-        }
-        if recipient_mode == 2 {
-            boxed_step(|| {
-                same_device_cross_circle_queue(&factory, package, &devices, &actor, &content_scope)
-            })
-            .await;
-            drop(devices);
-            drop(author);
-            drop(manager);
-            *native.managed_router.lock().unwrap() = None;
-            drop(edge);
-            std::fs::remove_file(&path).unwrap();
-            return;
-        }
         let device = boxed_step(|| devices.device_for_actor(&actor))
             .await
             .unwrap();
@@ -8347,7 +8281,7 @@ mod realm_native_fixture {
             )
         })
         .await;
-        let parent_device = if circle {
+        let parent_device = if check_restricted_device {
             let parent_scope = ScopeRef::Realm {
                 realm_id: factory.fixture.realm.clone(),
             };
@@ -8362,9 +8296,6 @@ mod realm_native_fixture {
                 expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
             };
             let parent = boxed_step(|| devices.authorize_initial_device(plan, &parent_scope))
-                .await
-                .unwrap();
-            boxed_step(|| devices.join_circle_after_realm_join(&device, &parent))
                 .await
                 .unwrap();
             Some(parent)
@@ -8781,30 +8712,6 @@ mod realm_native_fixture {
                 .is_err(),
                 "the database must reject immutable binding rewrites"
             );
-            if circle {
-                let authority = factory
-                    .fixture
-                    .state
-                    .test_persistence()
-                    .device_revocations()
-                    .applet_managed_device_authority(&actor, &device.device_id, chrono::Utc::now())
-                    .await
-                    .unwrap()
-                    .unwrap();
-                assert!(authority.scopes.permits(
-                    &content_scope,
-                    &[arkret_wire::CapabilityActionId::SelfBlobUploadCreateV1]
-                ));
-                assert!(
-                    !authority.scopes.permits(
-                        &ScopeRef::Realm {
-                            realm_id: factory.fixture.realm.clone()
-                        },
-                        &[arkret_wire::CapabilityActionId::SelfBlobUploadCreateV1]
-                    ),
-                    "Circle fixture must not accidentally grant Realm upload"
-                );
-            }
         }
         // Exact replay consumes no new quota and retains the first metadata.
         let guard = blob_upload_guard(
@@ -9223,12 +9130,6 @@ mod realm_native_fixture {
         drop(recovered);
         let revoke_operation = "retire-runtime-device";
         let revoke_reason = Some("runtime_device_retired".to_owned());
-        if circle {
-            // The dense Circle setup uses the same real API bucket as revocation.
-            // Start response-loss injection in a fresh configured window so the
-            // admitted original reaches the persistence failure under test.
-            tokio::time::sleep(factory.fixture.state.config().rate_limiter.window).await;
-        }
         lost_receipt.store(true, std::sync::atomic::Ordering::SeqCst);
         let failure =
             boxed_step(|| devices.revoke_device(&device, revoke_operation, revoke_reason.clone()))
@@ -9887,7 +9788,7 @@ pub async fn realm_native_backup_custody(pool: PgPool) {
     .await;
 }
 
-pub async fn realm_native_backup_archived_circle(pool: PgPool) {
+pub async fn realm_native_backup_archived_realm(pool: PgPool) {
     realm_native_fixture::run_bridge_case_with_consumer(
         pool,
         true,
@@ -9902,7 +9803,7 @@ pub async fn realm_native_backup_archived_circle(pool: PgPool) {
     .await;
 }
 
-pub async fn realm_bridge_circle_runtime(pool: PgPool) {
+pub async fn realm_bridge_restricted_reader_runtime(pool: PgPool) {
     realm_native_fixture::run_bridge(pool, true, false, false, None).await;
 }
 
@@ -10032,9 +9933,7 @@ pub async fn widget_inventory_native_install_and_revoke() {
     applet_widget_inventory_fixture::run_widget_inventory().await;
 }
 
-pub async fn realm_bridge_cross_circle_queue_boundaries(pool: PgPool) {
-    realm_native_fixture::run_bridge_recipient_mode(pool, true, 2).await;
-}
+
 
 pub async fn realm_bridge_welcome_recovery_boundaries(pool: PgPool) {
     realm_native_fixture::run_bridge_recipient_mode(pool, false, 1).await;

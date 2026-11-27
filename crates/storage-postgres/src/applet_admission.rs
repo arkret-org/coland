@@ -152,15 +152,6 @@ pub(crate) fn validate_input(
             ScopeRef::Realm { realm_id } => {
                 arkret_wire::WireResourceSelector::realm(realm_id.clone())
             }
-            ScopeRef::Circle {
-                realm_id,
-                circle_id,
-            } => {
-                let mut r =
-                    arkret_wire::WireResourceSelector::circle(realm_id.clone(), circle_id.clone());
-                r.match_scope = Some(arkret_wire::ResourceMatchScope::Exact);
-                r
-            }
             _ => return Err(rejected("unsupported install scope")),
         };
         let _ = &mut expected_resource;

@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use arkret_event_draft::EventPayloadExt as _;
-use arkret_identifiers::{CircleId, DidCoreId, RealmId};
+use arkret_identifiers::{DidCoreId, RealmId};
 use arkret_models_collaboration::events_payloads::{ContentBlock, RealmPurpose};
 use arkret_models_collaboration::governance::plaintext_visibility::PlaintextVisibleServicesPayload;
 use arkret_wire::{CommitStreamRef, Event, PlaintextDataClassKind};
@@ -135,12 +135,6 @@ fn replay_hydration_record_with_commit(
             .map_err(|error| coland_storage::PersistenceError::Internal(error.to_string()))?;
     }
     let effect = match operation.event_kind {
-        arkret_wire::EventKind::CircleCreate => {
-            proj.restore_accepted_circle_create(&operation, operation.created_at)
-        }
-        arkret_wire::EventKind::CircleMemberState => {
-            proj.restore_accepted_circle_membership(&operation, operation.created_at)
-        }
         _ => proj.apply(&operation, hydration_hlc),
     };
     if let coland_domain::reducer::ProjectionEffect::Rejected { reason } = effect {
@@ -233,7 +227,7 @@ pub async fn hydrate_sidecar_context_projections(
 ///
 /// The retired dual plane split this selection into a confirmed command
 /// prefix and an independently published ordinary tail. A canonical Event is
-/// committed only because a `RealmCommit` named it on its Realm, Circle or
+/// committed only because a `RealmCommit` named it on its Realm or
 /// Sidecar stream, so there is no second plane to reconcile and no timeline
 /// publication check left to apply.
 async fn hydration_replay_records(
@@ -347,7 +341,7 @@ fn install_relation_current_states(
                 relation_id,
                 realm_id: record.realm_id.to_string(),
                 relation_kind: relation.relation_kind.as_str().to_owned(),
-                scope_circle_id: relation.scope_circle_id.map(|id| id.to_string()),
+
                 from_ref: Some(relation.from_ref),
                 to_ref: Some(relation.to_ref),
                 rank: relation.rank,
@@ -837,11 +831,7 @@ async fn hydrate_managed_pcr_identity(
 /// Rebuild the reducer's Realm membership cache from canonical
 /// `ak.member.state` and `ak.invite.accept` Events.
 ///
-/// The Realm directory has its own replay path because it is a query index,
-/// but MLS claims, Circle admission and the sidecar membership predicate read
-/// `ProjectionState::member`. Replaying only the directory leaves those two
-/// views disagreeing after every restart: the member is visible in Realm
-/// rosters while the Circle reducer rejects it as a non-member.
+/// MLS admission reads the reducer membership cache independently of the directory.
 pub async fn hydrate_canonical_realm_memberships(
     persistence: &dyn coland_storage::PersistenceStore,
     proj: &mut ProjectionState,
@@ -1054,6 +1044,7 @@ pub async fn hydrate_projections_from_persistence(
     // Rebuild the process-local Space/Strand cache from the RealmCommit-backed
     // typed current rows used by canonical list reads.
     let current_objects = persistence.object_current_snapshot().snapshot().await?;
+    proj.encrypted_realms = current_objects.encrypted_realms;
     for space in current_objects.spaces {
         let id = space.id.ok_or_else(|| {
             coland_storage::PersistenceError::Internal(
@@ -1077,7 +1068,7 @@ pub async fn hydrate_projections_from_persistence(
                 kind: space.kind,
                 title: space.title.unwrap_or_default(),
                 fields: space.fields,
-                scope_circle_id: space.scope_circle_id.map(|id| id.to_string()),
+
                 child_scope_policy: space.child_scope_policy,
                 parent_ref: space.parent_space_id.map(|id| id.to_string()),
                 rank: space.rank,
@@ -1137,181 +1128,11 @@ pub async fn hydrate_projections_from_persistence(
                 updated_at: strand.updated_at,
                 schema_refs: strand.schema_refs.unwrap_or_default(),
                 schedule_revision_source: None,
-                scope_circle_id: strand.scope_circle_id.map(|id| id.to_string()),
+
             },
         );
     }
     proj.strands.extend(canonical_strands.clone());
-    // The legacy projection_circles mirror can be absent or stale after
-    // direct Circle admission. Rebuild this process-local cache only from exact
-    // accepted Event/Commit pairs. Each Circle's transitions are ordered by
-    // its own authority stream position, never by Event reception time.
-    let mut circle_creates = BTreeMap::new();
-    let mut circle_transitions = BTreeMap::new();
-    let mut member_replicas = BTreeMap::new();
-    for record in events.iter().filter(|record| {
-        matches!(
-            arkret_wire::EventKind::from_wire(&record.kind),
-            arkret_wire::EventKind::CircleCreate
-                | arkret_wire::EventKind::CircleUpdate
-                | arkret_wire::EventKind::CircleArchive
-                | arkret_wire::EventKind::CircleRestore
-                | arkret_wire::EventKind::CircleTombstone
-                | arkret_wire::EventKind::CircleHistoryAccess
-                | arkret_wire::EventKind::CircleMemberState
-        )
-    }) {
-        let realm = RealmId::new(record.realm_id.clone().ok_or_else(|| {
-            coland_storage::PersistenceError::Internal(
-                "Circle hydration Event has no Realm".to_owned(),
-            )
-        })?)
-        .map_err(coland_storage::PersistenceError::database)?;
-        let member_replica = match member_replicas.get(&realm).copied() {
-            Some(member_replica) => member_replica,
-            None => {
-                let member_replica = is_member_replica(persistence, &realm).await?;
-                member_replicas.insert(realm, member_replica);
-                member_replica
-            }
-        };
-        if member_replica {
-            // The installed typed Circle current is independently authoritative.
-            // A member's visible suffix cannot rebuild its hidden create or
-            // earlier membership transitions into a governing reducer cache.
-            continue;
-        }
-        let id = arkret_wire::EventId::new(record.event_id.clone())
-            .map_err(coland_storage::PersistenceError::database)?;
-        let accepted = persistence
-            .authority_commits()
-            .committed_event(&id)
-            .await?
-            .ok_or_else(|| {
-                coland_storage::PersistenceError::Internal(
-                    "Circle hydration has no accepting Commit".to_owned(),
-                )
-            })?;
-        if serde_json::to_value(&accepted.event)
-            .map_err(coland_storage::PersistenceError::database)?
-            != record.envelope
-        {
-            return Err(coland_storage::PersistenceError::Internal(
-                "Circle hydration canonical Event differs from its Commit binding".to_owned(),
-            ));
-        }
-        if record.kind == arkret_wire::EventKind::CircleCreate.as_str() {
-            let circle_id = CircleId::from_event_id(&id);
-            if !matches!(
-                &accepted.commit.stream_ref,
-                CommitStreamRef::Realm { realm_id } if realm_id == &accepted.event.realm_id
-            ) || accepted.event.scope_ref
-                != (arkret_wire::ScopeRef::Realm {
-                    realm_id: accepted.event.realm_id.clone(),
-                })
-                || circle_creates.insert(circle_id, record.clone()).is_some()
-            {
-                return Err(coland_storage::PersistenceError::Internal(
-                    "Circle create hydration has an invalid or duplicate Realm-stream source"
-                        .to_owned(),
-                ));
-            }
-        } else {
-            let CommitStreamRef::Circle {
-                realm_id,
-                circle_id,
-            } = &accepted.commit.stream_ref
-            else {
-                return Err(coland_storage::PersistenceError::Internal(
-                    "Circle transition hydration is outside its Circle stream".to_owned(),
-                ));
-            };
-            let declared_circle = accepted
-                .event
-                .payload
-                .get("circle_id")
-                .or_else(|| accepted.event.payload.get("target_ref"))
-                .and_then(Value::as_str);
-            if accepted.event.realm_id != *realm_id
-                || accepted.event.scope_ref
-                    != (arkret_wire::ScopeRef::Circle {
-                        realm_id: realm_id.clone(),
-                        circle_id: circle_id.clone(),
-                    })
-                || declared_circle != Some(circle_id.as_str())
-                || circle_transitions
-                    .insert(
-                        (circle_id.clone(), accepted.commit.stream_position),
-                        record.clone(),
-                    )
-                    .is_some()
-            {
-                return Err(coland_storage::PersistenceError::Internal(
-                    "Circle transition hydration has a conflicting Commit position".to_owned(),
-                ));
-            }
-        }
-    }
-    let rebuilt_circle_ids = circle_creates
-        .keys()
-        .map(ToString::to_string)
-        .collect::<BTreeSet<_>>();
-    if circle_transitions
-        .keys()
-        .any(|(circle_id, _)| !rebuilt_circle_ids.contains(circle_id.as_str()))
-    {
-        return Err(coland_storage::PersistenceError::Internal(
-            "Circle transition hydration has no accepted create".to_owned(),
-        ));
-    }
-    for circle_id in &rebuilt_circle_ids {
-        proj.circles.remove(circle_id);
-    }
-    proj.circle_memberships
-        .retain(|(circle_id, _), _| !rebuilt_circle_ids.contains(circle_id));
-    for record in circle_creates
-        .into_values()
-        .chain(circle_transitions.into_values())
-    {
-        replay_hydration_record(
-            projection_adapter,
-            proj,
-            record,
-            &hydration_hlc,
-            "accepted-circle",
-        )?;
-    }
-    for circle_id in rebuilt_circle_ids {
-        let circle = proj.circles.get_mut(&circle_id).ok_or_else(|| {
-            coland_storage::PersistenceError::Internal(
-                "accepted Circle create did not rebuild its projection".to_owned(),
-            )
-        })?;
-        let realm_id = RealmId::new(circle.realm_id.clone())
-            .map_err(coland_storage::PersistenceError::database)?;
-        let scope = arkret_wire::ScopeRef::Circle {
-            realm_id: realm_id.clone(),
-            circle_id: CircleId::new(circle_id)
-                .map_err(coland_storage::PersistenceError::database)?,
-        };
-        let group = persistence.mls_groups().current(&scope).await?;
-        if group
-            .as_ref()
-            .is_some_and(|group| group.realm_id != realm_id || group.value.effective_scope != scope)
-        {
-            return Err(coland_storage::PersistenceError::Internal(
-                "Circle MLS current has a mismatched effective scope".to_owned(),
-            ));
-        }
-        circle.mls_group_ref = group
-            .map(|_| {
-                scope
-                    .canonical_mls_group_id()
-                    .map(|id| id.to_string())
-                    .map_err(coland_storage::PersistenceError::database)
-            })
-            .transpose()?;
-    }
     if let Ok(rows) = persistence.morph_projections().snapshot_all().await {
         for record in rows {
             let Some(state) = parse_object_state(&record.state) else {
@@ -1338,7 +1159,7 @@ pub async fn hydrate_projections_from_persistence(
                 MorphProjection {
                     morph_id: record.morph_id,
                     realm_id: record.realm_id,
-                    scope_circle_id: record.scope_circle_id,
+
                     morph_kind: record.morph_kind,
                     title: record.title,
                     fields: serde_json::from_value(record.fields).unwrap_or_default(),
@@ -2277,7 +2098,7 @@ mod relation_current_state_hydration_tests {
                 relation_id: derived_id.clone(),
                 realm_id: "ak:realm:AUGIFvQctz4TjQTmvvO4Wdy-xdc5XP2ZnJ5Qpbh4s8Ru".to_owned(),
                 relation_kind: "contains".to_owned(),
-                scope_circle_id: None,
+
                 from_ref: Some("ak:space:AUifoAUG8AEOHYXp999WnI7WlLt19ByDoqYUsFwbw4A4".into()),
                 to_ref: Some("ak:strand:AUifoAUG8AEOHYXp999WnI7WlLt19ByDoqYUsFwbw4A4".into()),
                 rank: None,

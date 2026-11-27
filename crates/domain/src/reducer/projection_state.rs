@@ -119,31 +119,20 @@ pub struct ProjectionState {
     /// `ak.space.create` / update / parent / archive / restore / tombstone;
     /// mirror table is the `projection_space_containers` durable table.
     pub space_containers: BTreeMap<String, SpaceContainerProjection>,
+    /// Realms whose ordinary MLS group has an accepted Genesis.
+    pub encrypted_realms: BTreeSet<String>,
     /// Server-side Strand projection. Mirrors the canonical state-machine
     /// for ak.strand.create / update / archive / restore. Unlike Space
     /// there is no dedicated `ak.strand.tombstone` event; terminal state
     /// is reached via `ak.redaction`. Rebuilt from registered current snapshots
     /// (durable).
     pub strands: BTreeMap<String, StrandProjection>,
-    /// AKP-0007 — server-side Circle projection. Mirrors the canonical
-    /// state-machine for `ak.circle.*` lifecycle / membership events
-    /// (spec b7d35be `zh/models/circle.md`). Keyed by `circle_id`
-    /// (`ak:circle:<44-char event token>`); membership and parent-Realm binding live in
-    /// the struct so the wire layer can enforce
-    /// `Circle.members ⊆ Realm.members` without an extra DB hop.
-    pub circles: BTreeMap<String, CircleProjection>,
     /// First-class Sidecars keyed by `sidecar_id`.
     pub sidecars: BTreeMap<String, SidecarProjection>,
     /// Native source-context mappings keyed by `(sidecar_id, kind:id)`.
     pub sidecar_contexts: BTreeMap<(String, String), SidecarContextProjection>,
     /// Accepted control ref that created each Sidecar.
     pub sidecar_create_refs: BTreeMap<String, String>,
-    /// Current accepted join ref for each active Circle member.
-    pub circle_member_join_refs: BTreeMap<(String, String), String>,
-    /// Side-band membership boundaries for Circle history filtering. Keyed by
-    /// `(circle_id, actor_id)` and retained across leave/ban transitions so
-    /// read-side helpers can enforce invited/joined floors deterministically.
-    pub circle_memberships: BTreeMap<(String, String), CircleMembershipState>,
     /// Server-side Morph projection. Same shape as Strand. Mirror table
     /// is `projection_morphs` (durable).
     pub morphs: BTreeMap<String, MorphProjection>,
@@ -359,9 +348,6 @@ impl ProjectionState {
         now: chrono::DateTime<chrono::Utc>,
     ) {
         let relation_id = format!("ak:relation:kanban.position:{board_space_id}:{strand_id}");
-        let scope_circle_id = self
-            .strand_scope_circle_id(strand_id)
-            .or_else(|| self.space_container_scope_circle_id(list_space_id));
         let relation = self
             .relations
             .entry(relation_id.clone())
@@ -369,7 +355,7 @@ impl ProjectionState {
                 relation_id: relation_id.clone(),
                 realm_id: realm_id.to_owned(),
                 relation_kind: "contains".to_owned(),
-                scope_circle_id: scope_circle_id.clone(),
+
                 from_ref: Some(list_space_id.into()),
                 to_ref: Some(strand_id.into()),
                 rank: rank.map(ToOwned::to_owned),
@@ -382,7 +368,6 @@ impl ProjectionState {
             });
         relation.realm_id = realm_id.to_owned();
         relation.relation_kind = "contains".to_owned();
-        relation.scope_circle_id = scope_circle_id;
         relation.from_ref = Some(list_space_id.into());
         relation.to_ref = Some(strand_id.into());
         relation.rank = rank.map(ToOwned::to_owned);

@@ -145,7 +145,6 @@ fn projection_row_visible_to_session(
     session: &SessionRecord,
     sender: &str,
     created_at: DateTime<Utc>,
-    scope_circle_id: Option<&str>,
     history_access: &str,
 ) -> bool {
     let Ok(actor) =
@@ -157,29 +156,7 @@ fn projection_row_visible_to_session(
     if sender == actor_key {
         return true;
     }
-    if !projection_realm_history_allows(projection, realm_id, &actor, history_access, created_at) {
-        return false;
-    }
-    scope_circle_id.is_none_or(|circle_id| {
-        projection.circle_scope_visible_to_actor_at(circle_id, &actor_key, created_at)
-    })
-}
-
-#[cfg(test)]
-/// Current object projections are a baseline, not an Event-history window.
-///
-/// `history_access=since_join` limits historical Event bodies and old object
-/// revisions. It must not hide the current Space/Strand row from an active
-/// Realm member merely because the object was created before that member
-/// joined. Circle-scoped rows still require current Circle visibility.
-fn current_projection_scope_visible_to_actor(
-    projection: &ProjectionState,
-    actor: &arkret_wire::ActorId,
-    scope_circle_id: Option<&str>,
-) -> bool {
-    scope_circle_id.is_none_or(|circle_id| {
-        projection.circle_scope_visible_to_actor(circle_id, &actor.to_string())
-    })
+    projection_realm_history_allows(projection, realm_id, &actor, history_access, created_at)
 }
 
 #[cfg(test)]
@@ -386,7 +363,6 @@ struct RelationEdgeView {
     rank: Option<String>,
     fields: BTreeMap<String, Value>,
     state: String,
-    scope_circle_id: Option<String>,
     #[serde(serialize_with = "arkret_canonical::serde_helpers::serialize_canonical_timestamp")]
     created_at: DateTime<Utc>,
     #[serde(serialize_with = "arkret_canonical::serde_helpers::serialize_canonical_timestamp")]
@@ -419,7 +395,6 @@ fn relation_edge_view(relation: ColandRelationState) -> RelationEdgeView {
         rank: relation.rank,
         fields: relation.fields,
         state: relation.state,
-        scope_circle_id: relation.scope_circle_id,
         created_at: relation.created_at,
         updated_at: relation.updated_at,
         primary_conflict_domain: None,
@@ -453,9 +428,6 @@ fn relation_current_edge_view(
         rank: relation.rank,
         fields: relation.fields,
         state: state.to_owned(),
-        scope_circle_id: relation
-            .scope_circle_id
-            .map(|circle_id| circle_id.to_string()),
         created_at: relation.created_at,
         updated_at: relation.updated_at.unwrap_or(relation.created_at),
         primary_conflict_domain: Some(record.primary_conflict_domain),
@@ -562,7 +534,7 @@ mod relation_actor_endpoint_tests {
         let mut morph = MorphProjection {
             morph_id: "ak:morph:AYqyX_pkT3hbwKscye0o3wq75G7axNkEMZADE88iy_gD".into(),
             realm_id: "ak:realm:AYqyX_pkT3hbwKscye0o3wq75G7axNkEMZADE88iy_gD".into(),
-            scope_circle_id: None,
+
             morph_kind: "document".into(),
             title: None,
             fields: BTreeMap::new(),
@@ -629,7 +601,6 @@ mod relation_actor_endpoint_tests {
             &session,
             &local.to_string(),
             now,
-            None,
             "since_join"
         ));
         assert!(!projection_row_visible_to_session(
@@ -639,7 +610,6 @@ mod relation_actor_endpoint_tests {
             &session,
             &foreign.to_string(),
             now,
-            None,
             "since_join"
         ));
         assert!(!projection_row_visible_to_session(
@@ -649,7 +619,6 @@ mod relation_actor_endpoint_tests {
             &session,
             principal.as_str(),
             now,
-            None,
             "since_join"
         ));
         projection.members.insert(
@@ -682,45 +651,7 @@ mod relation_actor_endpoint_tests {
         ));
     }
 
-    #[test]
-    fn current_circle_projection_visibility_uses_complete_actor() {
-        let local = actor("station-a.example");
-        let foreign = actor("station-b.example");
-        let now = Utc::now();
-        let mut projection = ProjectionState::new();
-        projection.circles.insert(
-            "circle".into(),
-            coland_domain::reducer::CircleProjection {
-                circle_id: "circle".into(),
-                realm_id: "realm".into(),
-                profile_ref: None,
-                title: "Scoped".into(),
-                summary: None,
-                display: json!({}),
-                directory_visibility: "members".into(),
-                join_rule: "invite".into(),
-                history_access: "since_join".into(),
-                mls_group_ref: None,
-                state: coland_domain::reducer::CircleLifecycleState::Active,
-                state_changed_at: None,
-                created_by: local.to_string(),
-                created_at: now,
-                updated_by: None,
-                updated_at: None,
-                members: std::collections::BTreeSet::from([local.to_string()]),
-            },
-        );
-        assert!(current_projection_scope_visible_to_actor(
-            &projection,
-            &local,
-            Some("circle")
-        ));
-        assert!(!current_projection_scope_visible_to_actor(
-            &projection,
-            &foreign,
-            Some("circle")
-        ));
-    }
+
 
     fn actor(station: &str) -> arkret_wire::ActorId {
         arkret_wire::ActorId::account(arkret_wire::AccountId::new(
@@ -747,7 +678,7 @@ mod relation_actor_endpoint_tests {
                     relation_id,
                     realm_id: RealmId::from_event_id(&event).to_string(),
                     relation_kind: "assigned_to".to_owned(),
-                    scope_circle_id: None,
+
                     from_ref: Some(strand.into()),
                     to_ref: Some(actor.clone().into()),
                     rank: None,
@@ -843,13 +774,7 @@ async fn list_relation_projections(
             from_ref.as_ref(),
             to_ref.as_ref(),
             relation_kind.as_deref(),
-        ) && relation.scope_circle_id.as_deref().is_none_or(|circle_id| {
-            proj.circle_scope_visible_to_actor_at(
-                circle_id,
-                &session_actor.to_string(),
-                relation.created_at,
-            )
-        })
+        )
     });
     candidates.extend(
         proj.relations
@@ -873,15 +798,6 @@ async fn list_relation_projections(
                 relation_kind
                     .as_deref()
                     .is_none_or(|value| relation.relation_kind == value)
-            })
-            .filter(|relation| {
-                relation.scope_circle_id.as_deref().is_none_or(|circle_id| {
-                    proj.circle_scope_visible_to_actor_at(
-                        circle_id,
-                        &session_actor.to_string(),
-                        relation.created_at,
-                    )
-                })
             })
             .cloned()
             .map(relation_edge_view),

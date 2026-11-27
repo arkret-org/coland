@@ -829,7 +829,6 @@ async fn fixture_native_backup_outcomes(
         .client()
         .native_key_backup_head(&arkret_models_crypto::RealmActorBackupHeadQuery::new(
             device.actor_id.as_realm_actor_id().unwrap().clone(),
-            device.effective_scope().circle_id().cloned(),
         ))
         .await
         .unwrap();
@@ -1075,7 +1074,6 @@ async fn fixture_native_archived_head(
     use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody;
     let query = arkret_models_crypto::RealmActorBackupHeadQuery::new(
         device.actor_id.as_realm_actor_id().unwrap().clone(),
-        device.effective_scope().circle_id().cloned(),
     );
     let initial = reader
         .client()
@@ -1088,18 +1086,10 @@ async fn fixture_native_archived_head(
         (EventKind::RealmArchive, EventKind::RealmRestore, json!({})),
         (EventKind::RealmFreeze, EventKind::RealmUnfreeze, json!({})),
     ];
-    if let Some(circle) = device.effective_scope().circle_id() {
-        transitions.push((
-            EventKind::CircleArchive,
-            EventKind::CircleRestore,
-            json!({"target_ref":circle}),
-        ));
-    }
+
     for (close, reopen, payload) in transitions {
         for kind in [close, reopen] {
-            let scope = if matches!(kind, EventKind::CircleArchive | EventKind::CircleRestore) {
-                device.effective_scope().clone()
-            } else {
+            let scope = {
                 ScopeRef::Realm {
                     realm_id: fixture.realm.clone(),
                 }

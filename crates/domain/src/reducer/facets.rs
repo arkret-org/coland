@@ -1,7 +1,7 @@
 //! Domain coordinates for the Station's local product projection.
 //!
 //! An accepted Event reaches the reducer already ordered by the current
-//! governance Station's `RealmCommit`, and each Realm, Circle and Sidecar
+//! governance Station's `RealmCommit`, and each Realm and Sidecar
 //! stream is linear. A facet therefore holds exactly one settled value: there
 //! is no merge function, no conflict value, and no revision lattice to
 //! resolve. These coordinates address the Station's own projection cache and
@@ -24,8 +24,6 @@ pub mod facet {
     pub const CALL_STATE: &str = "call.state";
     pub const CALL_TRANSCRIPT: &str = "call.transcript";
     pub const CALL_TRANSCRIPT_RESULT: &str = "call.transcript_result";
-    pub const CIRCLE_HISTORY_ACCESS: &str = "circle.history_access";
-    pub const CIRCLE_MEMBER: &str = "circle.member";
     pub const CONTAINER_ORDER: &str = "container.order";
     pub const DEVICE_AUTHORIZATION: &str = "device.authorization";
     pub const DEVICE_REANCHOR: &str = "device.reanchor";

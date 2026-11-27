@@ -861,77 +861,124 @@ where
     Box::pin(make())
 }
 
-pub fn circle_membership_request(
-    previous: &AuthorityCommitTransaction,
-    circle: &arkret_wire::CircleId,
-    actor: &arkret_wire::ActorId,
-    state: &str,
-    expected: Option<&str>,
-    parent: Option<serde_json::Value>,
-) -> coland_storage::EventCommitRequest {
-    let scope = arkret_wire::ScopeRef::Circle {
-        realm_id: previous.event.realm_id.clone(),
-        circle_id: circle.clone(),
-    };
-    let event = event_for_actor(
-        arkret_wire::EventKind::CircleMemberState,
-        scope,
-        actor.clone(),
-        {
-            let mut payload = serde_json::json!({"circle_id":circle,"member_id":actor,"membership":state,"expected_membership":expected});
-            if let Some(parent) = parent {
-                payload["parent_membership_revision"] = parent;
-            }
-            payload
+/// Derive the native head from this controller's actually admitted PCR. The
+/// project fixture remains the source of the ordinary Strand locator.
+pub async fn private_create(
+    pool: &coland_storage_postgres::PgPool,
+    project: &coland_storage::AuthorityCommitTransaction,
+    owner: &arkret_wire::AccountId,
+) -> EventCommitRequest {
+    use diesel::sql_types::{Jsonb, Text};
+    use diesel_async::RunQueryDsl as _;
+    #[derive(diesel::QueryableByName)]
+    struct Head {
+        #[diesel(sql_type = Jsonb)]
+        original: serde_json::Value,
+        #[diesel(sql_type = Jsonb)]
+        receipt: serde_json::Value,
+    }
+    let mut conn = pool.get().await.unwrap();
+    let head = diesel::sql_query(
+        "SELECT e.envelope AS original,c.commit_json AS receipt
+        FROM pcr_genesis_units p JOIN realm_commits c ON c.realm_id=p.realm_id
+        JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed'
+        WHERE p.principal_id=$1 AND p.station_id=$2 AND c.stream_ref->>'kind'='realm'
+        ORDER BY c.stream_position DESC LIMIT 1",
+    )
+    .bind::<Text, _>(owner.principal_id.as_str())
+    .bind::<Text, _>(owner.station_id.as_str())
+    .get_result::<Head>(&mut *conn)
+    .await
+    .unwrap();
+    drop(conn);
+    let mut home = project.clone();
+    home.event = serde_json::from_value(head.original).unwrap();
+    home.commit = serde_json::from_value(head.receipt).unwrap();
+    home.expected_authority = PgAuthorityCommitStore { pool: pool.clone() }
+        .current_authority(&home.commit.realm_id)
+        .await
+        .unwrap()
+        .unwrap();
+    next_request(
+        &home,
+        arkret_wire::EventKind::SidecarCreate,
+        &owner.principal_id,
+        serde_json::json!({"source_realm_id": project.event.realm_id}),
+        std::cmp::max(project.commit.committed_at, home.commit.committed_at)
+            + chrono::Duration::seconds(1),
+    )
+}
+
+pub fn attach_request(
+    prior: &EventCommitRequest,
+    sidecar_id: &arkret_wire::SidecarId,
+    source_context_ref: serde_json::Value,
+    version: u64,
+    predecessor: Option<&arkret_wire::EventId>,
+    create_event_id: &arkret_wire::EventId,
+) -> EventCommitRequest {
+    let at = prior.authority_commit.commit.committed_at;
+    let realm_id = prior.authority_commit.event.realm_id.clone();
+    let mut payload = serde_json::json!({
+        "sidecar_id": sidecar_id,
+        "source_context_ref": source_context_ref,
+        "version": version,
+    });
+    if let Some(predecessor) = predecessor {
+        payload["predecessor_event_ref"] = serde_json::json!(predecessor);
+    }
+    let mut event = event_for_actor(
+        arkret_wire::EventKind::SidecarContextAttach,
+        arkret_wire::ScopeRef::Sidecar {
+            realm_id: realm_id.clone(),
+            sidecar_id: sidecar_id.clone(),
         },
-        previous.commit.committed_at,
+        prior.authority_commit.event.actor_id.clone(),
+        payload,
+        at,
     );
-    let mut request = request_for_event(previous, event, previous.commit.committed_at);
-    let stream = arkret_wire::CommitStreamRef::Circle {
-        realm_id: previous.event.realm_id.clone(),
-        circle_id: circle.clone(),
+    event.semantic_refs = vec![arkret_wire::SemanticRef::new(
+        create_event_id.to_string(),
+        "after",
+    )];
+    reseal(&mut event);
+    let mut request = request_for_event(&prior.authority_commit, event, at);
+    request.authority_commit.commit.stream_ref = arkret_wire::CommitStreamRef::Sidecar {
+        realm_id,
+        sidecar_id: sidecar_id.clone(),
     };
-    if previous.commit.stream_ref != stream {
+    if matches!(&prior.authority_commit.commit.stream_ref,
+        arkret_wire::CommitStreamRef::Sidecar { sidecar_id: prior_id, .. } if prior_id == sidecar_id)
+    {
+        request.authority_commit.commit.stream_position =
+            prior.authority_commit.commit.stream_position + 1;
+        request.authority_commit.commit.previous_commit_ref =
+            Some(prior.authority_commit.commit.commit_id.clone());
+    } else {
         request.authority_commit.commit.stream_position = 0;
         request.authority_commit.commit.previous_commit_ref = None;
     }
-    request.authority_commit.commit.stream_ref = stream;
-    request.realm_fanout_source = Some(arkret_wire::EventAdmissionSubmission::new(
-        request.authority_commit.event.clone(),
-    ));
+    request.authority_commit.commit.commit_id =
+        arkret_wire::RealmCommitId::from_digest(arkret_canonical::sha256_bytes(
+            format!(
+                "sidecar-context:{}",
+                request.authority_commit.event.event_id
+            )
+            .as_bytes(),
+        ));
     request
 }
 
-pub fn circle_request(
-    previous: &AuthorityCommitTransaction,
-    circle: &arkret_wire::CircleId,
-    kind: arkret_wire::EventKind,
-    payload: serde_json::Value,
-) -> EventCommitRequest {
-    let mut event = event_for_actor(
-        kind,
-        arkret_wire::ScopeRef::Circle {
-            realm_id: previous.event.realm_id.clone(),
-            circle_id: circle.clone(),
-        },
-        previous.event.actor_id.clone(),
-        payload,
-        previous.commit.committed_at,
-    );
-    bind_structural_human_device(&mut event);
-    let mut request = request_for_event(previous, event, previous.commit.committed_at);
-    let stream = arkret_wire::CommitStreamRef::Circle {
-        realm_id: previous.event.realm_id.clone(),
-        circle_id: circle.clone(),
-    };
-    if previous.commit.stream_ref != stream {
-        request.authority_commit.commit.stream_position = 0;
-        request.authority_commit.commit.previous_commit_ref = None;
+pub fn sidecar_batch(
+    create: EventCommitRequest,
+    attach: EventCommitRequest,
+) -> coland_storage::EventBatchCommitRequest {
+    coland_storage::EventBatchCommitRequest {
+        audit_unit: None,
+        events: vec![create, attach],
+        realm_organization_proof: None,
+        event_approvals: None,
+        applet_authoring_preview: None,
+        agent_membership_cascade: None,
     }
-    request.authority_commit.commit.stream_ref = stream;
-    seal_final_commit(&mut request.authority_commit.commit);
-    request.realm_fanout_source = Some(arkret_wire::EventAdmissionSubmission::new(
-        request.authority_commit.event.clone(),
-    ));
-    request
 }

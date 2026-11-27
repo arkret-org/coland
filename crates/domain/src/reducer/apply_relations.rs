@@ -74,7 +74,6 @@ impl ProjectionState {
             return self.queue_pending_replay(target_ref, operation, "relation_endpoint_unknown");
         }
         let fields = relation.fields.clone();
-        let scope_circle_id = relation.scope_circle_id.as_ref().map(ToString::to_string);
         let source_event_id = Some(operation.context.event_id.to_string());
         let source_event_digest = Some(relation_event_digest(operation));
 
@@ -82,7 +81,7 @@ impl ProjectionState {
             relation_id: relation_id.clone(),
             realm_id: operation.realm_id.to_string(),
             relation_kind,
-            scope_circle_id,
+
             from_ref,
             to_ref,
             rank: relation.rank.clone(),
@@ -128,66 +127,11 @@ impl ProjectionState {
         None
     }
 
-    fn resolve_object_scope_circle_id(&self, ref_id: &str) -> Option<&str> {
-        if let Some(strand) = self.strands.get(ref_id) {
-            return strand.scope_circle_id.as_deref();
-        }
-        if let Some(space) = self.space_containers.get(ref_id) {
-            return space.scope_circle_id.as_deref();
-        }
-        if let Some(morph) = self.morphs.get(ref_id) {
-            return morph.scope_circle_id.as_deref();
-        }
-        if let Some(relation) = self.relations.get(ref_id) {
-            return relation.scope_circle_id.as_deref();
-        }
-        None
-    }
-
-    fn relation_endpoint_scope_floor(
-        &self,
-        relation: &Value,
-        relation_kind: &str,
-    ) -> Result<Option<String>, &'static str> {
-        if !matches!(
-            relation_kind,
-            "contains" | "belongs_to" | "confidential_discussion_of" | "assigned_to"
-        ) {
-            return Ok(None);
-        }
-        let endpoints = [relation.get("from_ref"), relation.get("to_ref")];
-        let mut floor: Option<String> = None;
-        for endpoint in endpoints.into_iter().flatten().filter_map(Value::as_str) {
-            let Some(scope_circle_id) = self.resolve_object_scope_circle_id(endpoint) else {
-                continue;
-            };
-            if let Some(previous) = floor.as_deref()
-                && previous != scope_circle_id
-            {
-                return Err("relation_scope_endpoint_mismatch");
-            }
-            floor = Some(scope_circle_id.to_owned());
-        }
-        Ok(floor)
-    }
-
     fn check_relation_effective_scope(
-        &self,
-        realm_id: &str,
-        relation: &Value,
-        relation_kind: &str,
+        &self, _realm_id: &str, relation: &Value, relation_kind: &str
     ) -> Result<(), &'static str> {
-        let scope_circle_id = relation_scope_circle_id(relation);
-        if relation_kind == "confidential_discussion_of" && scope_circle_id.is_none() {
-            return Err("relation_scope_circle_id_required");
-        }
-        if let Some(scope_circle_id) = scope_circle_id.as_deref() {
-            self.validate_scope_circle_id(scope_circle_id, realm_id)?;
-        }
-        if let Some(endpoint_scope) = self.relation_endpoint_scope_floor(relation, relation_kind)?
-            && scope_circle_id.as_deref() != Some(endpoint_scope.as_str())
-        {
-            return Err("relation_scope_wider_than_endpoint");
+        if relation.get("scope_circle_id").is_some() || relation_kind == "confidential_discussion_of" {
+            return Err("schema_violation");
         }
         Ok(())
     }
@@ -308,7 +252,8 @@ impl ProjectionState {
             // scope still has to satisfy the endpoint scope floor.
             let mut patched = relation.clone();
             if let Some(patch) = patch {
-                apply_relation_patch(&mut patched, patch);
+                if patch.keys().any(|path| path.split('.').next() == Some("scope_circle_id")) { return Err(arkret_wire::ErrorCode::SCHEMA_VIOLATION); }
+            apply_relation_patch(&mut patched, patch);
             }
             Self::check_relation_direct_write(
                 patched.relation_kind.as_str(),
@@ -443,13 +388,7 @@ impl ProjectionState {
 }
 
 /// The `relation` object a `relation_create_payload` carries.
-fn relation_scope_circle_id(relation: &Value) -> Option<String> {
-    relation
-        .get("scope_circle_id")
-        .and_then(Value::as_str)
-        .filter(|value| value.starts_with("ak:circle:"))
-        .map(ToOwned::to_owned)
-}
+
 
 /// The `ak.schema.patch.v1` document an `ak.relation.update` carries. It is the
 /// only expression of change the payload schema admits.
@@ -484,14 +423,11 @@ fn validate_relation_endpoint_shape(relation: &Value, kind: &str) -> Result<(), 
 /// Apply an `ak.schema.patch.v1` patch to a materialized Relation.
 ///
 /// Identity paths are excluded by the typed payload. Only
-/// `scope_circle_id`, `rank`, and edge metadata under `fields` are mutable.
+/// `rank` and edge metadata under `fields` are mutable.
 fn apply_relation_patch(
     relation: &mut ColandRelationState,
     patch: &serde_json::Map<String, Value>,
 ) {
-    if let Some(scope_circle_id) = patch_string_value(patch, "scope_circle_id") {
-        relation.scope_circle_id = scope_circle_id.filter(|value| value.starts_with("ak:circle:"));
-    }
     if let Some(rank) = patch_string_value(patch, "rank") {
         relation.rank = rank;
     }
@@ -519,9 +455,7 @@ fn relation_primary_domain_matches(
         }
 }
 
-/// Render a materialized Relation into the `{from_ref, to_ref,
-/// scope_circle_id}` object shape `check_relation_effective_scope` reads, so
-/// the create path and the post-patch update path share one scope check.
+/// Read both endpoints from the materialized Relation after patching.
 fn relation_scope_check_object(relation: &ColandRelationState) -> Value {
     let mut object = serde_json::Map::new();
     if let Some(from_ref) = &relation.from_ref {
@@ -534,12 +468,6 @@ fn relation_scope_check_object(relation: &ColandRelationState) -> Value {
         object.insert(
             "to_ref".to_owned(),
             serde_json::to_value(to_ref).expect("typed Relation endpoint serializes"),
-        );
-    }
-    if let Some(scope_circle_id) = &relation.scope_circle_id {
-        object.insert(
-            "scope_circle_id".to_owned(),
-            Value::String(scope_circle_id.clone()),
         );
     }
     Value::Object(object)

@@ -1,7 +1,7 @@
 //! Independent commit-stream head tracking for authority-ordered Events.
 //!
 //! Producers do not declare predecessors. Ordering is supplied exclusively by
-//! a governance Station's [`arkret_wire::RealmCommit`]. Realm, Circle and
+//! a governance Station's [`arkret_wire::RealmCommit`]. Realm and
 //! Sidecar streams are checked independently; this module deliberately has no
 //! cross-stream position or merge rule.
 
@@ -133,7 +133,7 @@ impl CommitStreamProjection {
 mod tests {
     use arkret_canonical::DigestSuite;
     use arkret_wire::{
-        Base64UrlString, CircleId, DetachedObjectSignature, DetachedSignatureAlgorithm,
+        Base64UrlString, DetachedObjectSignature, DetachedSignatureAlgorithm,
         DetachedSignatureContext, DidCoreId, DidUrl, EventKind, RealmCommit,
         RealmCommitAuthorityRef, RealmCommitId, RealmId, ScopeRef, test_support,
     };
@@ -158,15 +158,9 @@ mod tests {
         }
     }
 
-    fn circle_item(realm_id: RealmId, circle_seed: u8, position: u64) -> CommittedEventFullView {
-        let circle_id = CircleId::from_event_id(&EventId::from_digest(
-            DigestSuite::Sha256,
-            [circle_seed; 32],
-        ));
-        let scope_ref = ScopeRef::Circle {
-            realm_id: realm_id.clone(),
-            circle_id: circle_id.clone(),
-        };
+    fn realm_item(seed: u8, position: u64) -> CommittedEventFullView {
+        let realm_id = realm(seed);
+        let scope_ref = ScopeRef::Realm { realm_id: realm_id.clone() };
         let event = test_support::raw_event_at(
             EventKind::MessageCreate.as_str(),
             scope_ref,
@@ -181,17 +175,14 @@ mod tests {
             commit: RealmCommit {
                 producer_signer_fact_digest: None,
                 commit_id: RealmCommitId::from_digest(
-                    [circle_seed.wrapping_add(position as u8); 32],
+                    [seed.wrapping_add(position as u8); 32],
                 ),
                 realm_id: realm_id.clone(),
-                stream_ref: CommitStreamRef::Circle {
-                    realm_id,
-                    circle_id,
-                },
+                stream_ref: CommitStreamRef::Realm {realm_id},
                 stream_position: position,
                 previous_commit_ref: (position > 0).then(|| {
                     RealmCommitId::from_digest(
-                        [circle_seed.wrapping_add(position as u8).wrapping_sub(1); 32],
+                        [seed.wrapping_add(position as u8).wrapping_sub(1); 32],
                     )
                 }),
                 event_ref: event.event_id.clone(),
@@ -210,10 +201,9 @@ mod tests {
     }
 
     #[test]
-    fn independent_circle_streams_each_start_at_zero() {
-        let realm_id = realm(0x10);
-        let first = circle_item(realm_id.clone(), 0x20, 0);
-        let second = circle_item(realm_id, 0x30, 0);
+    fn independent_realm_streams_each_start_at_zero() {
+        let first = realm_item(0x20, 0);
+        let second = realm_item(0x30, 0);
         let first_stream = first.commit.stream_ref.clone();
         let second_stream = second.commit.stream_ref.clone();
         let mut state = CommitStreamProjection::new();
@@ -235,8 +225,7 @@ mod tests {
 
     #[test]
     fn duplicate_requires_the_exact_same_commit_binding() {
-        let realm_id = realm(0x10);
-        let item = circle_item(realm_id, 0x20, 0);
+        let item = realm_item(0x20, 0);
         let mut conflicting = item.clone();
         conflicting.commit.commit_id = RealmCommitId::from_digest([0x77; 32]);
         let mut state = CommitStreamProjection::new();
@@ -251,9 +240,8 @@ mod tests {
 
     #[test]
     fn one_stream_must_extend_its_own_predecessor() {
-        let realm_id = realm(0x10);
-        let first = circle_item(realm_id.clone(), 0x20, 0);
-        let second = circle_item(realm_id, 0x20, 1);
+        let first = realm_item(0x20, 0);
+        let second = realm_item(0x20, 1);
         let mut state = CommitStreamProjection::new();
 
         state.apply_committed(first).unwrap();

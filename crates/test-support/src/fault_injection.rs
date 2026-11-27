@@ -581,9 +581,6 @@ impl coland_storage::EventProjectionStoreRegistry for FaultInjectingStore {
     fn key_backups(&self) -> &dyn coland_storage::KeyBackupStore {
         self.inner.key_backups()
     }
-    fn circle_projections(&self) -> &dyn coland_storage::CircleProjectionStore {
-        self.inner.circle_projections()
-    }
     fn object_current_snapshot(&self) -> &dyn coland_storage::ObjectCurrentSnapshotStore {
         self.inner.object_current_snapshot()
     }

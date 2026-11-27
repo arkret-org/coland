@@ -283,14 +283,9 @@ struct Cut {
         arkret_wire::PolicyId,
         arkret_models_collaboration::governance::operation_wire::Policy,
     >,
-    circle_states: BTreeMap<
-        arkret_wire::CircleId,
-        arkret_models_collaboration::governance::circle::CircleState,
-    >,
     mls_current: Option<arkret_wire::MlsGroupValue>,
     members: BTreeMap<String, (ActorId, String)>,
     member_revisions: BTreeMap<String, arkret_wire::CurrentRevision>,
-    circle_parent_joins: BTreeMap<String, arkret_wire::CurrentRevision>,
     grants: BTreeMap<GrantId, CapabilityGrant>,
     policy: Option<RealmPolicyBundlePayload>,
     terminal: bool,
@@ -387,41 +382,6 @@ impl Cut {
                     cut.member_revisions
                         .insert(actor_id.to_string(), revision.clone());
                 }
-                S::CircleMemberState {
-                    circle_id,
-                    member_actor_id,
-                } => {
-                    if !matches!(stream,CommitStreamRef::Circle {circle_id:own,..} if own==circle_id)
-                    {
-                        return Err(unavailable("snapshot Circle membership source differs"));
-                    }
-                    let current: arkret_wire::CircleMemberStateValue =
-                        serde_json::from_value(value.clone()).map_err(unavailable)?;
-                    cut.members.insert(
-                        member_actor_id.to_string(),
-                        (
-                            member_actor_id.clone(),
-                            serde_json::to_value(current.membership)
-                                .map_err(unavailable)?
-                                .as_str()
-                                .ok_or_else(|| unavailable("snapshot membership is not a string"))?
-                                .to_owned(),
-                        ),
-                    );
-                    if let Some(parent) = current.parent_membership_revision {
-                        cut.circle_parent_joins
-                            .insert(member_actor_id.to_string(), parent);
-                    }
-                }
-                S::Circle { circle_id } => {
-                    let circle: arkret_models_collaboration::governance::circle::Circle =
-                        serde_json::from_value(value.clone()).map_err(unavailable)?;
-                    if circle.id.as_ref() != Some(circle_id) || circle.realm_id != snapshot.realm_id
-                    {
-                        return Err(unavailable("snapshot Circle identity differs"));
-                    }
-                    cut.circle_states.insert(circle_id.clone(), circle.state);
-                }
                 S::Policy { policy_id } => {
                     let value: arkret_models_collaboration::governance::operation_wire::PolicySetValue = serde_json::from_value(value.clone()).map_err(unavailable)?;
                     if let arkret_models_collaboration::governance::operation_wire::PolicySetValue::Governance(policy) = value {
@@ -485,10 +445,7 @@ impl Cut {
     fn apply(&mut self, commit: &RealmCommit, event: &Event) -> PersistenceResult<()> {
         if matches!(
             event.kind,
-            EventKind::MemberState
-                | EventKind::InviteAccept
-                | EventKind::RealmInviteLinkAccept
-                | EventKind::CircleMemberState
+            EventKind::MemberState | EventKind::InviteAccept | EventKind::RealmInviteLinkAccept
         ) && let Some(current) = self.mls_current.as_mut()
         {
             current.current_key_access_revision = current
@@ -507,36 +464,6 @@ impl Cut {
                 });
                 self.direct = event.as_realm_create().map_err(unavailable)?.object.purpose
                     == arkret_models_collaboration::events_payloads::realm::RealmPurpose::DirectConversation;
-            }
-            EventKind::CircleCreate => {
-                let p = event.as_circle_create().map_err(unavailable)?;
-                self.circle_states.insert(
-                    arkret_wire::CircleId::from_event_id(&event.event_id),
-                    p.object.state,
-                );
-            }
-            EventKind::CircleArchive | EventKind::CircleRestore | EventKind::CircleTombstone => {
-                use arkret_models_collaboration::governance::circle::CircleState;
-                let p = match event.kind {
-                    EventKind::CircleArchive => event.as_circle_archive(),
-                    EventKind::CircleRestore => event.as_circle_restore(),
-                    _ => event.as_circle_tombstone(),
-                }
-                .map_err(unavailable)?;
-                let circle =
-                    arkret_wire::CircleId::new(p.target_ref.as_str()).map_err(unavailable)?;
-                let state = self
-                    .circle_states
-                    .get_mut(&circle)
-                    .ok_or_else(|| unavailable("Circle lifecycle has no create"))?;
-                if *state == CircleState::Tombstoned {
-                    return Err(unavailable("Circle terminal lifecycle changed"));
-                }
-                *state = match event.kind {
-                    EventKind::CircleArchive => CircleState::Archived,
-                    EventKind::CircleRestore => CircleState::Active,
-                    _ => CircleState::Tombstoned,
-                };
             }
             EventKind::RealmOwnerTransfer => {
                 let p = event.as_realm_owner_transfer().map_err(unavailable)?;
@@ -574,18 +501,6 @@ impl Cut {
                     )
                     .map_err(unavailable)?;
                 root.authority_event_ref = event.event_id.clone();
-            }
-            EventKind::CircleMemberState => {
-                let p = event.as_circle_member_state().map_err(unavailable)?;
-                p.validate().map_err(unavailable)?;
-                let key = p.member_id.to_string();
-                if let Some(revision) = p.parent_membership_revision {
-                    self.circle_parent_joins.insert(key.clone(), revision);
-                } else {
-                    self.circle_parent_joins.remove(&key);
-                }
-                self.members
-                    .insert(key, (p.member_id, p.membership.as_str().to_owned()));
             }
             EventKind::MemberState => {
                 let p = event.as_member_state().map_err(unavailable)?;
@@ -804,10 +719,6 @@ impl Cut {
         };
         let target = match scope {
             ScopeRef::Realm { realm_id } => WireResourceSelector::realm(realm_id.clone()),
-            ScopeRef::Circle {
-                realm_id,
-                circle_id,
-            } => WireResourceSelector::circle(realm_id.clone(), circle_id.clone()),
             _ => return false,
         };
         let actions = [arkret_wire::CapabilityActionId::CALL_MODERATE];
@@ -964,14 +875,11 @@ fn product_owner_actions(historical: &Cut, current: &Cut, actor: &ActorId) -> Ve
 }
 
 fn product_policies(
-    parent: &Cut,
-    scope: &Cut,
-    scoped: bool,
+    realm: &Cut,
 ) -> Vec<arkret_models_collaboration::governance::operation_wire::Policy> {
-    parent
+    realm
         .policies
         .values()
-        .chain(scope.policies.values().filter(|_| scoped))
         .filter(|policy| {
             matches!(
                 policy.policy_kind,
@@ -982,43 +890,13 @@ fn product_policies(
         .collect()
 }
 
-fn product_member_effective(scope: &ScopeRef, parent: &Cut, scoped: &Cut, actor: &ActorId) -> bool {
-    if !parent.joined(actor) {
-        return false;
-    }
-    if !matches!(scope, ScopeRef::Circle { .. }) {
-        return true;
-    }
-    let key = actor.to_string();
-    scoped.joined(actor)
-        && parent
-            .member_revisions
-            .get(&key)
-            .is_some_and(|revision| scoped.circle_parent_joins.get(&key) == Some(revision))
-}
-
-struct ProductAuthorityCuts<'a> {
-    historical_parent: &'a Cut,
-    current_parent: &'a Cut,
-    historical_scope: &'a Cut,
-    current_scope: &'a Cut,
-    current_realm_head: &'a arkret_wire::CommitStreamHead,
-    current_scope_head: &'a arkret_wire::CommitStreamHead,
-}
-
 async fn product_material(
     conn: &mut AsyncPgConnection,
     query: &SignalScopeAuthorityQuery<'_>,
-    cuts: ProductAuthorityCuts<'_>,
+    historical: &Cut,
+    current: &Cut,
+    head: &arkret_wire::CommitStreamHead,
 ) -> PersistenceResult<Option<Box<arkret_models_collaboration::SignalProductAuthority>>> {
-    let ProductAuthorityCuts {
-        historical_parent,
-        current_parent,
-        historical_scope,
-        current_scope,
-        current_realm_head,
-        current_scope_head,
-    } = cuts;
     use arkret_models_collaboration::{SignalAgentProductAuthority, SignalProductAuthority};
     let realm = query.scope.realm_id();
     let mut owned = None;
@@ -1035,30 +913,14 @@ async fn product_material(
         .await?;
         let controller_actor = ActorId::account(controller.clone());
         if verified.as_ref() != Some(&controller_actor)
-            || !product_member_effective(
-                query.scope,
-                historical_parent,
-                historical_scope,
-                &controller_actor,
-            )
-            || !product_member_effective(
-                query.scope,
-                current_parent,
-                current_scope,
-                &controller_actor,
-            )
-            || historical_parent
+            || !historical.joined(&controller_actor)
+            || !current.joined(&controller_actor)
+            || historical
                 .member_revisions
                 .get(&controller_actor.to_string())
-                != current_parent
-                    .member_revisions
-                    .get(&controller_actor.to_string())
-            || historical_parent
-                .member_revisions
-                .get(&query.sender.to_string())
-                != current_parent
-                    .member_revisions
-                    .get(&query.sender.to_string())
+                != current.member_revisions.get(&controller_actor.to_string())
+            || historical.member_revisions.get(&query.sender.to_string())
+                != current.member_revisions.get(&query.sender.to_string())
         {
             return Ok(None);
         }
@@ -1073,52 +935,42 @@ async fn product_material(
         if owned.is_none() {
             return Ok(None);
         }
-        let policies = |parent: &Cut, scope: &Cut| {
-            let mut policies = parent
+        let policies = |realm: &Cut| {
+            realm
                 .policies
                 .values()
                 .filter(|policy| policy.policy_kind == arkret_wire::PolicyKind::Agent)
                 .cloned()
-                .collect::<Vec<_>>();
-            if matches!(query.scope, ScopeRef::Circle { .. }) {
-                policies.extend(
-                    scope
-                        .policies
-                        .values()
-                        .filter(|policy| policy.policy_kind == arkret_wire::PolicyKind::Agent)
-                        .cloned(),
-                );
-            }
-            policies
+                .collect::<Vec<_>>()
         };
         Some(SignalAgentProductAuthority {
             controller_account_id: controller.clone(),
             controller_grants: product_grants(
-                historical_parent,
+                historical,
                 realm,
                 &controller_actor,
                 query.sent_at,
                 None,
             ),
             current_controller_grants: product_grants(
-                current_parent,
+                current,
                 realm,
                 &controller_actor,
                 query.at,
                 None,
             ),
             historical_controller_owner_actions: product_owner_actions(
-                historical_parent,
-                historical_parent,
+                historical,
+                historical,
                 &controller_actor,
             ),
             current_controller_owner_actions: product_owner_actions(
-                current_parent,
-                current_parent,
+                current,
+                current,
                 &controller_actor,
             ),
-            historical_management_policies: policies(historical_parent, historical_scope),
-            current_management_policies: policies(current_parent, current_scope),
+            historical_management_policies: policies(historical),
+            current_management_policies: policies(current),
             key_scope: key_scope.clone(),
         })
     } else {
@@ -1126,18 +978,17 @@ async fn product_material(
     };
     // Direct profile permission has already been established from its accepted
     // stable pair and both independent contact permissions in this transaction.
-    let direct = historical_parent.direct && current_parent.direct;
+    let direct = historical.direct && current.direct;
     let material = SignalProductAuthority {
         authority_commit_id: query.authority_commit_id.clone(),
-        parent_realm_authority_commit_id: query.parent_realm_authority_commit_id.cloned(),
-        current_realm_head: current_realm_head.clone(),
-        current_scope_head: current_scope_head.clone(),
+        current_realm_head: head.clone(),
+        current_scope_head: head.clone(),
         sent_at: query.sent_at,
         grants: if direct {
             Vec::new()
         } else {
             product_grants(
-                historical_parent,
+                historical,
                 realm,
                 query.sender,
                 query.sent_at,
@@ -1147,28 +998,14 @@ async fn product_material(
         current_grants: if direct {
             Vec::new()
         } else {
-            product_grants(
-                current_parent,
-                realm,
-                query.sender,
-                query.at,
-                owned.as_ref(),
-            )
+            product_grants(current, realm, query.sender, query.at, owned.as_ref())
         },
-        historical_product_policies: product_policies(
-            historical_parent,
-            historical_scope,
-            matches!(query.scope, ScopeRef::Circle { .. }),
-        ),
-        current_product_policies: product_policies(
-            current_parent,
-            current_scope,
-            matches!(query.scope, ScopeRef::Circle { .. }),
-        ),
+        historical_product_policies: product_policies(historical),
+        current_product_policies: product_policies(current),
         owner_actions: if direct {
             Vec::new()
         } else {
-            product_owner_actions(historical_parent, current_parent, query.sender)
+            product_owner_actions(historical, current, query.sender)
         },
         profile_actions: if direct {
             vec![
@@ -1221,7 +1058,6 @@ async fn read_in_connection(
     let SignalScopeAuthorityQuery {
         scope,
         authority_commit_id,
-        parent_realm_authority_commit_id,
         sender,
         signal_class: class,
         sent_at,
@@ -1229,6 +1065,9 @@ async fn read_in_connection(
         include_product_authority,
         product_agent: _,
     } = query;
+    if !matches!(scope, ScopeRef::Realm { .. }) {
+        return Ok(denied("Signal requires an ordinary Realm stream"));
+    }
     let realm = scope.realm_id();
     let stream = CommitStreamRef::from_scope(scope, None).map_err(unavailable)?;
     let Some(declared) = declared_commit(conn, &stream, authority_commit_id, sent_at).await? else {
@@ -1243,39 +1082,9 @@ async fn read_in_connection(
     let historical = fold(&rows, declared.stream_position)?;
     let current_rows = history(conn, &stream, u64::MAX).await?;
     let current = fold(&current_rows, current_rows.head.stream_position)?;
-    let realm_stream = CommitStreamRef::Realm {
-        realm_id: realm.clone(),
-    };
-    let realm_rows = history(conn, &realm_stream, u64::MAX).await?;
-    let parent = fold(&realm_rows, realm_rows.head.stream_position)?;
-    let parent_historical = match (scope, parent_realm_authority_commit_id) {
-        (ScopeRef::Realm { .. }, None) => historical.clone(),
-        (ScopeRef::Circle { .. }, Some(id)) => {
-            let Some(cut) = declared_commit(conn, &realm_stream, id, sent_at).await? else {
-                return Ok(denied("declared parent Commit is not held"));
-            };
-            let rows = history(conn, &realm_stream, cut.stream_position).await?;
-            if rows.head.commit_id != cut.commit_id
-                || rows.head.stream_position != cut.stream_position
-            {
-                return Err(unavailable("selected parent cut is not covered"));
-            }
-            fold(&rows, cut.stream_position)?
-        }
-        _ => return Ok(denied("parent cut presence differs from scope")),
-    };
-    if let ScopeRef::Circle { circle_id, .. } = scope {
-        use arkret_models_collaboration::governance::circle::CircleState;
-        if parent_historical.circle_states.get(circle_id) != Some(&CircleState::Active)
-            || parent.circle_states.get(circle_id) != Some(&CircleState::Active)
-        {
-            return Ok(denied("historical or current Circle is not active"));
-        }
-    }
-    if !parent.joined(sender)
-        || parent.terminal
-        || parent.frozen
-        || parent.archived
+    if current.terminal
+        || current.frozen
+        || current.archived
         || !historical.joined(sender)
         || !current.joined(sender)
     {
@@ -1283,25 +1092,8 @@ async fn read_in_connection(
             "historical or current sender membership is not active",
         ));
     }
-    let circle = matches!(scope, ScopeRef::Circle { .. });
-    if circle
-        && (!parent_historical.joined(sender)
-            || historical.circle_parent_joins.get(&sender.to_string())
-                != parent_historical.member_revisions.get(&sender.to_string())
-            || current.circle_parent_joins.get(&sender.to_string())
-                != parent.member_revisions.get(&sender.to_string())
-            || !circle_parent_join_is_current(conn, realm, &historical, sender).await?
-            || !circle_parent_join_is_current(conn, realm, &current, sender).await?)
-    {
-        return Ok(denied("Circle parent join revision is no longer exact"));
-    }
-    // Scope owns membership and MLS; only the parent Realm owns grants.
-    // The explicit vector of cuts avoids inventing a cross-stream order.
-    let scope_class = if circle { SignalClass::Session } else { class };
-    if !historical.permits(realm, scope, sender, scope_class, sent_at)
-        || !current.permits(realm, scope, sender, scope_class, at)
-        || !parent_historical.permits(realm, scope, sender, class, sent_at)
-        || !parent.permits(realm, scope, sender, class, at)
+    if !historical.permits(realm, scope, sender, class, sent_at)
+        || !current.permits(realm, scope, sender, class, at)
     {
         return Ok(denied("historical or current class action is not eligible"));
     }
@@ -1342,8 +1134,6 @@ async fn read_in_connection(
             conn, realm, &recipient,
         )
         .await?
-            && (!matches!(scope, ScopeRef::Circle { .. })
-                || circle_parent_join_is_current(conn, realm, &current, &recipient).await?)
         {
             eligible.push(recipient);
         }
@@ -1356,7 +1146,7 @@ async fn read_in_connection(
     }
     // Linked parent membership is authoritative only on the target's current
     // governing Station. Its sources are independently complete accepted cuts.
-    if let Some(join) = parent.policy.as_ref().and_then(|p| p.join_policy.as_ref()) {
+    if let Some(join) = current.policy.as_ref().and_then(|p| p.join_policy.as_ref()) {
         use arkret_models_collaboration::events_payloads::join_policy::JoinPolicyGate;
         let mut source_groups = Vec::<BTreeSet<String>>::new();
         for gate in &join.gates {
@@ -1369,7 +1159,7 @@ async fn read_in_connection(
             };
             let mut joined = BTreeSet::new();
             for source in membership_source_realm_ids {
-                if parent
+                if current
                     .links
                     .get(&(source.clone(), "join_gate_from".to_owned()))
                     .map(String::as_str)
@@ -1460,23 +1250,12 @@ async fn read_in_connection(
         return Err(unavailable("MLS suite differs from its accepted genesis"));
     }
     let product_authority = if include_product_authority {
-        product_material(
-            conn,
-            &query,
-            ProductAuthorityCuts {
-                historical_parent: &parent_historical,
-                current_parent: &parent,
-                historical_scope: &historical,
-                current_scope: &current,
-                current_realm_head: &realm_rows.head,
-                current_scope_head: &current_rows.head,
-            },
-        )
-        .await
-        .unwrap_or_else(|error| {
-            tracing::debug!(%error, "Signal product material is unavailable");
-            None
-        })
+        product_material(conn, &query, &historical, &current, &current_rows.head)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::debug!(%error, "Signal product material is unavailable");
+                None
+            })
     } else {
         None
     };
@@ -1485,35 +1264,10 @@ async fn read_in_connection(
         historical_mls_event_ref,
         current_mls,
         cipher_suite,
-        current_realm_head: realm_rows.head,
+        current_realm_head: current_rows.head.clone(),
         current_scope_head: current_rows.head,
         product_authority,
     }))
-}
-
-async fn circle_parent_join_is_current(
-    conn: &mut AsyncPgConnection,
-    realm: &RealmId,
-    cut: &Cut,
-    actor: &ActorId,
-) -> PersistenceResult<bool> {
-    let Some(revision) = cut.circle_parent_joins.get(&actor.to_string()) else {
-        return Ok(false);
-    };
-    #[derive(diesel::QueryableByName)]
-    struct Present {
-        #[diesel(sql_type=diesel::sql_types::Bool)]
-        present: bool,
-    }
-    let value = serde_json::json!({"membership":"join", "parent_membership_revision": revision});
-    diesel::sql_query("SELECT circle_member_parent_join_current($1,$2,$3) AS present")
-        .bind::<Text, _>(realm.as_str())
-        .bind::<Text, _>(actor.to_string())
-        .bind::<Jsonb, _>(value)
-        .get_result::<Present>(&mut *conn)
-        .await
-        .map(|row| row.present)
-        .map_err(PersistenceError::database)
 }
 
 pub(crate) async fn recipient_realms(
@@ -1749,59 +1503,6 @@ mod typed_replay_tests {
     }
 
     #[test]
-    fn product_controller_circle_membership_cannot_expand_realm_authority() {
-        let actor = event(EventKind::MemberState, json!({})).actor_id;
-        let key = actor.to_string();
-        let mut parent = Cut::default();
-        parent
-            .members
-            .insert(key.clone(), (actor.clone(), "join".into()));
-        let revision = arkret_wire::CurrentRevision {
-            commit_id: RealmCommitId::from_digest([3; 32]),
-            stream_position: 3,
-        };
-        parent
-            .member_revisions
-            .insert(key.clone(), revision.clone());
-        let realm = ScopeRef::Realm {
-            realm_id: realm_id(),
-        };
-        let circle = ScopeRef::Circle {
-            realm_id: realm_id(),
-            circle_id: arkret_wire::CircleId::from_event_id(&EventId::from_digest(
-                arkret_canonical::DigestSuite::Sha256,
-                [4; 32],
-            )),
-        };
-        let mut scoped = Cut::default();
-        assert!(product_member_effective(&realm, &parent, &scoped, &actor));
-        assert!(!product_member_effective(&circle, &parent, &scoped, &actor));
-        scoped
-            .members
-            .insert(key.clone(), (actor.clone(), "join".into()));
-        assert!(!product_member_effective(&circle, &parent, &scoped, &actor));
-        scoped.circle_parent_joins.insert(key.clone(), revision);
-        assert!(product_member_effective(&circle, &parent, &scoped, &actor));
-        parent
-            .member_revisions
-            .get_mut(&key)
-            .unwrap()
-            .stream_position += 1;
-        assert!(!product_member_effective(&circle, &parent, &scoped, &actor));
-        let revision = parent.member_revisions[&key].clone();
-        scoped.circle_parent_joins.insert(key.clone(), revision);
-        assert!(product_member_effective(&circle, &parent, &scoped, &actor));
-        scoped.members.get_mut(&key).unwrap().1 = "leave".into();
-        assert!(!product_member_effective(&circle, &parent, &scoped, &actor));
-        assert!(!product_member_effective(
-            &realm,
-            &Cut::default(),
-            &scoped,
-            &actor,
-        ));
-    }
-
-    #[test]
     fn product_graph_requires_exact_root_parent_and_owned_join_source() {
         let actor = event(EventKind::MemberState, json!({})).actor_id;
         let id = GrantId::from_event_id(&EventId::from_digest(
@@ -1868,32 +1569,30 @@ mod typed_replay_tests {
     }
 
     #[test]
-    fn product_policy_projection_retains_parent_deny_and_circle_allow() {
+    fn product_policy_projection_keeps_both_actions_on_the_realm() {
         let actor = ActorId::account(arkret_wire::AccountId::new(
             "ak:did_core:web:alice.example".parse().unwrap(),
             "ak:did_core:web:station.example".parse().unwrap(),
         ));
-        let policy = |effect: &str| {
+        let policy = |id: &str, effect: &str| {
             serde_json::from_value::<arkret_models_collaboration::governance::operation_wire::Policy>(json!({
-            "id":"ak:policy:0198ff00-0000-7000-8000-000000000001", "schema":"ak.schema.policy.v1", "realm_id":realm_id(),
+            "id":id, "schema":"ak.schema.policy.v1", "realm_id":realm_id(),
             "policy_kind":"access", "rules":[{"rule_id":"typing","kind":"action","effect":effect,"actions":[arkret_wire::CapabilityActionId::TYPING_BROADCAST]}],
             "default_effect":"allow", "created_by":actor, "created_at":"2026-10-01T00:00:00.000Z"
         })).unwrap()
         };
-        let deny = policy("deny");
-        let allow = policy("allow");
-        let mut parent = Cut::default();
-        parent.policies.insert(deny.id.clone(), deny);
-        let mut circle = Cut::default();
-        circle.policies.insert(allow.id.clone(), allow);
-        let material = product_policies(&parent, &circle, true);
+        let deny = policy("ak:policy:0198ff00-0000-7000-8000-000000000001", "deny");
+        let allow = policy("ak:policy:0198ff00-0000-7000-8000-000000000002", "allow");
+        let mut cut = Cut::default();
+        cut.policies.insert(deny.id.clone(), deny);
+        cut.policies.insert(allow.id.clone(), allow);
+        let material = product_policies(&cut);
         assert_eq!(material.len(), 2);
         assert_eq!(material[0].rules[0].effect, arkret_wire::PolicyEffect::Deny);
         assert_eq!(
             material[1].rules[0].effect,
             arkret_wire::PolicyEffect::Allow
         );
-        assert_eq!(product_policies(&parent, &parent, false).len(), 1);
     }
 
     #[test]
@@ -2112,7 +1811,7 @@ mod held_mls_current_tests {
                 .is_none()
         );
         for mutation in [
-            "UPDATE replica_authorization_cuts SET head_commit_id=$1,circle_effect_base_commit_id=$1",
+            "UPDATE replica_authorization_cuts SET head_commit_id=$1",
             "UPDATE replica_authorization_rows SET current_commit_id=$1",
             "UPDATE replica_authorization_rows SET current_stream_position=1 WHERE current_commit_id=$1",
             "DELETE FROM replica_authorization_cuts WHERE head_commit_id=$1",

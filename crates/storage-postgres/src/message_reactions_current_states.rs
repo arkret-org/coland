@@ -77,10 +77,7 @@ async fn admit_reaction_in_connection(
         conn, event, commit, prepared,
     )
     .await?;
-    if matches!(event.scope_ref, arkret_wire::ScopeRef::Circle { .. }) {
-        crate::circle_current_states::require_active_author_in_connection(conn, event, commit)
-            .await?;
-    }
+
     let target = match crate::message_revision_current_states::locked_message_target(
         conn,
         &event.realm_id,
@@ -173,15 +170,6 @@ async fn require_visible_target(
             crate::account_stream_scan::caller_realm_floor_in_connection(
                 conn,
                 &event.realm_id,
-                &event.actor_id,
-            )
-            .await?
-        }
-        arkret_wire::ScopeRef::Circle { circle_id, .. } => {
-            crate::account_stream_scan::caller_circle_floor_in_connection(
-                conn,
-                &event.realm_id,
-                circle_id,
                 &event.actor_id,
             )
             .await?
@@ -331,7 +319,7 @@ pub(crate) async fn commit_reaction_current_state_in_connection(
                        JOIN replica_authorization_cuts a ON a.realm_id=c.realm_id AND a.source_stream_ref=c.stream_ref \
                        WHERE e.id=$4 AND e.realm_id=$1 AND e.kind='ak.message.create' AND e.state='committed' \
                          AND c.realm_id=$1 AND c.stream_ref=$2 \
-                         AND c.stream_position>a.circle_effect_base_stream_position \
+                         AND c.stream_position>a.snapshot_stream_position \
                          AND c.stream_position<=a.head_stream_position)) AS present",
                 )
                 .bind::<Text, _>(event.realm_id.as_str())
@@ -414,7 +402,7 @@ pub(crate) async fn commit_reaction_current_state_in_connection(
             },
             value,
         };
-        crate::replica_authorization::save_effect_row(
+        crate::replica_authorization::save_row(
             conn,
             &event.realm_id,
             &entry,

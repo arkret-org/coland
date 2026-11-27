@@ -5,7 +5,7 @@ mod accountability;
 mod agent_participation;
 mod governance;
 mod message_rules;
-mod realm_circle;
+mod realm;
 
 use accountability::*;
 #[cfg(test)]
@@ -18,7 +18,7 @@ pub(crate) use message_rules::realm_ids_match;
 #[cfg(test)]
 pub(super) use message_rules::validate_principal_control_realm_binding;
 use message_rules::*;
-use realm_circle::*;
+use realm::*;
 
 #[cfg(test)]
 pub(crate) fn validate_trusted_sidecar_create_operation(
@@ -89,21 +89,6 @@ pub fn operation_policy_reason_code(message: &str) -> (salvo::http::StatusCode, 
         )
     } else if message == "sidecar_create_denied" {
         (salvo::http::StatusCode::FORBIDDEN, "sidecar_create_denied")
-    } else if message == "circle_manage_capability_required" {
-        (
-            salvo::http::StatusCode::FORBIDDEN,
-            "circle_manage_capability_required",
-        )
-    } else if message == "circle_member_manage_capability_required" {
-        (
-            salvo::http::StatusCode::FORBIDDEN,
-            "circle_member_manage_capability_required",
-        )
-    } else if message == "circle_member_must_be_realm_member" {
-        (
-            salvo::http::StatusCode::UNPROCESSABLE_ENTITY,
-            "circle_member_must_be_realm_member",
-        )
     } else if message == arkret_wire::ErrorCode::REALM_FROZEN {
         (
             salvo::http::StatusCode::FORBIDDEN,
@@ -214,10 +199,7 @@ async fn validate_one_operation_policy(
                     .ok_or("ak.device.authorize requires an account actor")?,
             )?;
         }
-        validate_circle_create_policy(state, operation).await?;
-        validate_circle_management_policy(state, operation).await?;
         validate_member_state_policy(state, operation, agent_membership_cascade).await?;
-        validate_circle_scope_membership(state, operation)?;
         validate_pin_scope_safety(state, operation)?;
         validate_applet_registration_authz(state, operation).await?;
         validate_call_recording_start_policy(state, operation).await?;
@@ -300,7 +282,7 @@ mod tests {
 
     use super::*;
 
-    fn circle_create_with_payload(payload: Value) -> Operation {
+    fn strand_create_with_payload(payload: Value) -> Operation {
         arkret_event_draft::test_support::raw_projected_operation(
             arkret_identifiers::OperationId::new(
                 "ak:operation:01964137-0000-7000-8000-000000000040",
@@ -310,14 +292,14 @@ mod tests {
                 "ak:realm:AQcksDTzb8Sxrn1BUVVlHtH4vBOy99RKUB4EwOq_413b",
             )
             .unwrap(),
-            arkret_wire::EventKind::CircleCreate.as_str(),
+            arkret_wire::EventKind::StrandCreate.as_str(),
             payload,
         )
     }
 
     #[test]
     fn policy_sender_uses_typed_envelope_sender_for_full_object_create_payload() {
-        let op = circle_create_with_payload(serde_json::json!({
+        let op = strand_create_with_payload(serde_json::json!({
             "object": { "created_by": "did:web:example.com:users:alice" },
         }));
         assert_eq!(policy_operation_sender(&op), Some(&op.context.sender));
@@ -364,37 +346,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn ordinary_circle_create_cannot_claim_reserved_sidecar_shape() {
-        let actor = "did:web:example.com:users:alice";
-        let operation = circle_create_with_payload(serde_json::json!({
-            "object": {
-                "id": "ak:circle:AbLN8Zik9Z7ZJiPG_sNwMk4iV0JGKAnWmyOB0FKWVGCV",
-                "schema": "ak.schema.circle.v1",
-                "realm_id": "ak:realm:AQcksDTzb8Sxrn1BUVVlHtH4vBOy99RKUB4EwOq_413b",
-                "title": "Agent Sidecar Scope",
-                "display": {
-                    "short_name": "SC-ABCDEFGHIJKLMNOP",
-                    "color_token": "slate",
-                    "symbol": { "glyph": "lock" }
-                },
-                "directory_visibility": "members",
-                "join_rule": "invite",
-                "history_access": "since_join",
-                "content_encryption_floor": "e2ee_required",
-                "metadata_encryption_floor": "e2ee_required",
-                "encryption_profile": "mls_rfc9420",
-                "state": "active",
-                "created_by": actor,
-                "created_at": "2026-07-20T00:00:00.000Z"
-            }
-        }));
-        let state = AppState::new(crate::config::AppConfig::test_default(), Db { pool: None });
-        assert_eq!(
-            validate_circle_create_policy(&state, &operation).await,
-            Err("sidecar_create_denied")
-        );
-    }
+
 }
 
 async fn validate_agent_grant_ceiling(

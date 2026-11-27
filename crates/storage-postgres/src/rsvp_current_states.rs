@@ -108,22 +108,9 @@ pub(crate) async fn commit_rsvp_current_state_in_connection(
     {
         return Err(refused("not_found", "RSVP target is unavailable"));
     }
-    let expected_scope = match target.value.get("scope_circle_id") {
-        None | Some(Value::Null) => arkret_wire::ScopeRef::Realm {
-            realm_id: event.realm_id.clone(),
-        },
-        Some(Value::String(id)) => arkret_wire::ScopeRef::Circle {
-            realm_id: event.realm_id.clone(),
-            circle_id: arkret_wire::CircleId::new(id.clone()).map_err(|error| {
-                PersistenceError::Internal(format!("stored Strand scope is invalid: {error}"))
-            })?,
-        },
-        Some(_) => {
-            return Err(PersistenceError::Internal(
-                "stored Strand scope has an invalid type".to_owned(),
-            ));
-        }
-    };
+    let object: arkret_models_collaboration::objects::strand::Strand =
+        serde_json::from_value(target.value.clone()).map_err(PersistenceError::database)?;
+    let expected_scope = arkret_wire::ScopeRef::Realm { realm_id: object.realm_id };
     if event.scope_ref != expected_scope {
         return Err(refused("not_found", "RSVP target is unavailable"));
     }

@@ -7,8 +7,6 @@ pub(crate) mod agent_participation;
 mod authority_commit;
 #[cfg(feature = "conformance-harness")]
 pub(crate) use authority_commit::{submission_kind_class, trace_submission_refusal};
-// AKP-0007 (P2A.3) — `/_arkret/self/circles/*` admin surface.
-pub(crate) mod circles;
 #[cfg(any(test, feature = "conformance-harness"))]
 pub(crate) mod conformance;
 pub(crate) mod events;

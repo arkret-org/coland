@@ -425,10 +425,6 @@ pub(crate) async fn qualify_management_administrator(
 ) -> PersistenceResult<Option<serde_json::Value>> {
     let target = match scope {
         arkret_wire::ScopeRef::Realm { realm_id } => WireResourceSelector::realm(realm_id.clone()),
-        arkret_wire::ScopeRef::Circle {
-            realm_id,
-            circle_id,
-        } => WireResourceSelector::circle(realm_id.clone(), circle_id.clone()),
         _ => return Err(error("capability_denied", "unsupported management scope")),
     };
     qualify_principal_or_actor(

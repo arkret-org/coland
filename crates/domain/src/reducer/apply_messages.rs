@@ -19,13 +19,7 @@ impl ProjectionState {
             .and_then(|v| v.as_str())
             .unwrap_or(operation.realm_id.as_str())
             .to_owned();
-        // The receiver has already verified this immutable scope against the
-        // Strand. A missing local Strand projection must not change the scope.
-        let strand_scope = match &operation.context.accepted_scope_ref {
-            arkret_wire::ScopeRef::Circle { circle_id, .. } => Some(circle_id.to_string()),
-            _ => None,
-        };
-        let content = message_content_from_payload(&operation.payload, strand_scope);
+        let content = message_content_from_payload(&operation.payload);
         let encrypted = operation
             .payload
             .get("encrypted")
@@ -57,8 +51,7 @@ impl ProjectionState {
                     };
                 }
                 let scope_realm = match &operation.context.accepted_scope_ref {
-                    arkret_wire::ScopeRef::Realm { realm_id }
-                    | arkret_wire::ScopeRef::Circle { realm_id, .. } => Some(realm_id),
+                    arkret_wire::ScopeRef::Realm { realm_id } => Some(realm_id),
                     _ => None,
                 };
                 if scope_realm != Some(&operation.realm_id) {
@@ -105,17 +98,13 @@ impl ProjectionState {
             use arkret_models_collaboration::objects::relation::RelationEndpoint;
             let relation_id =
                 arkret_wire::RelationId::from_event_id(&operation.context.event_id).to_string();
-            let scope_circle_id = match &operation.context.accepted_scope_ref {
-                arkret_wire::ScopeRef::Circle { circle_id, .. } => Some(circle_id.to_string()),
-                _ => None,
-            };
             self.relations.insert(
                 relation_id.clone(),
                 ColandRelationState {
                     relation_id,
                     realm_id: operation.realm_id.to_string(),
                     relation_kind: "replies_to".to_owned(),
-                    scope_circle_id,
+
                     from_ref: Some(RelationEndpoint::Object(state.message_id.clone())),
                     to_ref: Some(RelationEndpoint::Object(target.to_string())),
                     rank: None,
@@ -141,16 +130,12 @@ impl ProjectionState {
         definition: PollBlock,
         now: chrono::DateTime<chrono::Utc>,
     ) {
-        let scope_circle_id = match &operation.context.accepted_scope_ref {
-            arkret_wire::ScopeRef::Circle { circle_id, .. } => Some(circle_id.clone()),
-            _ => None,
-        };
         self.polls.insert(
             arkret_wire::MessageId::from_event_id(&operation.context.event_id),
             PollState {
                 message_event_id: operation.context.event_id.clone(),
                 realm_id: operation.realm_id.clone(),
-                scope_circle_id,
+                effective_scope: operation.context.accepted_scope_ref.clone(),
                 definition,
                 votes: BTreeMap::new(),
                 responses: BTreeMap::new(),
@@ -172,19 +157,7 @@ impl ProjectionState {
                 reason: "poll_ref_unknown".to_owned(),
             };
         };
-        let accepted_circle = match &operation.context.accepted_scope_ref {
-            arkret_wire::ScopeRef::Realm { realm_id } if realm_id == &operation.realm_id => None,
-            arkret_wire::ScopeRef::Circle {
-                realm_id,
-                circle_id,
-            } if realm_id == &operation.realm_id => Some(circle_id),
-            _ => {
-                return ProjectionEffect::Rejected {
-                    reason: "poll_ref_cross_scope".to_owned(),
-                };
-            }
-        };
-        if poll.realm_id != operation.realm_id || poll.scope_circle_id.as_ref() != accepted_circle {
+        if poll.realm_id != operation.realm_id || poll.effective_scope != operation.context.accepted_scope_ref {
             return ProjectionEffect::Rejected {
                 reason: "poll_ref_cross_scope".to_owned(),
             };
@@ -780,11 +753,6 @@ impl ProjectionState {
         if pin_home.realm_id != target_scope.realm_id {
             return Err("not_found");
         }
-        if let Some(target_circle_id) = target_scope.scope_circle_id.as_deref()
-            && pin_home.scope_circle_id.as_deref() != Some(target_circle_id)
-        {
-            return Err("not_found");
-        }
         Ok(())
     }
 
@@ -800,21 +768,14 @@ impl ProjectionState {
                     self.realm_states.contains_key(id) || self.realm_create_log(id).is_some();
                 (live && !self.realm_is_in_terminal_state(id)).then(|| PinEffectiveScope {
                     realm_id: id.to_owned(),
-                    scope_circle_id: None,
-                })
-            }
-            "circle" => {
-                let circle = self.circles.get(id)?;
-                (circle.state == CircleLifecycleState::Active).then(|| PinEffectiveScope {
-                    realm_id: circle.realm_id.clone(),
-                    scope_circle_id: Some(circle.circle_id.clone()),
+
                 })
             }
             "strand" => {
                 let strand = self.strands.get(id)?;
                 (!strand.state.is_terminal()).then(|| PinEffectiveScope {
                     realm_id: strand.realm_id.clone(),
-                    scope_circle_id: strand.scope_circle_id.clone(),
+
                 })
             }
             "space" => {
@@ -822,7 +783,7 @@ impl ProjectionState {
                 (space.state != SpaceContainerLifecycleState::Tombstoned).then(|| {
                     PinEffectiveScope {
                         realm_id: space.realm_id.clone(),
-                        scope_circle_id: space.scope_circle_id.clone(),
+
                     }
                 })
             }
@@ -838,9 +799,10 @@ impl ProjectionState {
             if message.redacted_at.is_some() {
                 return None;
             }
+            self.strands.get(&message.thread_id)?;
             return Some(PinEffectiveScope {
                 realm_id: message.realm_id.clone(),
-                scope_circle_id: self.strand_scope_circle_id(&message.thread_id),
+
             });
         }
         if let Some(strand) = self.strands.get(target_ref) {
@@ -849,7 +811,7 @@ impl ProjectionState {
             }
             return (!strand.state.is_terminal()).then(|| PinEffectiveScope {
                 realm_id: strand.realm_id.clone(),
-                scope_circle_id: strand.scope_circle_id.clone(),
+
             });
         }
         if let Some(space) = self.space_containers.get(target_ref) {
@@ -859,7 +821,7 @@ impl ProjectionState {
             return (space.state != SpaceContainerLifecycleState::Tombstoned).then(|| {
                 PinEffectiveScope {
                     realm_id: space.realm_id.clone(),
-                    scope_circle_id: space.scope_circle_id.clone(),
+
                 }
             });
         }
@@ -869,7 +831,7 @@ impl ProjectionState {
             }
             return (!morph.state.is_terminal()).then(|| PinEffectiveScope {
                 realm_id: morph.realm_id.clone(),
-                scope_circle_id: None,
+
             });
         }
         if let Some(relation) = self.relations.get(target_ref) {
@@ -878,7 +840,7 @@ impl ProjectionState {
             }
             return relation.is_active().then(|| PinEffectiveScope {
                 realm_id: relation.realm_id.clone(),
-                scope_circle_id: None,
+
             });
         }
         None
@@ -921,7 +883,7 @@ fn encrypted_projection_field_matches_operation(value: &Value, operation: &Opera
 
 struct PinEffectiveScope {
     realm_id: String,
-    scope_circle_id: Option<String>,
+
 }
 
 /// Reduce one poll response against its poll definition.

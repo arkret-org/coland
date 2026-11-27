@@ -8592,7 +8592,6 @@ async fn owned_consumer_fixture_with_prepared_scope(
     let mut scope: arkret_models_collaboration::events_payloads::agent::AgentKeyScope =
         serde_json::from_value(serde_json::json!({
             "actions":[arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
-                arkret_wire::CapabilityActionId::CircleMemberAdd,
                 arkret_wire::CapabilityActionId::MessageCreate,
                 arkret_wire::CapabilityActionId::EventRead,
                 "ak.self.committed_event.resource.get.v1",
@@ -8860,7 +8859,6 @@ async fn owned_consumer_footprint(
     let mut conn = pool.get().await.unwrap();
     let extra = diesel::sql_query(
         "SELECT jsonb_build_object( \
-         'circle_members',(SELECT COALESCE(jsonb_agg(to_jsonb(c) ORDER BY to_jsonb(c)::text),'[]'::jsonb) FROM circle_member_state_current_states c WHERE realm_id=$1), \
          'quota',(SELECT COALESCE(jsonb_agg(to_jsonb(q) ORDER BY to_jsonb(q)::text),'[]'::jsonb) FROM capability_quota_counters q), \
          'quota_consumptions',(SELECT COALESCE(jsonb_agg(to_jsonb(q) ORDER BY to_jsonb(q)::text),'[]'::jsonb) FROM capability_quota_consumptions q), \
          'projection_events',(SELECT COUNT(*) FROM projection_events WHERE realm_id=$1)) AS value",
@@ -8954,196 +8952,7 @@ async fn owned_consumer_refused_without_effects(
     );
 }
 
-async fn owned_consumer_circle_scenario(deny_join: bool) {
-    use arkret_wire::{ActorId, ScopeRef};
-    let fixture = boxed_owned_consumer_fixture(1).await;
-    let agent = &fixture.agents[0];
-    let realm = &fixture.head.event.realm_id;
-    let created_at = fixture.head.commit.committed_at + chrono::TimeDelta::milliseconds(1);
-    let create = Box::pin(ordinary_realm::source_request(
-        &fixture.pool,
-        ordinary_realm::next_request_for_actor(
-            &fixture.head, EventKind::CircleCreate,
-            ActorId::account(fixture.founder.clone()),
-            serde_json::json!({"object":{"schema":"ak.schema.circle.v1","realm_id":realm,
-                "title":"Actual Agent self-entry","display":{"short_name":"Owned", "color_token":"blue","symbol":{"glyph":"lock"}},
-                "directory_visibility":"members","join_rule":"public","history_access":"since_join",
-                "state":"active","created_by":ActorId::account(fixture.founder.clone()),
-                "created_at":arkret_canonical::format_timestamp_canonical(created_at)}}), created_at,
-        ),
-    )).await;
-    fixture_commit_step(&fixture.pool, create.clone())
-        .await
-        .unwrap();
-    let circle = arkret_wire::CircleId::from_event_id(&create.authority_commit.event.event_id);
-    let scope = ScopeRef::Circle {
-        realm_id: realm.clone(),
-        circle_id: circle.clone(),
-    };
-    let member = ActorId::account(agent.account.clone());
-    let parent = Box::pin(ordinary_realm::parent_membership_revision(
-        &fixture.pool,
-        realm,
-        &member,
-    ))
-    .await;
-    assert_eq!(
-        parent,
-        serde_json::json!({"commit_id":agent.join.commit.commit_id,
-        "stream_position":agent.join.commit.stream_position})
-    );
-    let payload = serde_json::json!({"circle_id":circle,"member_id":member,"membership":"join",
-        "expected_membership":null,"parent_membership_revision":parent});
-    let no_grant = owned_consumer_signed_request(
-        &create.authority_commit,
-        agent,
-        EventKind::CircleMemberState,
-        scope.clone(),
-        payload.clone(),
-        created_at + chrono::TimeDelta::milliseconds(1),
-    );
-    owned_consumer_refused_without_effects(
-        &fixture,
-        no_grant,
-        coland_storage::ConflictCode::CapabilityDenied,
-    )
-    .await;
 
-    // This is a normal Circle capability, never the closed Owned-Agent
-    // special issuer source (which does not grant CircleMemberAdd).
-    let controller_grant = Box::pin(owned_consumer_root_grant(
-        &fixture,
-        &create.authority_commit,
-        &ActorId::account(fixture.controller.history.account.clone()),
-        &["ak.circle.member.add"],
-        serde_json::json!([{"kind":"circle","realm_id":realm,"circle_id":circle}]),
-        None,
-    ))
-    .await;
-    fixture_commit_step(&fixture.pool, controller_grant.clone())
-        .await
-        .unwrap();
-    let permission = Box::pin(owned_consumer_root_grant(
-        &fixture,
-        &controller_grant.authority_commit,
-        &member,
-        &["ak.circle.member.add"],
-        serde_json::json!([{"kind":"circle","realm_id":realm,"circle_id":circle}]),
-        None,
-    ))
-    .await;
-    fixture_commit_step(&fixture.pool, permission.clone())
-        .await
-        .unwrap();
-    let mut circle_head = permission.authority_commit.clone();
-    if deny_join {
-        // Actual Circle policy source, with parent Realm default Allow.
-        // Circle does not gain the Realm controller-written Join carve-out
-        // or the unrelated MemberState management-review carrier.
-        let policy_id = format!("ak:policy:{}", uuid::Uuid::now_v7());
-        let at =
-            permission.authority_commit.commit.committed_at + chrono::TimeDelta::milliseconds(1);
-        let event = ordinary_realm::event_for_actor(
-            EventKind::PolicySet,
-            scope.clone(),
-            ActorId::account(fixture.founder.clone()),
-            serde_json::json!({"policy_id":policy_id,"expected_commit_id":null,
-                "value":{"schema":"ak.schema.policy.v1","id":policy_id,"realm_id":realm,
-                    "policy_kind":"agent","default_effect":"allow",
-                    "created_by":ActorId::account(fixture.founder.clone()),"created_at":arkret_canonical::format_timestamp_canonical(at),
-                    "rules":[{"rule_id":"circle_owned_join_deny","kind":"agent","effect":"deny",
-                        "agent_target":{"kind":"all"},"agent_operations":["join"]}]}}),
-            at,
-        );
-        let mut policy = ordinary_realm::request_for_event(&permission.authority_commit, event, at);
-        policy.authority_commit.commit.stream_ref =
-            arkret_wire::CommitStreamRef::from_scope(&scope, None).unwrap();
-        policy.authority_commit.commit.stream_position = 0;
-        policy.authority_commit.commit.previous_commit_ref = None;
-        ordinary_realm::seal_final_commit(&mut policy.authority_commit.commit);
-        let policy = Box::pin(ordinary_realm::source_request(&fixture.pool, policy)).await;
-        fixture_commit_step(&fixture.pool, policy.clone())
-            .await
-            .unwrap();
-        circle_head = policy.authority_commit;
-    }
-    let mut wrong_parent = payload.clone();
-    wrong_parent["parent_membership_revision"]["commit_id"] =
-        serde_json::json!(create.authority_commit.commit.commit_id);
-    let wrong = owned_consumer_signed_request(
-        &circle_head,
-        agent,
-        EventKind::CircleMemberState,
-        scope.clone(),
-        wrong_parent,
-        circle_head.commit.committed_at + chrono::TimeDelta::milliseconds(1),
-    );
-    owned_consumer_refused_without_effects(
-        &fixture,
-        wrong,
-        coland_storage::ConflictCode::FailedPrecondition,
-    )
-    .await;
-    let join = owned_consumer_signed_request(
-        &circle_head,
-        agent,
-        EventKind::CircleMemberState,
-        scope.clone(),
-        payload,
-        circle_head.commit.committed_at + chrono::TimeDelta::milliseconds(2),
-    );
-    if deny_join {
-        owned_consumer_refused_without_effects(
-            &fixture,
-            join,
-            coland_storage::ConflictCode::CapabilityDenied,
-        )
-        .await;
-    } else {
-        let outcome = fixture_commit_step(&fixture.pool, join.clone())
-            .await
-            .unwrap();
-        assert!(outcome.event_inserted);
-        let accepted = PgAuthorityCommitStore {
-            pool: fixture.pool.clone(),
-        }
-        .committed_event(&join.authority_commit.event.event_id)
-        .await
-        .unwrap()
-        .unwrap();
-        assert!(accepted.event == join.authority_commit.event);
-        assert!(accepted.commit == join.authority_commit.commit);
-        // A management Allow is a separate gate, not automatic MLS membership.
-        let mut conn = fixture.pool.get().await.unwrap();
-        use diesel::sql_types::{BigInt, Text};
-        use diesel_async::RunQueryDsl;
-        #[derive(diesel::QueryableByName)]
-        struct Counts {
-            #[diesel(sql_type = BigInt)]
-            joined: i64,
-            #[diesel(sql_type = BigInt)]
-            groups: i64,
-        }
-        let counts = diesel::sql_query("SELECT (SELECT COUNT(*) FROM circle_member_state_current_states WHERE circle_id=$1 AND member_id=$2 AND membership='join') AS joined, (SELECT COUNT(*) FROM mls_group_current_states WHERE realm_id=$3) AS groups")
-            .bind::<Text,_>(circle.as_str()).bind::<Text,_>(member.to_string()).bind::<Text,_>(realm.as_str())
-            .get_result::<Counts>(&mut *conn).await.unwrap();
-        assert_eq!(counts.joined, 1);
-        assert_eq!(
-            counts.groups, 0,
-            "Circle membership cannot fabricate Add or Welcome"
-        );
-    }
-}
-
-#[tokio::test]
-async fn owned_agent_self_circle_join_requires_actual_grant_and_exact_parent_current() {
-    fixture_step(Box::pin(owned_consumer_circle_scenario(false))).await;
-}
-
-#[tokio::test]
-async fn owned_agent_self_circle_join_obeys_actual_circle_policy_deny() {
-    fixture_step(Box::pin(owned_consumer_circle_scenario(true))).await;
-}
 
 async fn owned_consumer_quota_scenario() {
     use arkret_wire::{ActorId, ScopeRef};
@@ -12803,36 +12612,13 @@ async fn native_reply_preparation_fixture(
     grant_message: bool,
     lifetime: chrono::TimeDelta,
 ) -> NativeReplyPreparationFixture {
-    Box::pin(native_reply_preparation_fixture_in_scope(
-        controller_constraints,
-        grant_message,
-        lifetime,
-        false,
-    ))
-    .await
-}
-
-async fn native_reply_preparation_fixture_in_scope(
-    controller_constraints: Option<serde_json::Value>,
-    grant_message: bool,
-    lifetime: chrono::TimeDelta,
-    in_circle: bool,
-) -> NativeReplyPreparationFixture {
-    Box::pin(native_reply_preparation_fixture_with_body(
-        controller_constraints,
-        grant_message,
-        lifetime,
-        in_circle,
-        true,
-    ))
-    .await
+    native_reply_preparation_fixture_with_body(controller_constraints, grant_message, lifetime, true).await
 }
 
 fn native_reply_preparation_fixture_with_body(
     controller_constraints: Option<serde_json::Value>,
     grant_message: bool,
     lifetime: chrono::TimeDelta,
-    in_circle: bool,
     grant_body: bool,
 ) -> Pin<Box<dyn Future<Output = NativeReplyPreparationFixture> + Send>> {
     fixture_step(fixture_future(|| async move {
@@ -12840,7 +12626,6 @@ fn native_reply_preparation_fixture_with_body(
             controller_constraints,
             grant_message,
             lifetime,
-            in_circle,
             grant_body,
         ))
         .await
@@ -12851,7 +12636,6 @@ async fn build_native_reply_preparation_fixture(
     controller_constraints: Option<serde_json::Value>,
     grant_message: bool,
     lifetime: chrono::TimeDelta,
-    in_circle: bool,
     grant_body: bool,
 ) -> NativeReplyPreparationFixture {
     use coland_storage::AgentParticipationStore;
@@ -12873,7 +12657,7 @@ async fn build_native_reply_preparation_fixture(
                 &original,
                 &head,
                 &actor,
-                &["ak.message.create", "ak.circle.member.add"],
+                &["ak.message.create"],
                 serde_json::json!([{"kind":"realm","realm_id":realm}]),
                 constraints,
             ))
@@ -12923,73 +12707,6 @@ async fn build_native_reply_preparation_fixture(
     let mut effective_scope = arkret_wire::ScopeRef::Realm {
         realm_id: realm.clone(),
     };
-    if in_circle {
-        let at = head.commit.committed_at + chrono::TimeDelta::milliseconds(1);
-        let create = Box::pin(ordinary_realm::source_request(&original.pool,
-            ordinary_realm::next_request_for_actor(&head,EventKind::CircleCreate,
-                arkret_wire::ActorId::account(original.founder.clone()),
-                serde_json::json!({"object":{"schema":"ak.schema.circle.v1","realm_id":realm,
-                    "title":"Native exact Circle reply","display":{"short_name":"Reply","color_token":"blue","symbol":{"glyph":"lock"}},
-                    "directory_visibility":"members","join_rule":"public","history_access":"since_join",
-                    "state":"active","created_by":arkret_wire::ActorId::account(original.founder.clone()),
-                    "created_at":arkret_canonical::format_timestamp_canonical(at)}}),at))).await;
-        fixture_commit_step(&original.pool, create.clone())
-            .await
-            .unwrap();
-        head = create.authority_commit;
-        let circle = arkret_wire::CircleId::from_event_id(&head.event.event_id);
-        effective_scope = arkret_wire::ScopeRef::Circle {
-            realm_id: realm.clone(),
-            circle_id: circle.clone(),
-        };
-        let mut circle_head: Option<coland_storage::AuthorityCommitTransaction> = None;
-        for account in [
-            &original.founder,
-            &original.controller.history.account,
-            &original.agents[0].account,
-        ] {
-            let actor = arkret_wire::ActorId::account(account.clone());
-            let parent = Box::pin(ordinary_realm::parent_membership_revision(
-                &original.pool,
-                &realm,
-                &actor,
-            ))
-            .await;
-            let payload = serde_json::json!({"circle_id":circle,"member_id":actor,"membership":"join",
-                "expected_membership":null,"parent_membership_revision":parent});
-            let request = if account == &original.agents[0].account {
-                let previous = circle_head.as_ref().unwrap();
-                Box::pin(ordinary_realm::source_request(
-                    &original.pool,
-                    owned_consumer_signed_request(
-                        previous,
-                        &original.agents[0],
-                        EventKind::CircleMemberState,
-                        effective_scope.clone(),
-                        payload,
-                        previous.commit.committed_at + chrono::TimeDelta::milliseconds(1),
-                    ),
-                ))
-                .await
-            } else {
-                Box::pin(native_reply_human_scoped_request(
-                    &original.pool,
-                    &head,
-                    circle_head.as_ref(),
-                    EventKind::CircleMemberState,
-                    effective_scope.clone(),
-                    actor,
-                    payload,
-                ))
-                .await
-            };
-            fixture_commit_step(&original.pool, request.clone())
-                .await
-                .unwrap();
-            circle_head = Some(request.authority_commit);
-        }
-        head = circle_head.unwrap();
-    }
     let at = head.commit.committed_at + chrono::TimeDelta::milliseconds(1);
     let strand_request = Box::pin(ordinary_realm::source_request(
         &original.pool,
@@ -13006,29 +12723,6 @@ async fn build_native_reply_preparation_fixture(
         ),
     ))
     .await;
-    let strand_request = if in_circle {
-        let mut payload: arkret_models_collaboration::events_payloads::strand::StrandCreatePayload =
-            serde_json::from_value(
-                serde_json::to_value(&strand_request.authority_commit.event.payload).unwrap(),
-            )
-            .unwrap();
-        let arkret_wire::ScopeRef::Circle { circle_id, .. } = &effective_scope else {
-            panic!("Circle fixture requires its exact signed scope");
-        };
-        payload.object.scope_circle_id = Some(circle_id.clone());
-        Box::pin(native_reply_human_scoped_request(
-            &original.pool,
-            &head,
-            Some(&head),
-            EventKind::StrandCreate,
-            effective_scope.clone(),
-            arkret_wire::ActorId::account(original.founder.clone()),
-            serde_json::to_value(payload).unwrap(),
-        ))
-        .await
-    } else {
-        strand_request
-    };
     fixture_commit_step(&original.pool, strand_request.clone())
         .await
         .unwrap();
@@ -13045,20 +12739,6 @@ async fn build_native_reply_preparation_fixture(
         ),
     ))
     .await;
-    let message = if in_circle {
-        Box::pin(native_reply_human_scoped_request(
-            &original.pool,
-            &strand_request.authority_commit,
-            Some(&strand_request.authority_commit),
-            EventKind::MessageCreate,
-            effective_scope,
-            arkret_wire::ActorId::account(original.founder.clone()),
-            ordinary_realm::message_payload(&strand, "Accepted third-party native reply source"),
-        ))
-        .await
-    } else {
-        message
-    };
     fixture_commit_step(&original.pool, message.clone())
         .await
         .unwrap();
@@ -13276,22 +12956,6 @@ async fn native_public_reply_unreserved_guard_uses_exact_accepted_source() {
         // The original accepted Create and issuer material are unchanged;
         // the authoritative Message current now covers a different revision.
         native_reply_refused_unchanged(&fixture, &fixture.input, ParticipationBits::ALL).await;
-        let circle = Box::pin(native_reply_preparation_fixture_in_scope(
-            None,
-            true,
-            chrono::TimeDelta::hours(1),
-            true,
-        ))
-        .await;
-        assert!(matches!(
-            circle.source.event.scope_ref,
-            arkret_wire::ScopeRef::Circle { .. }
-        ));
-        let guard = native_reply_preparation_step(&circle, &circle.input, ParticipationBits::ALL)
-            .await
-            .unwrap();
-        assert!(guard.permits_handoff());
-        guard.finish().await.unwrap();
     }))
     .await;
 }
@@ -13373,7 +13037,7 @@ async fn native_public_reply_caller_membership_and_controller_upper_bound_are_re
     use arkret_models_collaboration::governance::agent_participation::ParticipationBits;
     fixture_step(fixture_future(|| async {
         let no_body = Box::pin(native_reply_preparation_fixture_with_body(
-            None, true, chrono::TimeDelta::hours(1), false, false,
+            None, true, chrono::TimeDelta::hours(1), false,
         )).await;
         // The exact original Event GET already succeeded in setup and the
         // MessageCreate grant exists. Neither substitutes for body permission.
@@ -13730,83 +13394,7 @@ async fn agent_content_session_sidecar_desired_precedes_effective_payload_access
     .await;
 }
 
-#[tokio::test]
-async fn agent_content_session_circle_requires_both_exact_memberships() {
-    fixture_step(fixture_future(|| async {
-        use arkret_wire::{ActorId, ScopeRef};
-        let fixture = boxed_owned_consumer_fixture(1).await;
-        let pool = &fixture.pool;
-        let realm = &fixture.head.event.realm_id;
-        let founder = ActorId::account(fixture.founder.clone());
-        let controller = ActorId::account(fixture.controller.history.account.clone());
-        let agent = ActorId::account(fixture.agents[0].account.clone());
-        let mut at = fixture.head.commit.committed_at + chrono::TimeDelta::milliseconds(1);
-        let create = ordinary_realm::next_request_for_actor(
-            &fixture.head, EventKind::CircleCreate, founder.clone(),
-            serde_json::json!({"object":{"schema":"ak.schema.circle.v1","realm_id":realm,
-                "title":"Content source Circle","display":{"short_name":"Read", "color_token":"blue","symbol":{"glyph":"lock"}},
-                "directory_visibility":"members","join_rule":"public","history_access":"since_join",
-                "state":"active","created_by":founder,"created_at":arkret_canonical::format_timestamp_canonical(at)}}), at);
-        let create = Box::pin(ordinary_realm::source_request(pool, create)).await;
-        fixture_commit_step(pool, create.clone()).await.unwrap();
-        let circle = arkret_wire::CircleId::from_event_id(&create.authority_commit.event.event_id);
-        let scope = ScopeRef::Circle { realm_id: realm.clone(), circle_id: circle.clone() };
-        let mut head = create.authority_commit;
-        for member in [&controller, &agent] {
-            let grant = Box::pin(owned_consumer_root_grant(&fixture, &head, member,
-                &["ak.circle.member.add"], serde_json::json!([{"kind":"circle","realm_id":realm,"circle_id":circle}]), None)).await;
-            fixture_commit_step(pool, grant.clone()).await.unwrap();
-            head = grant.authority_commit;
-        }
-        at = head.commit.committed_at;
-        for (index, member) in [&founder, &controller, &agent].into_iter().enumerate() {
-            at += chrono::TimeDelta::milliseconds(1);
-            let parent = Box::pin(ordinary_realm::parent_membership_revision(pool, realm, member)).await;
-            let payload = serde_json::json!({"circle_id":circle,"member_id":member,"membership":"join",
-                    "expected_membership":null,"parent_membership_revision":parent});
-            let mut request = if member == &agent {
-                owned_consumer_signed_request(&head, &fixture.agents[0], EventKind::CircleMemberState, scope.clone(), payload, at)
-            } else {
-                let event = ordinary_realm::event_for_actor(EventKind::CircleMemberState, scope.clone(), member.clone(), payload, at);
-                ordinary_realm::request_for_event(&head, event, at)
-            };
-            request.authority_commit.commit.stream_ref = arkret_wire::CommitStreamRef::from_scope(&scope, None).unwrap();
-            if index == 0 {
-                request.authority_commit.commit.stream_position = 0;
-                request.authority_commit.commit.previous_commit_ref = None;
-            }
-            ordinary_realm::seal_final_commit(&mut request.authority_commit.commit);
-            let request = Box::pin(ordinary_realm::source_request(pool, request)).await;
-            fixture_commit_step(pool, request.clone()).await.unwrap();
-            head = request.authority_commit;
-        }
-        at += chrono::TimeDelta::milliseconds(1);
-        let event = ordinary_realm::event_for_actor(EventKind::StrandCreate, scope.clone(), founder.clone(),
-            serde_json::json!({"object":{"schema":"ak.schema.strand.v1","realm_id":realm,"scope_circle_id":circle,
-                "tracks":{"discussion":{"is_primary":true,"profile":"discussion"}},"state":"active",
-                "metadata":{"title":"Scoped read"},"created_by":founder,"created_at":arkret_canonical::format_timestamp_canonical(at)}}), at);
-        let mut request = ordinary_realm::request_for_event(&head, event, at);
-        request.authority_commit.commit.stream_ref = arkret_wire::CommitStreamRef::from_scope(&scope, None).unwrap();
-        ordinary_realm::seal_final_commit(&mut request.authority_commit.commit);
-        let request = Box::pin(ordinary_realm::source_request(pool, request)).await;
-        fixture_commit_step(pool, request.clone()).await.unwrap();
-        let source = content_session_request(&fixture, Some(arkret_wire::StrandId::from_event_id(&request.authority_commit.event.event_id)));
-        let allowed = content_session_source(pool, &source).await.unwrap();
-        assert_eq!(allowed.granted_scope, source.requested_scope);
-        assert!(allowed.capability_grant_refs.is_empty());
-        at += chrono::TimeDelta::milliseconds(1);
-        let event = ordinary_realm::event_for_actor(EventKind::CircleMemberState, scope.clone(), controller.clone(),
-            serde_json::json!({"circle_id":circle,"member_id":controller,"membership":"leave",
-                "expected_membership":"join"}), at);
-        let mut leave = ordinary_realm::request_for_event(&request.authority_commit, event, at);
-        leave.authority_commit.commit.stream_ref = arkret_wire::CommitStreamRef::from_scope(&scope, None).unwrap();
-        ordinary_realm::seal_final_commit(&mut leave.authority_commit.commit);
-        let leave = Box::pin(ordinary_realm::source_request(pool, leave)).await;
-        fixture_commit_step(pool, leave).await.unwrap();
-        let denied = content_session_source(pool, &source).await;
-        assert!(denied.is_err() || denied.unwrap().granted_scope.is_empty());
-    })).await;
-}
+
 
 #[tokio::test]
 async fn agent_content_session_owned_grant_requires_current_source_and_never_revives_on_rejoin() {

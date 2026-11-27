@@ -136,14 +136,13 @@ pub(crate) fn validate_read_marker_payload(operation: &Operation) -> Result<(), 
                 return Err("read marker read_scope.track_name requires kind strand");
             }
         }
-        "circle" | "space" | "strand" | "thread" => {
+        "space" | "strand" | "thread" => {
             let reference = read_scope
                 .get("container_ref")
                 .and_then(|value| value.as_str())
                 .filter(|value| !value.trim().is_empty())
                 .ok_or("read marker read_scope.container_ref is required")?;
             let expected_prefix = match kind {
-                "circle" => "ak:circle:",
                 "space" => "ak:space:",
                 "strand" => "ak:strand:",
                 "thread" => "ak:message:",

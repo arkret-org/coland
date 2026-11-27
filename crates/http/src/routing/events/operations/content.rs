@@ -77,7 +77,6 @@ fn audience_mention_nodes(
 pub(crate) fn patched_object_kind(kind: &arkret_wire::EventKind) -> Option<&'static str> {
     match kind {
         arkret_wire::EventKind::ProfileUpdate => Some("actor_profile"),
-        arkret_wire::EventKind::CircleUpdate => Some("circle"),
         arkret_wire::EventKind::MorphUpdate => Some("morph"),
         arkret_wire::EventKind::RelationUpdate => Some("relation"),
         arkret_wire::EventKind::SpaceUpdate => Some("space"),

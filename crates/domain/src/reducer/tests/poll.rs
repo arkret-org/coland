@@ -6,10 +6,8 @@ const POLL_EVENT: &str = "ak:event:AVH4Dy1ng6HIwqHRIemmcRdGF6ErKqNeNOzRpc2sGDV2"
 const POLL_ID: &str = "ak:message:AVH4Dy1ng6HIwqHRIemmcRdGF6ErKqNeNOzRpc2sGDV2";
 const STRAND_A: &str = "ak:strand:ARkwFWDTPrObvpqVAL9kBsWkK8GrMr5FDO--3PcMFEwU";
 const STRAND_B: &str = "ak:strand:AUzgWk6FQOO5CNGEhXKtRw7FKYOAXGqzSVCLuwh5qmkk";
-const CIRCLE_A: &str = "ak:circle:AUiSHUfqumU5_UtRrOIga2jjSmucw5MpSQdam3TtzPQu";
-const CIRCLE_B: &str = "ak:circle:AbJ9TrPb-MFmDgVNN0uDVC6CIm3VNDxuUzlM5QBHZ8_Z";
 
-fn seed_strand(state: &mut ProjectionState, strand_id: &str, circle_id: Option<&str>) {
+fn seed_strand(state: &mut ProjectionState, strand_id: &str) {
     let now = chrono::Utc::now();
     state.strands.insert(
         strand_id.to_owned(),
@@ -30,7 +28,6 @@ fn seed_strand(state: &mut ProjectionState, strand_id: &str, circle_id: Option<&
             created_at: now,
             updated_by: None,
             updated_at: None,
-            scope_circle_id: circle_id.map(ToOwned::to_owned),
             schema_refs: Vec::new(),
             schedule_revision_source: None,
         },
@@ -43,7 +40,7 @@ fn create_poll(state: &mut ProjectionState, hlc: &ServerHlc) {
 
 fn create_poll_with_limit(state: &mut ProjectionState, hlc: &ServerHlc, max_selection_count: u32) {
     if !state.strands.contains_key(STRAND_A) {
-        seed_strand(state, STRAND_A, None);
+        seed_strand(state, STRAND_A);
     }
     let mut operation = make_operation(
         arkret_wire::EventKind::MessageCreate,
@@ -66,12 +63,6 @@ fn create_poll_with_limit(state: &mut ProjectionState, hlc: &ServerHlc, max_sele
             }
         }),
     );
-    if let Some(circle_id) = state.strand_scope_circle_id(STRAND_A) {
-        operation.context.accepted_scope_ref = arkret_wire::ScopeRef::Circle {
-            realm_id: arkret_wire::RealmId::new(REALM_A).unwrap(),
-            circle_id: arkret_wire::CircleId::new(circle_id).unwrap(),
-        };
-    }
     operation = at_position(operation, 1);
     let effect = state.apply(&operation, hlc);
     assert!(matches!(effect, ProjectionEffect::MessageCreated(_)));
@@ -190,18 +181,15 @@ fn poll_response_without_accepting_commit_fails_closed() {
 }
 
 #[test]
-fn poll_reducer_rejects_same_realm_different_circle_scope() {
+fn poll_reducer_rejects_signed_scope_of_another_realm() {
     let mut state = ProjectionState::new();
     let hlc = ServerHlc::new("poll-test");
-    seed_strand(&mut state, STRAND_A, Some(CIRCLE_A));
-    seed_strand(&mut state, STRAND_B, Some(CIRCLE_B));
+    seed_strand(&mut state, STRAND_A);
+    seed_strand(&mut state, STRAND_B);
     create_poll(&mut state, &hlc);
 
     let mut response = response_operation_on_strand(REALM_A, STRAND_B, serde_json::json!(["yes"]));
-    response.context.accepted_scope_ref = arkret_wire::ScopeRef::Circle {
-        realm_id: arkret_wire::RealmId::new(REALM_A).unwrap(),
-        circle_id: arkret_wire::CircleId::new(CIRCLE_B).unwrap(),
-    };
+    response.context.accepted_scope_ref = arkret_wire::ScopeRef::Realm { realm_id: arkret_wire::RealmId::new(REALM_B).unwrap() };
     let effect = state.apply(&response, &hlc);
     assert!(matches!(
         effect,

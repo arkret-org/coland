@@ -423,7 +423,7 @@ async fn departing_member_target(
         station,
         RealmFanoutAuthorityWitness {
             member_id: member,
-            circle_membership_event_ref: None,
+
             membership_event_ref: event.event_id.to_string(),
         },
     )))
@@ -489,12 +489,7 @@ async fn remote_targets(
                     event.payload.get("membership").and_then(Value::as_str),
                     Some("leave" | "ban")
                 )
-                || witness.circle_membership_event_ref.as_ref() == Some(&event.event_id)
-                    && event.kind == arkret_wire::EventKind::CircleMemberState
-                    && matches!(
-                        event.payload.get("membership").and_then(Value::as_str),
-                        Some("leave" | "ban")
-                    );
+;
             if !departing {
                 if matches!(
                     row.commit.stream_ref,
@@ -564,15 +559,6 @@ async fn membership_targets(
     {
         return Ok(BTreeMap::new());
     }
-    // A Circle is empty at create. Its Realm-stream authorization shell is
-    // visible, but the signed object contains private directory fields. The
-    // committed-replication carrier below contains a complete Event and has
-    // no withheld branch, so no remote Realm member may receive these bytes.
-    // A peer can fetch the Commit-only chain node through the registered
-    // committed-event scan; Circle-specific availability remains closed.
-    if event.kind == arkret_wire::EventKind::CircleCreate {
-        return Ok(BTreeMap::new());
-    }
     let rows = sql_query(
         "SELECT m.member_id, e.envelope->>'event_id' AS membership_event_id \
          FROM member_state_current_states m \
@@ -609,18 +595,6 @@ async fn membership_targets(
         {
             continue;
         }
-        let circle_membership_event_ref = if let arkret_wire::ScopeRef::Circle {
-            realm_id,
-            circle_id,
-        } = &event.scope_ref
-        {
-            let Some(basis) = sql_query("SELECT e.envelope->>'event_id' AS event_id FROM circle_member_state_current_states m JOIN circle_current_states circle ON circle.circle_id=m.circle_id AND circle.realm_id=m.realm_id JOIN realm_commits c ON c.commit_id=m.current_commit_id AND c.realm_id=m.realm_id AND c.stream_position=m.current_stream_position AND c.stream_ref=m.source_stream_ref JOIN canonical_events e ON e.pk=c.event_pk WHERE m.realm_id=$1 AND m.circle_id=$2 AND m.member_id=$3 AND m.membership='join' AND circle_member_parent_join_current(m.realm_id,m.member_id,m.value) AND circle.value->>'state'='active' AND e.state='committed'")
-                .bind::<Text, _>(realm_id.as_str()).bind::<Text, _>(circle_id.as_str()).bind::<Text, _>(member.to_string())
-                .get_result::<MembershipEventRow>(&mut *conn).await.optional().map_err(PersistenceError::database)? else { continue; };
-            Some(arkret_wire::EventId::new(basis.event_id).map_err(internal)?)
-        } else {
-            None
-        };
         arkret_wire::EventId::new(row.membership_event_id.clone())
             .map_err(|error| internal(format!("membership Event id is malformed: {error}")))?;
         targets
@@ -628,7 +602,6 @@ async fn membership_targets(
             .or_default()
             .push(RealmFanoutAuthorityWitness {
                 member_id: member,
-                circle_membership_event_ref,
                 membership_event_ref: row.membership_event_id,
             });
     }
@@ -637,68 +610,7 @@ async fn membership_targets(
     {
         targets.entry(station).or_default().push(witness);
     }
-    if let Some((station, witness)) =
-        departing_circle_member_target(conn, event, authority_station).await?
-    {
-        targets.entry(station).or_default().push(witness);
-    }
     Ok(targets)
-}
-
-async fn departing_circle_member_target(
-    conn: &mut AsyncPgConnection,
-    event: &arkret_wire::Event,
-    authority_station: &arkret_wire::DidCoreId,
-) -> PersistenceResult<Option<(arkret_wire::DidCoreId, RealmFanoutAuthorityWitness)>> {
-    if event.kind != arkret_wire::EventKind::CircleMemberState
-        || !matches!(
-            event.payload.get("membership").and_then(Value::as_str),
-            Some("leave" | "ban")
-        )
-    {
-        return Ok(None);
-    }
-    let arkret_wire::ScopeRef::Circle {
-        realm_id,
-        circle_id,
-    } = &event.scope_ref
-    else {
-        return Ok(None);
-    };
-    let member: arkret_wire::ActorId = serde_json::from_value(
-        event
-            .payload
-            .get("member_id")
-            .cloned()
-            .ok_or_else(|| internal("Circle departure has no member"))?,
-    )
-    .map_err(internal)?;
-    let Some(station) = member.fixed_route_service_id().cloned() else {
-        return Ok(None);
-    };
-    if &station == authority_station {
-        return Ok(None);
-    }
-    let Some(parent) = sql_query("SELECT e.envelope->>'event_id' AS event_id FROM member_state_current_states m JOIN realm_commits c ON c.commit_id=m.current_commit_id AND c.realm_id=m.realm_id AND c.stream_position=m.current_stream_position JOIN canonical_events e ON e.pk=c.event_pk WHERE m.realm_id=$1 AND m.member_id=$2 AND m.membership='join' AND e.state='committed' AND c.stream_ref->>'kind'='realm'")
-        .bind::<Text, _>(realm_id.as_str()).bind::<Text, _>(member.to_string()).get_result::<MembershipEventRow>(&mut *conn).await.optional().map_err(PersistenceError::database)? else { return Ok(None); };
-    let current = sql_query("SELECT e.envelope->>'event_id' AS event_id FROM circle_member_state_current_states m JOIN realm_commits c ON c.commit_id=m.current_commit_id AND c.realm_id=m.realm_id AND c.stream_position=m.current_stream_position AND c.stream_ref=m.source_stream_ref JOIN canonical_events e ON e.pk=c.event_pk WHERE m.realm_id=$1 AND m.circle_id=$2 AND m.member_id=$3 AND m.membership IN ('leave','ban') AND e.state='committed'")
-        .bind::<Text, _>(realm_id.as_str()).bind::<Text, _>(circle_id.as_str()).bind::<Text, _>(member.to_string()).get_result::<MembershipEventRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
-    if current.as_ref().map(|row| row.event_id.as_str()) != Some(event.event_id.as_str()) {
-        return Ok(None);
-    }
-    let previous = sql_query("SELECT e.kind, e.envelope->'payload'->>'membership' AS membership FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk WHERE c.realm_id=$1 AND c.stream_ref=$2 AND e.kind='ak.circle.member.state' AND e.envelope->'payload'->'member_id'=$3 AND c.stream_position < (SELECT current_stream_position FROM circle_member_state_current_states WHERE realm_id=$1 AND circle_id=$4 AND member_id=$5) ORDER BY c.stream_position DESC LIMIT 1")
-        .bind::<Text, _>(realm_id.as_str()).bind::<Jsonb, _>(serde_json::to_value(arkret_wire::CommitStreamRef::Circle { realm_id:realm_id.clone(),circle_id:circle_id.clone() }).map_err(internal)?).bind::<Jsonb, _>(serde_json::to_value(&member).map_err(internal)?).bind::<Text, _>(circle_id.as_str()).bind::<Text, _>(member.to_string()).get_result::<PriorMembershipRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
-    if previous.and_then(|row| row.membership).as_deref() != Some("join") {
-        return Ok(None);
-    }
-    Ok(Some((
-        station,
-        RealmFanoutAuthorityWitness {
-            member_id: member,
-            membership_event_ref: parent.event_id,
-            circle_membership_event_ref: Some(event.event_id.clone()),
-        },
-    )))
 }
 
 /// Whether a frozen fanout intent to `peer` is still owed at the current
@@ -757,40 +669,8 @@ pub(crate) async fn plan_realm_fanout_in_connection(
         realm_id: event.realm_id.clone(),
     };
     if commit.stream_ref != realm_stream {
-        let supported_circle = matches!(&event.scope_ref, arkret_wire::ScopeRef::Circle { .. })
-            && matches!(
-                event.kind,
-                arkret_wire::EventKind::CircleMemberState
-                    | arkret_wire::EventKind::ScopeReadReceiptPolicy
-                    | arkret_wire::EventKind::CapabilityGrant
-                    | arkret_wire::EventKind::CapabilityRevoke
-                    | arkret_wire::EventKind::PolicySet
-                    | arkret_wire::EventKind::StrandWatchSet
-                    | arkret_wire::EventKind::AuditAccessed
-                    | arkret_wire::EventKind::MlsGenesis
-                    | arkret_wire::EventKind::MlsCommit
-                    | arkret_wire::EventKind::StrandCreate
-                    | arkret_wire::EventKind::MessageCreate
-                    | arkret_wire::EventKind::MessageRevise
-                    | arkret_wire::EventKind::MessageRedact
-                    | arkret_wire::EventKind::ModerationDecision
-                    | arkret_wire::EventKind::ModerationDecisionLift
-                    | arkret_wire::EventKind::RelationCreate
-                    | arkret_wire::EventKind::RelationUpdate
-                    | arkret_wire::EventKind::RelationTombstone
-                    | arkret_wire::EventKind::PinAdd
-                    | arkret_wire::EventKind::PinRemove
-                    | arkret_wire::EventKind::PinReorder
-            );
-        if !supported_circle {
-            if source.is_some() {
-                return Err(PersistenceError::Conflict(
-                    "Circle and Sidecar fanout target planning is unavailable".to_owned(),
-                )
-                .into());
-            }
-            return Ok(0);
-        }
+        if source.is_some() {return Err(PersistenceError::Conflict("unsupported replication stream".into()).into());}
+        return Ok(0);
     }
     let targets = remote_targets(conn, event, authority_station, commit.committed_at).await?;
     let mut replicated_welcomes: BTreeMap<_, Vec<arkret_wire::MlsWelcomeDelivery>> =

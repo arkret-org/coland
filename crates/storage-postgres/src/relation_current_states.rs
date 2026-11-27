@@ -122,15 +122,7 @@ pub(crate) async fn snapshot_rows_in_connection(
                     .ok_or_else(|| corrupt("Relation current has no exact covering Commit"))?,
             )
             .map_err(PersistenceError::database)?;
-            let expected = match record.relation.scope_circle_id.as_ref() {
-                Some(circle_id) => arkret_wire::CommitStreamRef::Circle {
-                    realm_id: realm_id.clone(),
-                    circle_id: circle_id.clone(),
-                },
-                None => arkret_wire::CommitStreamRef::Realm {
-                    realm_id: realm_id.clone(),
-                },
-            };
+            let expected = arkret_wire::CommitStreamRef::Realm { realm_id: realm_id.clone() };
             if source_stream_ref != expected {
                 return Err(corrupt(
                     "Relation current source differs from its value scope",
@@ -152,8 +144,6 @@ pub(crate) async fn snapshot_rows_in_connection(
 struct EndpointHomeRow {
     #[diesel(sql_type = Text)]
     realm_id: String,
-    #[diesel(sql_type = diesel::sql_types::Nullable<Text>)]
-    scope_circle_id: Option<String>,
 }
 
 fn precondition(detail: &str) -> PersistenceError {
@@ -163,30 +153,17 @@ fn precondition(detail: &str) -> PersistenceError {
     ))
 }
 
-/// The Circle an `ak.relation.*` Event is signed in, `None` for Realm scope.
-fn signed_scope_circle(event: &arkret_wire::Event) -> Option<&arkret_wire::CircleId> {
-    match &event.scope_ref {
-        arkret_wire::ScopeRef::Circle { circle_id, .. } => Some(circle_id),
-        _ => None,
-    }
-}
-
-/// Authority admission of one `ak.relation.create` / `.update` /
-/// `.tombstone` at the accepting cut, before the domain row is read.
-///
-/// `relation.md` section 4.3: Relation writes are authorized in the source
-/// Realm. The Event commits on the exact stream its signed scope names; a
-/// Circle-scoped fact additionally needs an active Circle author at this cut.
+/// Authorize an ordinary Relation against its signed Realm and covering Commit.
 pub(crate) async fn authorize_relation_write_in_connection(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
     prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<()> {
-    let expected_stream =
-        arkret_wire::CommitStreamRef::from_scope(&event.scope_ref, Some(event.realm_id.clone()))
-            .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
-    if commit.event_ref != event.event_id || commit.stream_ref != expected_stream {
+    if event.scope_ref != arkret_wire::ScopeRef::realm(event.realm_id.clone())
+        || commit.event_ref != event.event_id
+        || commit.stream_ref != (arkret_wire::CommitStreamRef::Realm { realm_id: event.realm_id.clone() })
+    {
         return Err(precondition(
             "Relation write differs from its accepting source stream",
         ));
@@ -194,29 +171,21 @@ pub(crate) async fn authorize_relation_write_in_connection(
     crate::realm_authorization_cut::authorize_capability_gated_event_with_approvals(
         conn, event, commit, prepared,
     )
-    .await?;
-    if signed_scope_circle(event).is_some() {
-        crate::circle_current_states::require_active_author_in_connection(conn, event, commit)
-            .await?;
-    }
-    Ok(())
+    .await.map(|_| ())
 }
 
-/// The Realm and Circle scope of an object endpoint this Station holds a
-/// current value for. Strand and Space rows carry their own scope; a Message
-/// endpoint has only a Realm here.
 async fn endpoint_home(
     conn: &mut AsyncPgConnection,
     endpoint: &str,
 ) -> PersistenceResult<Option<EndpointHomeRow>> {
     let query = if endpoint.starts_with("ak:strand:") {
-        "SELECT realm_id,value->>'scope_circle_id' AS scope_circle_id \
+        "SELECT realm_id \
          FROM strand_current_states WHERE strand_id=$1 ORDER BY realm_id LIMIT 1"
     } else if endpoint.starts_with("ak:space:") {
-        "SELECT realm_id,value->>'scope_circle_id' AS scope_circle_id \
+        "SELECT realm_id \
          FROM space_current_states WHERE space_id=$1 ORDER BY realm_id LIMIT 1"
     } else if endpoint.starts_with("ak:message:") {
-        "SELECT realm_id,NULL::text AS scope_circle_id \
+        "SELECT realm_id \
          FROM message_revision_current_states WHERE message_id=$1 ORDER BY realm_id LIMIT 1"
     } else {
         return Ok(None);
@@ -229,56 +198,31 @@ async fn endpoint_home(
         .map_err(PersistenceError::database)
 }
 
-/// Scope and endpoint rules of the post-write Relation value.
-///
-/// - The value's `scope_circle_id` is exactly the Circle the Event is signed in (none for Realm
-///   scope), before and after an update, so a write never moves a fact out of the stream that
-///   discloses it (`circle.md` section 6).
-/// - `confidential_discussion_of` links a private Strand to its public Strand and is committed in
-///   that private Strand's Circle (`relation.md` 3.2).
-/// - A structural Relation names only objects of its own Realm; any other or unresolved object
-///   endpoint is `cross_realm_structural_relation` (`relation.md` section 4.4).
-/// - A scoped endpoint floors the Relation's scope: a Relation is never wider than the
-///   Circle-scoped Strand or Space it connects.
+/// Structural endpoints must belong to the accepting Realm. A Space that
+/// contains another object applies its current placement policy at this cut.
 pub(crate) async fn require_relation_value_scope_in_connection(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
+    commit: &arkret_wire::RealmCommit,
     before: Option<&Relation>,
     after: &Relation,
     created: bool,
 ) -> PersistenceResult<()> {
-    let signed = signed_scope_circle(event);
     for value in before.into_iter().chain(std::iter::once(after)) {
-        if value.scope_circle_id.as_ref() != signed {
-            return Err(precondition(
-                "Relation scope differs from the scope its Event is signed in",
-            ));
+        if value.realm_id != event.realm_id || value.effective_scope.as_ref().is_some_and(|scope| scope != &event.scope_ref) {
+            return Err(precondition(arkret_wire::ReasonCode::SCOPE_REF_MISMATCH));
         }
     }
-    if !created {
+    let relation_kind = after.relation_kind.as_str();
+    if !created || !arkret_models_collaboration::objects::relation::relation_kind_is_structural(relation_kind) {
         return Ok(());
     }
-    let relation_kind = after.relation_kind.as_str();
-    if relation_kind == "confidential_discussion_of" && signed.is_none() {
-        return Err(PersistenceError::SchemaViolation(
-            "confidential_discussion_of is committed in its private Strand's Circle".to_owned(),
-        ));
-    }
-    let structural =
-        arkret_models_collaboration::objects::relation::relation_kind_is_structural(relation_kind);
-    let floored = matches!(
-        relation_kind,
-        "contains" | "belongs_to" | "confidential_discussion_of" | "assigned_to"
-    );
-    let mut homes = Vec::new();
     for endpoint in [&after.from_ref, &after.to_ref] {
         let Some(endpoint) = endpoint.as_object_ref() else {
-            homes.push(None);
-            continue;
+            return Err(precondition("structural Relation requires object endpoints"));
         };
         let home = endpoint_home(conn, endpoint).await?;
-        if structural
-            && home
+        if home
                 .as_ref()
                 .is_none_or(|home| home.realm_id != event.realm_id.as_str())
         {
@@ -287,42 +231,15 @@ pub(crate) async fn require_relation_value_scope_in_connection(
                 coland_storage::ConflictCode::CrossRealmStructuralRelation
             )));
         }
-        if floored
-            && let Some(home) = home
-                .as_ref()
-                .filter(|home| home.realm_id == event.realm_id.as_str())
-            && let Some(endpoint_circle) = home.scope_circle_id.as_deref()
-            && signed.map(arkret_wire::CircleId::as_str) != Some(endpoint_circle)
-        {
-            return Err(precondition(
-                "Relation scope is wider than a Circle-scoped endpoint",
-            ));
-        }
-        homes.push(home);
     }
-    if relation_kind == "confidential_discussion_of" {
-        fn in_realm<'a>(home: &'a Option<EndpointHomeRow>, realm: &str) -> Option<Option<&'a str>> {
-            home.as_ref()
-                .filter(|home| home.realm_id == realm)
-                .map(|home| home.scope_circle_id.as_deref())
-        }
-        let realm = event.realm_id.as_str();
-        let strands = after
-            .from_ref
-            .as_object_ref()
-            .is_some_and(|from| from.starts_with("ak:strand:"))
-            && after
-                .to_ref
-                .as_object_ref()
-                .is_some_and(|to| to.starts_with("ak:strand:"));
-        if !strands
-            || in_realm(&homes[0], realm) != Some(signed.map(arkret_wire::CircleId::as_str))
-            || in_realm(&homes[1], realm) != Some(None)
-        {
-            return Err(precondition(
-                "confidential_discussion_of links a private Strand to its public Strand",
-            ));
-        }
+    let container = match relation_kind {
+        "contains" => after.from_ref.as_object_ref(),
+        "belongs_to" => after.to_ref.as_object_ref(),
+        _ => None,
+    };
+    if let Some(parent_id) = container.filter(|reference| reference.starts_with("ak:space:")) {
+        let position = i64::try_from(commit.stream_position).map_err(PersistenceError::database)?;
+        crate::space_current_states::require_parent_in_connection(conn, event, position, parent_id).await?;
     }
     Ok(())
 }

@@ -67,8 +67,11 @@ pub(crate) async fn account_is_joined_member(
         .list_realm_streams_for_account(&realm_id, account, &state.service_core_id())
         .await
     {
+        Ok(coland_storage::AccountRealmStreamList::Listed(streams)) => Ok(streams.iter().any(|row|
+            matches!(&row.stream_ref, arkret_wire::CommitStreamRef::Realm { realm_id: source } if source == &realm_id)
+        )),
         Ok(coland_storage::AccountRealmStreamList::NotVisible) => Ok(false),
-        Ok(_) => Ok(true),
+        Ok(coland_storage::AccountRealmStreamList::Unproved(reason)) => Err(snapshot_unavailable(reason)),
         Err(error) => Err(coland_http::error::AppError::internal(error.to_string())),
     }
 }

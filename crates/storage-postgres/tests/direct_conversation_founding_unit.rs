@@ -2552,7 +2552,6 @@ async fn controller_owned_agent_founding_reads_provision_and_runtime_key_at_the_
 
             scope: &signal_scope,
             authority_commit_id: &bound.authority_commit.commit.commit_id,
-            parent_realm_authority_commit_id: None,
             sender: &peer,
             signal_class: arkret_wire::SignalClass::Session,
             sent_at: signal_at,
@@ -2615,7 +2614,6 @@ async fn controller_owned_agent_founding_reads_provision_and_runtime_key_at_the_
 
                 scope: &signal_scope,
                 authority_commit_id: &bound.authority_commit.commit.commit_id,
-                parent_realm_authority_commit_id: None,
                 sender: &peer,
                 signal_class: arkret_wire::SignalClass::Session,
                 sent_at: signal_at,
@@ -2647,7 +2645,6 @@ async fn controller_owned_agent_founding_reads_provision_and_runtime_key_at_the_
 
                 scope: &signal_scope,
                 authority_commit_id: &bound.authority_commit.commit.commit_id,
-                parent_realm_authority_commit_id: None,
                 sender: &peer,
                 signal_class: arkret_wire::SignalClass::Session,
                 sent_at: signal_at,
@@ -4536,7 +4533,6 @@ async fn participant_authority_scenario() {
                         realm_id: realm_id.clone(),
                     },
                     authority_commit_id: &head.commit.commit_id,
-                    parent_realm_authority_commit_id: None,
                     sender: &peer,
                     signal_class: arkret_wire::SignalClass::Session,
                     sent_at: signal_at,
@@ -4695,7 +4691,6 @@ async fn participant_authority_scenario() {
                 realm_id: realm_id.clone(),
             },
             authority_commit_id: &head.commit.commit_id,
-            parent_realm_authority_commit_id: None,
             sender: &founder,
             signal_class: arkret_wire::SignalClass::Session,
             sent_at: signal_at,
@@ -4930,7 +4925,6 @@ async fn participant_authority_scenario() {
                     // The original declared cut was joined. Its current
                     // accepted successor must still fence the departed peer.
                     authority_commit_id: &head.commit.commit_id,
-                    parent_realm_authority_commit_id: None,
                     sender: &peer,
                     signal_class: arkret_wire::SignalClass::Session,
                     sent_at: signal_at,

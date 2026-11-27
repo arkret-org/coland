@@ -20,7 +20,7 @@ struct ObjectRow {
 }
 
 #[derive(diesel::QueryableByName)]
-struct ListRow {
+struct SpacePlacementRow {
     #[diesel(sql_type = Text)]
     realm_id: String,
     #[diesel(sql_type = Text)]
@@ -39,7 +39,7 @@ struct ListRow {
     policy: Value,
 }
 
-const LIST_CURRENT_SQL: &str = "SELECT s.realm_id,s.current_commit_id AS space_commit_id, \
+const SPACE_PLACEMENT_SQL: &str = "SELECT s.realm_id,s.current_commit_id AS space_commit_id, \
     s.current_stream_position AS space_position,s.value AS space, \
     p.current_stream_position AS parent_position,p.value AS parent, \
     c.current_stream_position AS policy_position,c.value AS policy \
@@ -159,17 +159,20 @@ pub(crate) async fn commit_authority_position_in_connection(
     {
         return Err(refused("strand_not_active"));
     }
-    let board_row = diesel::sql_query("SELECT s.realm_id,s.current_stream_position,s.value FROM space_current_states s JOIN realm_commits c ON c.commit_id=s.current_commit_id AND c.realm_id=s.realm_id AND c.stream_position=s.current_stream_position WHERE s.space_id=$1 AND c.stream_ref->>'kind'='realm' AND c.stream_ref->>'realm_id'=s.realm_id FOR SHARE OF s")
-        .bind::<Text,_>(board.as_str()).get_result::<ObjectRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
-        .ok_or_else(|| refused("placement Board is absent"))?;
+    let board_row = diesel::sql_query(SPACE_PLACEMENT_SQL)
+        .bind::<Text, _>(board.as_str())
+        .get_result::<SpacePlacementRow>(&mut *conn)
+        .await.optional().map_err(PersistenceError::database)?
+        .ok_or_else(|| refused("placement Board is absent or incomplete"))?;
     if board_row.realm_id != event.realm_id.as_str() {
         return Err(refused("space_realm_mismatch"));
     }
-    if board_row.current_stream_position >= position
-        || board_row.value.get("kind") != Some(&json!("board"))
-        || board_row.value.get("state") != Some(&json!("active"))
+    if board_row.space_position >= position
+        || board_row.policy_position >= position
+        || board_row.space.get("kind") != Some(&json!("board"))
+        || board_row.space.get("state") != Some(&json!("active"))
         || board_row
-            .value
+            .space
             .get("scope_circle_id")
             .is_some_and(|v| !v.is_null())
     {
@@ -178,9 +181,9 @@ pub(crate) async fn commit_authority_position_in_connection(
     // Metadata, parent and child policy have independent registered writers.
     // Read them at this locked cut and prove each family's own source Commit;
     // a legal reparent need not rewrite metadata or policy at its new revision.
-    let list = diesel::sql_query(LIST_CURRENT_SQL)
+    let list = diesel::sql_query(SPACE_PLACEMENT_SQL)
         .bind::<Text, _>(destination.as_str())
-        .get_result::<ListRow>(&mut *conn)
+        .get_result::<SpacePlacementRow>(&mut *conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?
@@ -201,12 +204,8 @@ pub(crate) async fn commit_authority_position_in_connection(
     {
         return Err(refused("space_not_active"));
     }
-    if list.policy != Value::Null
-        && list.policy.get("kind") != Some(&json!("allow_any"))
-        && list.policy.get("kind") != Some(&json!("require_same_scope"))
-    {
-        return Err(refused("placement child-scope policy is unresolved"));
-    }
+    crate::space_current_states::require_encrypted_placement(conn, &event.realm_id, &board_row.policy).await?;
+    crate::space_current_states::require_encrypted_placement(conn, &event.realm_id, &list.policy).await?;
     let previous = diesel::sql_query("SELECT p.realm_id,p.current_stream_position,p.value,(c.commit_id IS NOT NULL) AS covered FROM strand_position_current_states p LEFT JOIN realm_commits c ON c.commit_id=p.current_commit_id AND c.realm_id=p.realm_id AND c.stream_position=p.current_stream_position AND c.stream_ref->>'kind'='realm' AND c.stream_ref->>'realm_id'=p.realm_id WHERE p.board_space_id=$1 AND p.strand_id=$2 FOR UPDATE OF p")
         .bind::<Text,_>(board.as_str()).bind::<Text,_>(strand.as_str())
         .get_result::<PositionRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
@@ -248,9 +247,9 @@ pub(crate) async fn commit_authority_position_in_connection(
     if let Some(source) = current.as_ref().map(|value| &value.list_space_id) {
         // A tombstoned source can be repaired by moving out, but the source
         // must still be an actual List within this Board and Realm.
-        let source_row = diesel::sql_query(LIST_CURRENT_SQL)
+        let source_row = diesel::sql_query(SPACE_PLACEMENT_SQL)
             .bind::<Text, _>(source.as_str())
-            .get_result::<ListRow>(&mut *conn)
+            .get_result::<SpacePlacementRow>(&mut *conn)
             .await
             .optional()
             .map_err(PersistenceError::database)?

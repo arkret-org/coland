@@ -259,15 +259,9 @@ impl ProjectionState {
         self.facet_value(realm_id, &FacetRef::singleton(facet))
     }
 
-    /// Current policy only for the exact signed Realm/Circle scope.
-    pub fn read_receipt_policy_value(&self, scope: &arkret_wire::ScopeRef) -> Option<&Value> {
-        let realm = scope.realm_id_opt()?;
-        let subject =
-            String::from_utf8(arkret_canonical::canonical_json_bytes(scope).ok()?).ok()?;
-        self.facet_value(
-            realm.as_str(),
-            &FacetRef::new(facet::SCOPE_READ_RECEIPT_POLICY, subject),
-        )
+    /// Read the latest accepted disclosure policy for this Realm.
+    pub fn read_receipt_policy_value(&self, realm: &str) -> Option<&Value> {
+        self.realm_facet_value(realm, facet::SCOPE_READ_RECEIPT_POLICY)
     }
 
     // ── Realm lifecycle facet helpers ──
@@ -843,17 +837,7 @@ impl ProjectionState {
         )
     }
 
-    /// The canonical MLS group id an accepted `ak.mls.genesis` installed for a Circle scope.
-    pub fn circle_scope_mls_group_id(&self, circle_id: &str) -> Option<&str> {
-        self.circles
-            .get(circle_id)
-            .and_then(|circle| circle.mls_group_ref.as_deref())
-    }
 
-    /// Whether the named Circle scope has accepted its own `ak.mls.genesis`.
-    pub fn circle_scope_is_mls_activated(&self, circle_id: &str) -> bool {
-        self.circle_scope_mls_group_id(circle_id).is_some()
-    }
 
     /// Effective Realm `history_access` projected from its dedicated cell.
     pub fn realm_history_access(&self, realm_id: &str) -> Option<String> {

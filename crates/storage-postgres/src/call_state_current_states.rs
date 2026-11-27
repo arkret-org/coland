@@ -205,7 +205,7 @@ async fn commit_in_connection_inner(
     }
     if !matches!(
         event.scope_ref,
-        ScopeRef::Realm { .. } | ScopeRef::Circle { .. }
+        ScopeRef::Realm { .. }
     ) || event.scope_ref.realm_id() != &event.realm_id
         || commit.realm_id != event.realm_id
         || commit.event_ref != event.event_id
@@ -320,13 +320,6 @@ async fn read_before_in_connection(
     let scope = match &stream {
         CommitStreamRef::Realm { realm_id } => ScopeRef::Realm {
             realm_id: realm_id.clone(),
-        },
-        CommitStreamRef::Circle {
-            realm_id,
-            circle_id,
-        } => ScopeRef::Circle {
-            realm_id: realm_id.clone(),
-            circle_id: circle_id.clone(),
         },
         _ => return Err(invalid("Call current uses a non-call stream")),
     };
@@ -855,10 +848,6 @@ pub(crate) async fn release_in_connection(
     .await?;
     let target: arkret_wire::WireResourceSelector = serde_json::from_value(match &cut.scope_ref {
         ScopeRef::Realm { realm_id } => serde_json::json!({"kind":"realm","realm_id":realm_id}),
-        ScopeRef::Circle {
-            realm_id,
-            circle_id,
-        } => serde_json::json!({"kind":"circle","realm_id":realm_id,"circle_id":circle_id}),
         _ => return Ok(false),
     })
     .map_err(PersistenceError::database)?;

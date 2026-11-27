@@ -833,11 +833,7 @@ fn public_serve_keeps_a_separately_legal_own_action_path() {
 }
 
 #[test]
-fn public_circle_serve_matches_exact_strand_resource_and_requires_signed_scope_facts() {
-    let circle = arkret_wire::CircleId::from_event_id(&arkret_wire::EventId::from_digest(
-        arkret_canonical::DigestSuite::Sha256,
-        [76; 32],
-    ));
+fn public_realm_serve_matches_exact_strand_resource_and_requires_signed_scope_facts() {
     let target = WireResourceSelector::strand(
         realm(),
         arkret_wire::StrandId::from_event_id(&arkret_wire::EventId::from_digest(
@@ -845,12 +841,8 @@ fn public_circle_serve_matches_exact_strand_resource_and_requires_signed_scope_f
             [77; 32],
         )),
     );
-    let event = execution_event(arkret_wire::ScopeRef::Circle {
-        realm_id: realm(),
-        circle_id: circle.clone(),
-    });
+    let event = execution_event(arkret_wire::ScopeRef::realm(realm()));
     let facts = OperationFacts {
-        circle_id: Some(circle.to_string()),
         strand_id: target.strand_id.as_ref().map(ToString::to_string),
         ..OperationFacts::default()
     };
@@ -877,8 +869,8 @@ fn public_circle_serve_matches_exact_strand_resource_and_requires_signed_scope_f
         .is_err()
     );
     let mut wrong = facts;
-    wrong.circle_id = Some(
-        arkret_wire::CircleId::from_event_id(&arkret_wire::EventId::from_digest(
+    wrong.strand_id = Some(
+        arkret_wire::StrandId::from_event_id(&arkret_wire::EventId::from_digest(
             arkret_canonical::DigestSuite::Sha256,
             [78; 32],
         ))

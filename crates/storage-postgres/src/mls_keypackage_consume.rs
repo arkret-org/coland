@@ -73,7 +73,7 @@ pub(crate) async fn consume(
         || recipient_device_id != &authority.device_id
         || !matches!(
             scope,
-            arkret_wire::ScopeRef::Realm { .. } | arkret_wire::ScopeRef::Circle { .. }
+            arkret_wire::ScopeRef::Realm { .. }
         )
         || !authority.scopes.contains_scope(scope)
         || &receipt.realm_id != scope.realm_id()

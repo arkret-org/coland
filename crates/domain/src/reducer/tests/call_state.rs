@@ -400,7 +400,7 @@ fn recording_start_requires_consent_before_both_facets_are_written() {
         Value::Bool(true)
     );
     assert_eq!(
-        state.facet_value(realm, &capture_result).unwrap()["key_ref"],
+        state.facet_value(realm, &capture_result).unwrap()["details"]["key_ref"],
         key_ref
     );
 }

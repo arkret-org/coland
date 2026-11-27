@@ -25,7 +25,6 @@ fn record() -> SignalRelayRecord {
         sender_actor_id: actor,
         sender_device_id: Some(device.clone()),
         authority_commit_id: RealmCommitId::from_digest([32; 32]),
-        parent_realm_authority_commit_id: None,
         signal_class: SignalClass::Session,
         sent_at: at,
         expires_at: at + chrono::Duration::seconds(30),

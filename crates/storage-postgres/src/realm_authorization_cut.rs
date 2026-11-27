@@ -416,7 +416,7 @@ pub(crate) async fn owned_source_in_connection(
 }
 
 /// Resolve the actual native scope of a confirmed selector. Navigation ancestry
-/// and caller-supplied context are never authority or private Circle evidence.
+/// and caller-supplied context are never authority or personal Sidecar evidence.
 async fn confirmed_resource_scope(
     conn: &mut AsyncPgConnection,
     realm: &RealmId,
@@ -433,15 +433,11 @@ async fn confirmed_resource_scope(
         Kind::Realm => Ok(Some(ScopeRef::Realm {
             realm_id: realm.clone(),
         })),
-        Kind::Circle => Ok(target.circle_id.as_ref().map(|circle_id| ScopeRef::Circle {
-            realm_id: realm.clone(),
-            circle_id: circle_id.clone(),
-        })),
         Kind::Space => {
             let Some(id) = target.space_id.as_ref() else {
                 return Ok(None);
             };
-            let row = sql_query("SELECT s.value FROM space_current_states s JOIN realm_commits c ON c.realm_id=s.realm_id AND c.commit_id=s.current_commit_id AND c.stream_position=s.current_stream_position JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' WHERE s.realm_id=$1 AND s.space_id=$2")
+            let row = sql_query("SELECT s.value FROM space_current_states s JOIN realm_commits c ON c.realm_id=s.realm_id AND c.commit_id=s.current_commit_id AND c.stream_position=s.current_stream_position JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' WHERE c.stream_ref=jsonb_build_object('kind','realm','realm_id',s.realm_id) AND s.realm_id=$1 AND s.space_id=$2")
                 .bind::<Text,_>(realm.as_str()).bind::<Text,_>(id.as_str()).get_result::<PolicyBundleRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
             let Some(row) = row else { return Ok(None) };
             let space: arkret_models_collaboration::objects::space::Space =
@@ -449,21 +445,13 @@ async fn confirmed_resource_scope(
             if space.id.as_ref() != Some(id) || space.realm_id != *realm {
                 return Ok(None);
             }
-            Ok(Some(match space.scope_circle_id {
-                Some(circle_id) => ScopeRef::Circle {
-                    realm_id: realm.clone(),
-                    circle_id,
-                },
-                None => ScopeRef::Realm {
-                    realm_id: realm.clone(),
-                },
-            }))
+            Ok(Some(ScopeRef::Realm { realm_id: realm.clone() }))
         }
         Kind::Strand => {
             let Some(id) = target.strand_id.as_ref() else {
                 return Ok(None);
             };
-            let row = sql_query("SELECT s.value FROM strand_current_states s JOIN realm_commits c ON c.realm_id=s.realm_id AND c.commit_id=s.current_commit_id AND c.stream_position=s.current_stream_position JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' WHERE s.realm_id=$1 AND s.strand_id=$2")
+            let row = sql_query("SELECT s.value FROM strand_current_states s JOIN realm_commits c ON c.realm_id=s.realm_id AND c.commit_id=s.current_commit_id AND c.stream_position=s.current_stream_position JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' WHERE c.stream_ref=jsonb_build_object('kind','realm','realm_id',s.realm_id) AND s.realm_id=$1 AND s.strand_id=$2")
                 .bind::<Text,_>(realm.as_str()).bind::<Text,_>(id.as_str()).get_result::<PolicyBundleRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
             let Some(row) = row else { return Ok(None) };
             let strand: arkret_models_collaboration::objects::strand::Strand =
@@ -471,15 +459,7 @@ async fn confirmed_resource_scope(
             if strand.id.as_ref() != Some(id) || strand.realm_id != *realm {
                 return Ok(None);
             }
-            Ok(Some(match strand.scope_circle_id {
-                Some(circle_id) => ScopeRef::Circle {
-                    realm_id: realm.clone(),
-                    circle_id,
-                },
-                None => ScopeRef::Realm {
-                    realm_id: realm.clone(),
-                },
-            }))
+            Ok(Some(ScopeRef::Realm { realm_id: realm.clone() }))
         }
         Kind::Message | Kind::Event => {
             let event_id = target
@@ -512,14 +492,6 @@ async fn scope_member_readable(
                 .await?
                 .is_some()
         }
-        arkret_wire::ScopeRef::Circle {
-            realm_id,
-            circle_id,
-        } if realm_id == realm => crate::account_stream_scan::caller_circle_floor_in_connection(
-            conn, realm, circle_id, actor,
-        )
-        .await?
-        .is_some(),
         _ => false,
     })
 }
@@ -577,7 +549,6 @@ pub(crate) async fn governed_content_intent(
     let resource = match (&intent.effective_scope, &intent.strand_id) {
         (_, Some(strand)) => WireResourceSelector::strand(realm.clone(), strand.clone()),
         (arkret_wire::ScopeRef::Realm { .. }, None) => WireResourceSelector::realm(realm.clone()),
-        // A Circle alone cannot be represented by the flat issuer resource ceiling.
         _ => return Err(denied()),
     };
     let agent = ActorId::account(request.member_account_id.clone());
@@ -596,12 +567,6 @@ pub(crate) async fn governed_content_intent(
             arkret_wire::ScopeRef::Realm { .. } => {
                 crate::account_stream_scan::member_realm_floor_in_connection(conn, realm, actor)
                     .await?
-            }
-            arkret_wire::ScopeRef::Circle { circle_id, .. } => {
-                crate::account_stream_scan::member_circle_floor_in_connection(
-                    conn, realm, circle_id, actor,
-                )
-                .await?
             }
             _ => return Err(denied()),
         };
@@ -622,7 +587,6 @@ pub(crate) async fn governed_content_intent(
         crate::policy_current_states::read_scoped_agent_management_policy_snapshot_in_connection(
             conn,
             realm,
-            intent.effective_scope.circle_id(),
         )
         .await?;
     auth.agent_ceiling
@@ -660,7 +624,7 @@ pub(crate) async fn governed_content_intent(
     }
     let facts = OperationFacts {
         strand_id: intent.strand_id.as_ref().map(ToString::to_string),
-        circle_id: intent.effective_scope.circle_id().map(ToString::to_string),
+
         object_kind: (action == CapabilityActionId::MessageCreate).then(|| "message".to_owned()),
         ..Default::default()
     };
@@ -670,9 +634,6 @@ pub(crate) async fn governed_content_intent(
         return Err(denied());
     }
     let mut scopes = vec![format!("realm:{realm}")];
-    if let Some(circle) = intent.effective_scope.circle_id() {
-        scopes.push(format!("circle:{realm}:{circle}"));
-    }
     if let Some(strand) = &intent.strand_id {
         scopes.push(format!("strand:{realm}:{strand}"));
     }
@@ -781,10 +742,7 @@ pub(crate) async fn owned_agent_authorization_check_in_connection(
     {
         let facts = OperationFacts {
             strand_id: target.strand_id.as_ref().map(ToString::to_string),
-            circle_id: match scope {
-                arkret_wire::ScopeRef::Circle { circle_id, .. } => Some(circle_id.to_string()),
-                _ => None,
-            },
+
             track: (action == CapabilityActionId::MessageCreate)
                 .then(|| DISCUSSION_TRACK.to_owned()),
             ..OperationFacts::default()
@@ -797,15 +755,12 @@ pub(crate) async fn owned_agent_authorization_check_in_connection(
             at,
             facts: &facts,
         };
-        let circle = match scope {
-            arkret_wire::ScopeRef::Circle { circle_id, .. } => Some(circle_id),
-            _ => None,
-        };
+
         let resources =
             crate::agent_management_admission::selector_content_resources(realm, target)?;
         let policies =
             crate::policy_current_states::read_scoped_agent_management_policies_in_connection(
-                conn, realm, circle,
+                conn, realm,
             )
             .await?;
         let effect = arkret_policy::agent_management::evaluate_agent_management(
@@ -1102,7 +1057,7 @@ impl RealmAuthorizationCut {
         if matches!(
             event.kind,
             EventKind::MessageCreate
-                | EventKind::CircleMemberState
+
                 | EventKind::MlsGenesis
                 | EventKind::MlsCommit
         ) && event.applet_id.is_some()
@@ -2427,36 +2382,14 @@ impl RealmAuthorizationCut {
         if actual_scope != *scope
             || !matches!(
                 scope,
-                arkret_wire::ScopeRef::Realm { .. } | arkret_wire::ScopeRef::Circle { .. }
+                arkret_wire::ScopeRef::Realm { .. }
             )
         {
             return Err(capability_denied(
                 "native reply source differs from its current Strand scope",
             ));
         }
-        if let arkret_wire::ScopeRef::Circle { circle_id, .. } = scope {
-            #[derive(QueryableByName)]
-            struct NativeCircleCurrentPresent {
-                #[diesel(sql_type = diesel::sql_types::Bool)]
-                present: bool,
-            }
-            // Same active-source join as the original Circle content writer.
-            let active = sql_query(
-                "SELECT EXISTS (SELECT 1 FROM circle_current_states circle \
-                 JOIN realm_commits cc ON cc.commit_id=circle.current_commit_id \
-                 WHERE circle.realm_id=$1 AND circle.circle_id=$2 AND circle.value->>'state'='active' \
-                   AND cc.realm_id=circle.realm_id AND cc.stream_position=circle.current_stream_position \
-                   AND cc.stream_ref=circle.source_stream_ref \
-                   AND cc.stream_ref->>'kind'='realm' AND cc.stream_ref->>'realm_id'=circle.realm_id) AS present",
-            ).bind::<Text,_>(self.realm_id.as_str()).bind::<Text,_>(circle_id.as_str())
-                .get_result::<NativeCircleCurrentPresent>(&mut *conn).await.map_err(PersistenceError::database)?;
-            if !active.present {
-                return Err(capability_denied(
-                    "native reply Circle current is not active",
-                ));
-            }
-            target.circle_id = Some(circle_id.clone());
-        }
+
         for actor in [&self.actor, &controller.actor, caller] {
             if !scope_member_readable(conn, &self.realm_id, scope, actor).await? {
                 return Err(capability_denied(
@@ -2475,10 +2408,7 @@ impl RealmAuthorizationCut {
         // observable yet. Preserve unknown facts rather than using the input's.
         let facts = OperationFacts {
             strand_id: Some(strand.to_string()),
-            circle_id: match scope {
-                arkret_wire::ScopeRef::Circle { circle_id, .. } => Some(circle_id.to_string()),
-                _ => None,
-            },
+
             track: Some(DISCUSSION_TRACK.into()),
             object_kind: Some("message".into()),
             ..OperationFacts::default()
@@ -2604,11 +2534,10 @@ impl RealmAuthorizationCut {
             crate::policy_current_states::read_scoped_agent_management_policies_in_connection(
                 conn,
                 &self.realm_id,
-                None,
             )
             .await?
         } else {
-            crate::policy_current_states::read_scoped_agent_management_policy_snapshot_in_connection(conn, &self.realm_id, None).await?
+            crate::policy_current_states::read_scoped_agent_management_policy_snapshot_in_connection(conn, &self.realm_id).await?
         };
         authorization.agent_ceiling = Some(coland_storage::AgentControllerCeiling {
             controller: Box::new(
@@ -3408,7 +3337,6 @@ impl RealmAuthorizationCut {
             })
             .ok_or_else(|| capability_denied("moderation action is unregistered"))?;
         let mut actions = actions.to_vec();
-        // Realm root authority alone never creates Circle moderation rights.
         if matches!(event.scope_ref, arkret_wire::ScopeRef::Realm { .. }) {
             actions.push(CapabilityActionId::REALM_OWNER);
         }
@@ -3433,11 +3361,11 @@ impl RealmAuthorizationCut {
         if !matches!(
             action,
             CapabilityActionId::StrandWatchSetOthers
-                | CapabilityActionId::CircleMemberManage
-                | CapabilityActionId::CircleMemberAddOthers
+
+
                 | CapabilityActionId::AuditAccessed
                 | CapabilityActionId::RealmNotificationAudit
-                | CapabilityActionId::CircleAudit
+
         ) {
             return Err(capability_denied(
                 "unregistered action in an audit transaction",
@@ -3853,10 +3781,7 @@ impl RealmAuthorizationCut {
         let resource = self.timeline_target(event, target.strand_id.clone());
         let mut facts = OperationFacts {
             strand_id: Some(target.strand_id.to_string()),
-            circle_id: match &event.scope_ref {
-                arkret_wire::ScopeRef::Circle { circle_id, .. } => Some(circle_id.to_string()),
-                _ => None,
-            },
+
             object_kind: Some("message".to_owned()),
             track: Some(DISCUSSION_TRACK.to_owned()),
             target_created_at: Some(target.created_at),
@@ -4224,12 +4149,6 @@ impl RealmAuthorizationCut {
         strand: StrandId,
     ) -> WireResourceSelector {
         match &event.scope_ref {
-            arkret_wire::ScopeRef::Circle {
-                realm_id,
-                circle_id,
-            } if realm_id == &self.realm_id => {
-                WireResourceSelector::circle(realm_id.clone(), circle_id.clone())
-            }
             _ => WireResourceSelector::strand(self.realm_id.clone(), strand),
         }
     }
@@ -4263,12 +4182,6 @@ impl RealmAuthorizationCut {
         event: &arkret_wire::Event,
     ) -> (WireResourceSelector, OperationFacts) {
         let realm = match &event.scope_ref {
-            arkret_wire::ScopeRef::Circle {
-                realm_id,
-                circle_id,
-            } if realm_id == &self.realm_id => {
-                WireResourceSelector::circle(realm_id.clone(), circle_id.clone())
-            }
             _ => WireResourceSelector::realm(self.realm_id.clone()),
         };
         let kind = event.kind.as_str();
@@ -4278,7 +4191,7 @@ impl RealmAuthorizationCut {
             .filter(|family| {
                 matches!(
                     *family,
-                    "strand" | "message" | "morph" | "space" | "circle" | "relation" | "view"
+                    "strand" | "message" | "morph" | "space" | "relation" | "view"
                 )
             })
             .map(str::to_owned);
@@ -4293,10 +4206,7 @@ impl RealmAuthorizationCut {
             object_kind: family,
             strand_id: payload_id("strand_id"),
             space_id: payload_id("space_id"),
-            circle_id: match &event.scope_ref {
-                arkret_wire::ScopeRef::Circle { circle_id, .. } => Some(circle_id.to_string()),
-                _ => payload_id("circle_id"),
-            },
+
             ..OperationFacts::default()
         };
         if matches!(
@@ -4315,9 +4225,6 @@ impl RealmAuthorizationCut {
                 arkret_wire::PinScope::Space { id } => {
                     facts.space_id = Some(id.to_string());
                     WireResourceSelector::space(self.realm_id.clone(), id.clone())
-                }
-                arkret_wire::PinScope::Circle { id } => {
-                    WireResourceSelector::circle(self.realm_id.clone(), id.clone())
                 }
                 arkret_wire::PinScope::Realm { .. } => realm,
             };
@@ -4844,26 +4751,23 @@ mod operation_fact_tests {
             "an expired read window must not authorize the operation: {evaluation:?}"
         );
         cut.native_operation = Some((CapabilityActionId::MessageCreate, target.clone()));
-        let circle_target = WireResourceSelector::circle(
-            cut.realm_id.clone(),
-            arkret_wire::CircleId::from_event_id(&event(0x74)),
-        );
-        cut.native_operation = Some((CapabilityActionId::CircleMemberAdd, circle_target.clone()));
+        let reaction_target = target.clone();
+        cut.native_operation = Some((CapabilityActionId::ReactionAdd, reaction_target.clone()));
         assert_eq!(
             cut.effective_grants(at).unwrap().count(),
             0,
-            "message-only sources cannot authorize Circle membership"
+            "message-only sources cannot authorize reactions"
         );
         for grant in cut.grants.values_mut() {
             grant
                 .actions
-                .push(CapabilityActionId::CircleMemberAdd.as_str().into());
+                .push(CapabilityActionId::ReactionAdd.as_str().into());
         }
         assert_eq!(cut.effective_grants(at).unwrap().count(), 1);
         assert!(matches!(
             cut.evaluate(
-                &[CapabilityActionId::CircleMemberAdd.as_str()],
-                &circle_target,
+                &[CapabilityActionId::ReactionAdd.as_str()],
+                &reaction_target,
                 &OperationFacts::default(),
                 at
             ),

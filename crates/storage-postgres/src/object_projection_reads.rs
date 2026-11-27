@@ -10,7 +10,7 @@ use arkret_models_collaboration::objects::relation::Relation;
 use arkret_models_collaboration::objects::space::Space;
 use arkret_models_collaboration::objects::strand::{Strand, StrandPositionCurrent};
 use arkret_wire::{
-    ActorId, CircleId, CommitStreamRef, ObjectState, RealmId, ScopeRef, SpaceId, SpaceState,
+    ActorId, CommitStreamRef, ObjectState, RealmId, ScopeRef, SpaceId, SpaceState,
     StrandId,
 };
 use coland_storage::{
@@ -27,12 +27,6 @@ use crate::{PgPool, PgTransactionError};
 struct ValueRow {
     #[diesel(sql_type = Jsonb)]
     value: Value,
-}
-
-#[derive(diesel::QueryableByName)]
-struct CircleRow {
-    #[diesel(sql_type = Text)]
-    circle_id: String,
 }
 
 #[derive(diesel::QueryableByName)]
@@ -121,7 +115,7 @@ fn hydration_source_sql(row: &str, selector: &str) -> String {
 impl ObjectCurrentSnapshotStore for PgObjectCurrentSnapshotStore {
     async fn snapshot(&self) -> PersistenceResult<ObjectCurrentSnapshot> {
         let mut conn = self.pool.get().await.map_err(PersistenceError::database)?;
-        let (space_rows, strand_rows) = conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+        let (space_rows, strand_rows, encrypted_realms) = conn.transaction::<_, PgTransactionError, _>(async move |conn| {
             diesel::sql_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
                 .execute(&mut *conn).await?;
             let orphan_sibling: crate::ExistsRow = diesel::sql_query(
@@ -159,7 +153,22 @@ impl ObjectCurrentSnapshotStore for PgObjectCurrentSnapshotStore {
                  {strand_source} AS source_stream_ref FROM strand_current_states s \
                  ORDER BY s.realm_id,s.strand_id",
             )).load::<StrandSnapshotRow>(&mut *conn).await?;
-            Ok((spaces,strands))
+            let groups = diesel::sql_query(
+                "SELECT g.value->'effective_scope' AS value FROM mls_group_current_states g
+                 JOIN realm_commits c ON c.realm_id=g.realm_id AND c.commit_id=g.current_commit_id
+                    AND c.stream_position=g.current_stream_position
+                 JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed'
+                 WHERE c.stream_ref=jsonb_build_object('kind','realm','realm_id',g.realm_id)
+                   AND g.value->'effective_scope'=c.stream_ref"
+            ).load::<ValueRow>(&mut *conn).await?;
+            let mut encrypted_realms = BTreeSet::new();
+            for group in groups {
+                let scope: ScopeRef = serde_json::from_value(group.value).map_err(PersistenceError::database)?;
+                if let ScopeRef::Realm { realm_id } = scope {
+                    encrypted_realms.insert(realm_id.to_string());
+                }
+            }
+            Ok((spaces,strands,encrypted_realms))
         }).await.map_err(PgTransactionError::into_persistence)?;
         let spaces = space_rows
             .into_iter()
@@ -187,15 +196,7 @@ impl ObjectCurrentSnapshotStore for PgObjectCurrentSnapshotStore {
                 {
                     return Err(corrupt("Strand current identity mismatch"));
                 }
-                let expected_stream_ref = match &strand.scope_circle_id {
-                    Some(circle_id) => CommitStreamRef::Circle {
-                        realm_id: strand.realm_id.clone(),
-                        circle_id: circle_id.clone(),
-                    },
-                    None => CommitStreamRef::Realm {
-                        realm_id: strand.realm_id.clone(),
-                    },
-                };
+                let expected_stream_ref = CommitStreamRef::Realm { realm_id: strand.realm_id.clone() };
                 let source_stream_ref = row
                     .source_stream_ref
                     .ok_or_else(|| corrupt("Strand current has no covering RealmCommit"))?;
@@ -207,16 +208,12 @@ impl ObjectCurrentSnapshotStore for PgObjectCurrentSnapshotStore {
                 Ok(strand)
             })
             .collect::<PersistenceResult<Vec<_>>>()?;
-        Ok(ObjectCurrentSnapshot { spaces, strands })
+        Ok(ObjectCurrentSnapshot { spaces, strands, encrypted_realms })
     }
 }
 
 fn corrupt(detail: impl Into<String>) -> PersistenceError {
     PersistenceError::Internal(format!("invalid projection current: {}", detail.into()))
-}
-
-fn visible(circle: Option<&CircleId>, circles: &BTreeSet<CircleId>) -> bool {
-    circle.is_none_or(|id| circles.contains(id))
 }
 
 pub(crate) async fn lists_for_actor(
@@ -273,30 +270,6 @@ pub(crate) async fn lists_for_actor_in_connection(
             },
         )));
     }
-    crate::circle_current_states::require_actor_currents_in_connection(conn, Some(realm_id), actor)
-        .await?;
-    let circle_rows = diesel::sql_query(
-        "SELECT m.circle_id FROM circle_member_state_current_states m \
-             JOIN circle_current_states c ON c.circle_id=m.circle_id AND c.realm_id=m.realm_id \
-             WHERE m.realm_id=$1 AND m.member_id=$2 AND m.membership='join' \
-               AND circle_member_parent_join_current(m.realm_id,m.member_id,m.value) \
-               AND circle_current_row_proved(m.realm_id,jsonb_build_object('kind','circle_member_state','circle_id',m.circle_id,'member_actor_id',m.member_id::jsonb),m.source_stream_ref,m.current_commit_id,m.current_stream_position,m.value) \
-               AND circle_current_row_proved(c.realm_id,jsonb_build_object('kind','circle','circle_id',c.circle_id),c.source_stream_ref,c.current_commit_id,c.current_stream_position,c.value) \
-               AND c.value->>'state'='active' \
-               AND m.source_stream_ref->>'circle_id'=m.circle_id",
-    )
-    .bind::<Text, _>(realm_id.as_str())
-    .bind::<Text, _>(actor.to_string())
-    .load::<CircleRow>(&mut *conn)
-    .await?;
-    let circles = circle_rows
-        .into_iter()
-        .map(|row| {
-            row.circle_id
-                .parse::<CircleId>()
-                .map_err(|error| corrupt(error.to_string()))
-        })
-        .collect::<PersistenceResult<BTreeSet<_>>>()?;
     let incomplete_space = diesel::sql_query(
             "SELECT EXISTS(SELECT 1 FROM space_current_states s \
              LEFT JOIN space_parent_current_states p ON p.realm_id=s.realm_id AND p.space_id=s.space_id \
@@ -333,9 +306,6 @@ pub(crate) async fn lists_for_actor_in_connection(
         }
         let space_id = space.id.clone().ok_or_else(|| corrupt("Space id absent"))?;
         space_objects.insert(space_id, space.clone());
-        if !visible(space.scope_circle_id.as_ref(), &circles) {
-            continue;
-        }
         let state = space.state.ok_or_else(|| corrupt("Space state absent"))?;
         if !include_terminal && state == SpaceState::Tombstoned {
             continue;
@@ -385,7 +355,7 @@ pub(crate) async fn lists_for_actor_in_connection(
     for row in relations {
         let relation: Relation =
             serde_json::from_value(row.value).map_err(PersistenceError::database)?;
-        if relation.realm_id != *realm_id || !visible(relation.scope_circle_id.as_ref(), &circles) {
+        if relation.realm_id != *realm_id {
             continue;
         }
         if relation
@@ -393,10 +363,6 @@ pub(crate) async fn lists_for_actor_in_connection(
             .as_ref()
             .is_some_and(|scope| match scope {
                 ScopeRef::Realm { realm_id: id } => id != realm_id,
-                ScopeRef::Circle {
-                    realm_id: id,
-                    circle_id,
-                } => id != realm_id || !circles.contains(circle_id),
                 _ => true,
             })
         {
@@ -469,9 +435,6 @@ pub(crate) async fn lists_for_actor_in_connection(
         if strand.realm_id != *realm_id {
             return Err(corrupt("Strand Realm mismatch").into());
         }
-        if !visible(strand.scope_circle_id.as_ref(), &circles) {
-            continue;
-        }
         let state = strand.state.ok_or_else(|| corrupt("Strand state absent"))?;
         if !include_terminal && state == ObjectState::Redacted {
             continue;
@@ -485,15 +448,8 @@ pub(crate) async fn lists_for_actor_in_connection(
             let list = space_objects
                 .get(&position.list_space_id)
                 .ok_or_else(|| corrupt("position List metadata absent"))?;
-            if !visible(board.scope_circle_id.as_ref(), &circles)
-                || !visible(list.scope_circle_id.as_ref(), &circles)
-            {
-                continue;
-            }
             if board.kind != "board"
                 || list.kind != "list"
-                || strand.scope_circle_id != board.scope_circle_id
-                || strand.scope_circle_id != list.scope_circle_id
             {
                 return Err(
                     corrupt("position cannot form an available structural placement").into(),
@@ -824,7 +780,7 @@ fn list_dependencies(
                 true
             }
             Selector::SpaceChildScopePolicy { space_id } if space_ids.contains(space_id) => {
-                let _: Option<arkret_models_collaboration::objects::space::ChildScopePolicy> =
+                let _: Option<bool> =
                     serde_json::from_value(value.clone()).map_err(PersistenceError::database)?;
                 *space_families.entry(space_id.clone()).or_default() |= 4;
                 true
@@ -878,8 +834,7 @@ fn list_dependencies(
 
 /// The effective scope of a non-terminal Strand that `actor` currently reads,
 /// from durable current rows at one cut: the actor is a current joined member
-/// (governed here or held as a verified replica) and, for a Circle-scoped
-/// Strand, a current joined member of that active Circle. Every hidden,
+/// of the Realm, governed here or held as a verified replica. Every hidden,
 /// missing or terminal target is the same `None`.
 pub(crate) async fn visible_strand_scope_for_actor(
     pool: &PgPool,
@@ -900,7 +855,7 @@ pub(crate) async fn visible_strand_scope_for_actor(
             return Ok(None);
         }
         let row: Option<ValueRow> = diesel::sql_query(
-            "SELECT value FROM strand_current_states WHERE realm_id=$1 AND strand_id=$2",
+            "SELECT s.value FROM strand_current_states s JOIN realm_commits c ON c.realm_id=s.realm_id AND c.commit_id=s.current_commit_id AND c.stream_position=s.current_stream_position WHERE s.realm_id=$1 AND s.strand_id=$2 AND c.stream_ref=jsonb_build_object('kind','realm','realm_id',s.realm_id)",
         )
         .bind::<Text, _>(realm_id.as_str())
         .bind::<Text, _>(strand_id.as_str())
@@ -918,33 +873,7 @@ pub(crate) async fn visible_strand_scope_for_actor(
         if strand.state.ok_or_else(|| corrupt("Strand state absent"))? == ObjectState::Redacted {
             return Ok(None);
         }
-        let Some(circle_id) = strand.scope_circle_id else {
-            return Ok(Some(ScopeRef::Realm {
-                realm_id: realm_id.clone(),
-            }));
-        };
-        if !crate::circle_current_states::effective_member_in_connection(conn, realm_id, &circle_id, actor).await? {
-            return Ok(None);
-        }
-        let joined = diesel::sql_query(
-            "SELECT EXISTS(SELECT 1 FROM circle_member_state_current_states m \
-             JOIN circle_current_states c ON c.circle_id=m.circle_id AND c.realm_id=m.realm_id \
-             WHERE m.realm_id=$1 AND m.circle_id=$2 AND m.member_id=$3 AND m.membership='join' \
-               AND circle_member_parent_join_current(m.realm_id,m.member_id,m.value) \
-               AND circle_current_row_proved(m.realm_id,jsonb_build_object('kind','circle_member_state','circle_id',m.circle_id,'member_actor_id',m.member_id::jsonb),m.source_stream_ref,m.current_commit_id,m.current_stream_position,m.value) \
-               AND circle_current_row_proved(c.realm_id,jsonb_build_object('kind','circle','circle_id',c.circle_id),c.source_stream_ref,c.current_commit_id,c.current_stream_position,c.value) \
-               AND c.value->>'state'='active' \
-               AND m.source_stream_ref->>'circle_id'=m.circle_id) AS present",
-        )
-        .bind::<Text, _>(realm_id.as_str())
-        .bind::<Text, _>(circle_id.as_str())
-        .bind::<Text, _>(actor.to_string())
-        .get_result::<crate::ExistsRow>(&mut *conn)
-        .await?;
-        Ok(joined.present.then(|| ScopeRef::Circle {
-            realm_id: realm_id.clone(),
-            circle_id,
-        }))
+        Ok(Some(ScopeRef::Realm { realm_id: realm_id.clone() }))
     })
     .await
     .map_err(PgTransactionError::into_persistence)
@@ -1279,7 +1208,7 @@ mod tests {
             .unwrap();
         // Corrupt the endpoint without violating the interval shape constraint.
         diesel::sql_query(
-            "UPDATE replica_authorization_cuts SET head_commit_id=$2,circle_effect_base_commit_id=$2 WHERE realm_id=$1",
+            "UPDATE replica_authorization_cuts SET head_commit_id=$2 WHERE realm_id=$1",
         )
         .bind::<Text, _>(realm.as_str())
         .bind::<Text, _>(RealmCommitId::from_digest([8; 32]).as_str())
@@ -1290,7 +1219,7 @@ mod tests {
             store.snapshot().await.is_err(),
             "equal-position evidence must bind the exact cut Commit"
         );
-        diesel::sql_query("UPDATE replica_authorization_cuts SET head_commit_id=$2,head_stream_position=2,circle_effect_base_commit_id=$2,circle_effect_base_stream_position=2 WHERE realm_id=$1")
+        diesel::sql_query("UPDATE replica_authorization_cuts SET head_commit_id=$2,head_stream_position=2,snapshot_stream_position=2 WHERE realm_id=$1")
             .bind::<Text,_>(realm.as_str()).bind::<Text,_>(head.commit_id.as_str())
             .execute(&mut *conn).await.unwrap();
         assert!(

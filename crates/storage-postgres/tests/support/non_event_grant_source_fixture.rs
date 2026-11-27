@@ -65,11 +65,7 @@ fn non_event_grant_original(
 fn non_event_exact_resource(scope: &ScopeRef) -> arkret_wire::WireResourceSelector {
     match scope {
         ScopeRef::Realm { realm_id } => arkret_wire::WireResourceSelector::realm(realm_id.clone()),
-        ScopeRef::Circle {
-            realm_id,
-            circle_id,
-        } => arkret_wire::WireResourceSelector::circle(realm_id.clone(), circle_id.clone()),
-        _ => unreachable!("the real installation fixture admits Realm or Circle scope"),
+        _ => unreachable!("the real installation fixture admits Realm scope"),
     }
 }
 
@@ -253,7 +249,7 @@ pub(super) async fn run_non_event_grant_sources(pool: PgPool) {
     .await;
     let first_outcome = boxed_step(|| commit_install_http(fixture, &first)).await;
     let first_scope = first.effective_scope.clone();
-    let missing_scope = boxed_step(|| fixture.new_circle_scope()).await;
+    let missing_scope = ScopeRef::realm(boxed_step(|| fixture.create_realm()).await);
     assert_ne!(missing_scope, first_scope);
     let first_registration = fixture
         .state

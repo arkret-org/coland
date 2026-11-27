@@ -149,7 +149,7 @@ async fn admit_in_connection(
     )
     .await?;
     lifecycle.require_open_lifecycle(event)?;
-    require_known_scope(conn, &record.actor_id, scope).await?;
+    require_known_scope(&record.actor_id, scope)?;
     let key = arkret_identity::public_key_material_from_document(
         &producer.service_did_document,
         &record.signature_proof.verification_method,
@@ -279,30 +279,12 @@ async fn admit_in_connection(
     ))
 }
 
-async fn require_known_scope(
-    conn: &mut AsyncPgConnection,
+fn require_known_scope(
     actor: &ActorId,
     scope: &ScopeRef,
 ) -> PersistenceResult<()> {
     let subject = actor
         .as_realm_actor_id()
         .ok_or_else(|| refused("native actor absent"))?;
-    arkret_models_crypto::validate_realm_actor_backup_scope(subject, scope).map_err(refused)?;
-    if let ScopeRef::Circle { circle_id, .. } = scope {
-        crate::circle_current_states::require_metadata_in_connection(
-            conn,
-            &subject.realm_id,
-            circle_id,
-        )
-        .await?;
-        let row=sql_query("SELECT to_jsonb(EXISTS(SELECT 1 FROM realm_actor_backup_series s WHERE s.realm_id=$1 AND s.actor_id=$2 AND s.effective_scope=$3) OR EXISTS(SELECT 1 FROM realm_actor_current_states a CROSS JOIN LATERAL jsonb_array_elements(a.value->'scopes') e WHERE a.realm_id=$1 AND a.actor_id=$2 AND a.selector->>'kind'='realm_actor_device_authorization' AND e->'effective_scope'=$3)) AS value")
-            .bind::<Text,_>(subject.realm_id.as_str()).bind::<Jsonb,_>(json!(actor)).bind::<Jsonb,_>(json!(scope))
-            .get_result::<JsonRow>(&mut *conn).await.map_err(PersistenceError::database)?;
-        if row.value != json!(true) {
-            return Err(refused(
-                "native Circle scope is not an existing known actor scope",
-            ));
-        }
-    }
-    Ok(())
+    arkret_models_crypto::validate_realm_actor_backup_scope(subject, scope).map_err(refused)
 }

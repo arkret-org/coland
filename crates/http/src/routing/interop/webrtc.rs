@@ -558,7 +558,6 @@ async fn handle_rtc_token_with_original(
         })?
         .scope_ref;
     let resource = match call_scope {
-        arkret_wire::ScopeRef::Circle { circle_id, .. } => circle_id.as_str(),
         _ => body.realm_id.as_str(),
     };
     if !crate::authz::authorize(

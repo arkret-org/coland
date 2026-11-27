@@ -163,10 +163,6 @@ async fn health_and_describe_work_body() {
         &describe,
         "ak.self.keys.backups.resource.replace.v1"
     ));
-    assert!(advertises_operation(
-        &describe,
-        "ak.self.circle.command.create.v1"
-    ));
     for operation_id in [
         "ak.self.authz.read.check.v1",
         "ak.self.authz.grants.read.effective.v1",
@@ -227,7 +223,7 @@ async fn health_and_describe_work_body() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|surface| surface == "circle_management")
+            .all(|surface| surface != "circle_management")
     );
     assert!(
         !describe["limits"]["profile_status"]["full_profiles_not_claimed"]

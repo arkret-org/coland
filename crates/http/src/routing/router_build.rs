@@ -359,8 +359,6 @@ fn arkret_protocol_router(conformance_harness_enabled: bool) -> Router {
                 // document CRUD lives on the product surface at
                 // `/_coland/self/policies*`, see `coland_local_router`.)
                 .push(access::router())
-                // self/circles/* (ak.self.circle.*).
-                .push(circles::router())
                 // self/realms/{realm_id}/links
                 // (ak.self.realm_link.*).
                 .push(realms::router())

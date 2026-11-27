@@ -1,4 +1,4 @@
-//! `ProjectionState::apply_*` reducers for strand / morph / circle / applet /
+//! `ProjectionState::apply_*` reducers for strand / morph / applet /
 //! agent object families plus the read-only query helpers. Split out of
 //! `reducer.rs` (SOL-07-005) — these are additional inherent-impl blocks on
 //! `ProjectionState`; methods resolve by type, so cross-family
@@ -11,7 +11,6 @@
 pub(crate) use super::*;
 
 mod applet_agent;
-mod circle;
 mod morph;
 mod queries;
 pub use queries::DeferredParentMembershipAdmission;

@@ -390,9 +390,9 @@ mod tests {
                 bytes[0] = 1;
                 bytes[1..9].copy_from_slice(&index.to_be_bytes());
                 RealmStreamView {
-                    stream_ref: CommitStreamRef::Circle {
+                    stream_ref: CommitStreamRef::Sidecar {
                         realm_id: realm.clone(),
-                        circle_id: arkret_wire::CircleId::from_event_id(
+                        sidecar_id: arkret_wire::SidecarId::from_event_id(
                             &arkret_wire::EventId::from_token_bytes(bytes).unwrap(),
                         ),
                     },

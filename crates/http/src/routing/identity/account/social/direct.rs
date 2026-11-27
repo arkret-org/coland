@@ -168,7 +168,6 @@ pub(crate) fn direct_binding_matches_projection(
         .get(&binding.main_strand_id)
         .is_some_and(|strand| {
             strand.realm_id == binding.realm_id
-                && strand.scope_circle_id.is_none()
                 && strand.state.as_str() == "active"
                 && strand
                     .tracks

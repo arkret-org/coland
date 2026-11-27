@@ -20,7 +20,7 @@ pub(super) fn enable(package: &mut AppletPackage) {
     package.claimed_profiles.sort();
     package.requested_scopes.extend(
         [
-            "ak.circle.member.add",
+
             "ak.event.read",
             "ak.mls.commit",
             "ak.mls.genesis",
@@ -210,7 +210,7 @@ async fn business_authority(
         subject: CapabilitySubject::Actor(service_actor.clone()),
         actions: vec![
             "ak.applet.join".into(),
-            "ak.circle.member.add".into(),
+
             "ak.event.read".into(),
             "ak.message.create".into(),
             "ak.mls.commit".into(),
@@ -219,13 +219,7 @@ async fn business_authority(
             "ak.strand.create".into(),
             "ak.message.redact".into(),
         ],
-        resources: vec![match &scope {
-            ScopeRef::Circle {
-                realm_id,
-                circle_id,
-            } => arkret_wire::WireResourceSelector::circle(realm_id.clone(), circle_id.clone()),
-            _ => arkret_wire::WireResourceSelector::realm(fixture.realm.clone()),
-        }],
+        resources: vec![arkret_wire::WireResourceSelector::realm(scope.realm_id().clone())],
         constraints: vec![
             GrantConstraint::applet_authority(
                 package.applet_id.clone(),
@@ -2241,29 +2235,7 @@ async fn human_admits_runtime_in_authority(
     let history = &fixture.pcr.history;
     let scope = device.effective_scope().clone();
     let actor = ActorId::account(history.account.clone());
-    if let ScopeRef::Circle { circle_id, .. } = &scope {
-        let snapshot = fixture
-            .state
-            .test_persistence()
-            .authority_commits()
-            .realm_state_snapshot_material(&fixture.realm)
-            .await
-            .unwrap()
-            .unwrap();
-        let parent = snapshot.current_state_entries.iter().find_map(|row| {
-            let arkret_wire::CurrentState::Value { selector, revision, value, .. } = row;
-            matches!(selector, arkret_wire::CurrentSelector::MemberState { actor_id } if actor_id == &actor)
-                .then_some((revision, value))
-        }).expect("the ordinary member has an accepted parent membership");
-        assert_eq!(parent.1["membership"], "join");
-        let join = fixture.admin_event(
-            EventKind::CircleMemberState,
-            scope.clone(),
-            json!({"circle_id":circle_id,"member_id":actor,"membership":"join",
-                "parent_membership_revision":parent.0}),
-        );
-        boxed_step(|| submit_human_event(fixture, join)).await;
-    }
+
     let key = SigningKey::from_bytes(&history.founding_device_signing_seed);
     let authorization = history
         .events
@@ -2626,7 +2598,7 @@ async fn human_adds_runtime_to_group_in_authority(
 }
 
 /// A real covering Commit removes the old leaf before the next legitimate Add.
-/// The RealmActor's Circle membership and Device original remain unchanged.
+/// The RealmActor's membership and Device original remain unchanged.
 pub(super) async fn human_rotates_out_runtime(
     fixture: &Fixture,
     device: &arkret_bridge_runtime::managed_device::ManagedDevice,

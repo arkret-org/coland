@@ -79,15 +79,8 @@ impl ProjectionState {
                 reason: arkret_wire::ErrorCode::SCHEMA_VIOLATION.to_owned(),
             };
         }
-        // The Space's own optional scope MUST reference an active Circle in
-        // this Realm. Child defaults are expressed only by child_scope_policy.
-        if let Some(scope_circle_id) = object.get("scope_circle_id").and_then(Value::as_str)
-            && let Err(reason) =
-                self.validate_scope_circle_id(scope_circle_id, operation.realm_id.as_ref())
-        {
-            return ProjectionEffect::Rejected {
-                reason: reason.to_owned(),
-            };
+        if object.contains_key("scope_circle_id") {
+            return ProjectionEffect::Rejected { reason: arkret_wire::ErrorCode::SCHEMA_VIOLATION.to_owned() };
         }
         let child_scope_policy = match child_scope_policy_from_object(object) {
             Ok(policy) => policy,
@@ -97,18 +90,6 @@ impl ProjectionState {
                 };
             }
         };
-        if let Some(
-            arkret_models_collaboration::objects::space::ChildScopePolicy::RequireScopeCircleId {
-                scope_circle_id: policy_scope,
-            },
-        ) = child_scope_policy.as_ref()
-            && let Err(reason) =
-                self.validate_scope_circle_id(policy_scope.as_str(), operation.realm_id.as_ref())
-        {
-            return ProjectionEffect::Rejected {
-                reason: reason.to_owned(),
-            };
-        }
         let kind = object
             .get("kind")
             .and_then(|v| v.as_str())
@@ -155,9 +136,7 @@ impl ProjectionState {
         if let Some(parent) = parent_ref.as_deref()
             && let Err(reason) = self.check_space_child_scope_policy(
                 parent,
-                object.get("scope_circle_id").and_then(Value::as_str),
                 &realm_id,
-                false,
             )
         {
             return ProjectionEffect::Rejected {
@@ -176,11 +155,7 @@ impl ProjectionState {
             kind,
             title,
             fields,
-            scope_circle_id: object
-                .get("scope_circle_id")
-                .and_then(Value::as_str)
-                .filter(|value| !value.trim().is_empty())
-                .map(ToOwned::to_owned),
+
             child_scope_policy,
             parent_ref,
             rank,
@@ -228,6 +203,11 @@ impl ProjectionState {
                 reason: "space_not_active".to_owned(),
             };
         }
+        let encryption_requirement = match operation.payload.get("child_scope_policy") {
+            Some(Value::Bool(required)) => Some(*required),
+            Some(_) => return ProjectionEffect::Rejected { reason: arkret_wire::ErrorCode::SCHEMA_VIOLATION.to_owned() },
+            None => None,
+        };
         let patch = operation.payload.get("patch").and_then(|v| v.as_object());
         if let Some(patch) = patch {
             if patch.contains_key("default_scope_circle_id")
@@ -254,11 +234,14 @@ impl ProjectionState {
             if let Some(title) = patch.get("title").and_then(|v| v.as_str()) {
                 space_container.title = title.to_owned();
             }
-            if let Some(rank) = patch.get("rank").and_then(|v| v.as_str()) {
-                space_container.rank = Some(rank.to_owned());
+            if let Some(rank) = patch_string_value(patch, "rank") {
+                space_container.rank = rank;
             }
             space_container.kind = candidate_kind.to_owned();
             space_container.fields = candidate_fields;
+        }
+        if let Some(required) = encryption_requirement {
+            space_container.child_scope_policy = Some(required);
         }
         space_container.updated_by = Some(operation.context.sender.to_string());
         space_container.updated_at = Some(now);
@@ -314,9 +297,7 @@ impl ProjectionState {
             }
             if let Err(reason) = self.check_space_child_scope_policy(
                 parent_space_id,
-                space_container.scope_circle_id.as_deref(),
                 &space_container.realm_id,
-                false,
             ) {
                 return ProjectionEffect::Rejected {
                     reason: reason.to_owned(),
@@ -463,9 +444,7 @@ impl ProjectionState {
                 if let Some(parent) = parent {
                     self.check_space_child_scope_policy(
                         parent,
-                        object.get("scope_circle_id").and_then(Value::as_str),
                         &realm_id,
-                        false,
                     )?;
                 }
                 Ok(())
@@ -490,15 +469,11 @@ impl ProjectionState {
                 };
                 self.check_space_child_scope_policy(
                     &board_space_id,
-                    strand.scope_circle_id.as_deref(),
                     &strand.realm_id,
-                    false,
                 )?;
                 self.check_space_child_scope_policy(
                     &list_space_id,
-                    strand.scope_circle_id.as_deref(),
                     &strand.realm_id,
-                    false,
                 )
             }
             arkret_wire::EventKind::SpaceParent => {
@@ -519,9 +494,7 @@ impl ProjectionState {
                 };
                 self.check_space_child_scope_policy(
                     parent_space_id,
-                    space_container.scope_circle_id.as_deref(),
                     &space_container.realm_id,
-                    false,
                 )
             }
             _ => Ok(()),
@@ -531,9 +504,7 @@ impl ProjectionState {
     pub(crate) fn check_space_child_scope_policy(
         &self,
         parent_space_id: &str,
-        child_scope_circle_id: Option<&str>,
         child_realm_id: &str,
-        _child_has_plaintext_metadata: bool,
     ) -> Result<(), &'static str> {
         let Some(parent) = self.space_containers.get(parent_space_id) else {
             return Err("space_parent_unreadable");
@@ -543,54 +514,16 @@ impl ProjectionState {
             &parent.realm_id,
             parent.state == SpaceContainerLifecycleState::Active,
         )?;
-        let Some(policy) = parent.child_scope_policy.as_ref() else {
-            return Ok(());
-        };
-        match policy {
-            arkret_models_collaboration::objects::space::ChildScopePolicy::AllowAny {} => Ok(()),
-            arkret_models_collaboration::objects::space::ChildScopePolicy::RequireSameScope {} => {
-                if parent.scope_circle_id.as_deref() == child_scope_circle_id {
-                    Ok(())
-                } else {
-                    Err(arkret_wire::ErrorCode::POLICY_VIOLATION)
-                }
-            }
-            arkret_models_collaboration::objects::space::ChildScopePolicy::RequireScopeCircleId { scope_circle_id } => {
-                if Some(scope_circle_id.as_str()) == child_scope_circle_id {
-                    Ok(())
-                } else {
-                    Err(arkret_wire::ErrorCode::POLICY_VIOLATION)
-                }
-            }
-            arkret_models_collaboration::objects::space::ChildScopePolicy::RequireE2ee {} => {
-                if self.child_scope_is_e2ee(child_scope_circle_id) {
-                    Ok(())
-                } else {
-                    Err(arkret_wire::ErrorCode::POLICY_VIOLATION)
-                }
-            }
+        if parent.child_scope_policy == Some(true) && !self.encrypted_realms.contains(child_realm_id) {
+            return Err(arkret_wire::ErrorCode::POLICY_VIOLATION);
         }
-    }
-
-    /// Whether the child scope has been irreversibly activated by its own accepted
-    /// `ak.mls.genesis`. An activated scope carries only RFC 9420 application ciphertext.
-    ///
-    /// A Realm scope's activation is its durable `mls_group` typed current,
-    /// which this in-process fold cannot read, so a Realm-scope child is never
-    /// proven E2EE here and `RequireE2ee` fails closed for it.
-    fn child_scope_is_e2ee(&self, child_scope_circle_id: Option<&str>) -> bool {
-        match child_scope_circle_id {
-            Some(circle_id) => self.circles.get(circle_id).is_some_and(|circle| {
-                circle.state == CircleLifecycleState::Active && circle.mls_group_ref.is_some()
-            }),
-            None => false,
-        }
+        Ok(())
     }
 }
 
 fn child_scope_policy_from_object(
     object: &serde_json::Map<String, Value>,
-) -> Result<Option<arkret_models_collaboration::objects::space::ChildScopePolicy>, &'static str> {
+) -> Result<Option<bool>, &'static str> {
     let Some(policy) = object.get("child_scope_policy") else {
         return Ok(None);
     };

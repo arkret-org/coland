@@ -39,7 +39,7 @@ pub enum AppletWidgetTokenInvalidation {
 }
 
 /// Scope narrowing is shared with ordinary grant selector evaluation. Issuance
-/// never upgrades a token to a user session or expands a Circle to its Realm.
+/// never upgrades a token to a user session or expands its signed scope.
 pub fn validate_applet_widget_scope(
     declared: &WidgetTokenScope,
     requested: &WidgetTokenScope,
@@ -73,10 +73,6 @@ pub fn validate_applet_widget_scope(
     }
     let scope_resource = match &install.effective_scope {
         ScopeRef::Realm { realm_id } => arkret_wire::WireResourceSelector::realm(realm_id.clone()),
-        ScopeRef::Circle {
-            realm_id,
-            circle_id,
-        } => arkret_wire::WireResourceSelector::circle(realm_id.clone(), circle_id.clone()),
         _ => {
             return Err(reject(
                 "widget token requires an exact Applet install scope",

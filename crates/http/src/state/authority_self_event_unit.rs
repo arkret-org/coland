@@ -125,14 +125,14 @@ fn decided_at_commit_cut(kind: &arkret_wire::EventKind) -> bool {
             | arkret_wire::EventKind::MlsHistoryGrant
             | arkret_wire::EventKind::RealmActorStatusSet
             | arkret_wire::EventKind::RealmActorRecoverySet
-            | arkret_wire::EventKind::CircleCreate
+
             | arkret_wire::EventKind::ProfileCreate
             | arkret_wire::EventKind::ProfileUpdate
             | arkret_wire::EventKind::SidecarCreate
             | arkret_wire::EventKind::SidecarMemberState
             | arkret_wire::EventKind::SidecarContextAttach
             | arkret_wire::EventKind::AgentSidecarExchangeControl
-            | arkret_wire::EventKind::CircleMemberState
+
             | arkret_wire::EventKind::RealmOrganization
             | arkret_wire::EventKind::RealmLink
             | arkret_wire::EventKind::RealmSetDefaultStrand
@@ -443,6 +443,14 @@ async fn prepare_self_event_unit(
         coland_storage::DirectConversationAdmissionCut::Passed => true,
         coland_storage::DirectConversationAdmissionCut::NotDirectConversation => false,
     };
+    if matches!(event.kind, arkret_wire::EventKind::SpaceCreate | arkret_wire::EventKind::SpaceParent
+        | arkret_wire::EventKind::StrandCreate | arkret_wire::EventKind::StrandMove | arkret_wire::EventKind::StrandReorder)
+        && let arkret_wire::ScopeRef::Realm { realm_id } = &event.scope_ref
+        && realm_id == &event.realm_id
+        && let Some(group) = state.mls_groups().current(&event.scope_ref).await?
+    {
+        state.projections().observe_ordinary_mls_group(&group);
+    }
     if !private_governance
         && !direct_conversation
         && event.kind != arkret_wire::EventKind::CallState

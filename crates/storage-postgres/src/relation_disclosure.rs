@@ -37,14 +37,6 @@ pub(crate) async fn scope_visible(
                 .await?
                 .is_some()
         }
-        ScopeRef::Circle {
-            realm_id,
-            circle_id,
-        } => crate::account_stream_scan::caller_circle_floor_in_connection(
-            conn, realm_id, circle_id, caller,
-        )
-        .await?
-        .is_some(),
         _ => false,
     })
 }
@@ -54,15 +46,8 @@ pub(crate) async fn relation_visible_in_connection(
     relation: &Relation,
     caller: &ActorId,
 ) -> PersistenceResult<bool> {
-    let scope = match &relation.scope_circle_id {
-        Some(circle_id) => ScopeRef::Circle {
-            realm_id: relation.realm_id.clone(),
-            circle_id: circle_id.clone(),
-        },
-        None => ScopeRef::Realm {
-            realm_id: relation.realm_id.clone(),
-        },
-    };
+    let scope = ScopeRef::Realm { realm_id: relation.realm_id.clone() };
+    if relation.effective_scope.as_ref() != Some(&scope) { return Ok(false); }
     references_visible(
         conn,
         &relation.realm_id,
@@ -206,12 +191,6 @@ pub(crate) async fn domain_scope_in_connection(
         }
         match &scope {
             ScopeRef::Realm { .. } => {}
-            ScopeRef::Circle { .. } => {
-                if matches!(effective, ScopeRef::Circle { .. }) && effective != scope {
-                    return Ok(None);
-                }
-                effective = scope;
-            }
             _ => return Ok(None),
         }
     }
@@ -269,7 +248,7 @@ async fn endpoint_scope(
             return Ok(None);
         };
         let realm_id = RealmId::new(row.realm_id).map_err(PersistenceError::database)?;
-        let (id, home, circle) = if arkret_wire::StrandId::new(reference).is_ok() {
+        let (id, home) = if arkret_wire::StrandId::new(reference).is_ok() {
             let object: arkret_models_collaboration::objects::strand::Strand =
                 serde_json::from_value(row.value).map_err(PersistenceError::database)?;
             if object.schema != arkret_wire::SchemaId::STRAND_V1 {
@@ -280,7 +259,6 @@ async fn endpoint_scope(
             (
                 object.id.map(|id| id.to_string()),
                 object.realm_id,
-                object.scope_circle_id,
             )
         } else {
             let object: arkret_models_collaboration::objects::space::Space =
@@ -294,7 +272,6 @@ async fn endpoint_scope(
             (
                 object.id.map(|id| id.to_string()),
                 object.realm_id,
-                object.scope_circle_id,
             )
         };
         if id.as_deref() != Some(reference.as_str()) || home != realm_id {
@@ -302,13 +279,7 @@ async fn endpoint_scope(
                 "Relation endpoint current differs from its native identity".to_owned(),
             ));
         }
-        let scope = match circle {
-            Some(circle_id) => ScopeRef::Circle {
-                realm_id,
-                circle_id,
-            },
-            None => ScopeRef::Realm { realm_id },
-        };
+        let scope = ScopeRef::Realm { realm_id };
         let covering: CommitStreamRef =
             serde_json::from_value(row.source_stream_ref.ok_or_else(|| {
                 PersistenceError::Database(
@@ -365,15 +336,6 @@ async fn endpoint_scope(
         CommitStreamRef::Realm { realm_id } => {
             crate::account_stream_scan::caller_realm_floor_in_connection(conn, realm_id, caller)
                 .await?
-        }
-        CommitStreamRef::Circle {
-            realm_id,
-            circle_id,
-        } => {
-            crate::account_stream_scan::caller_circle_floor_in_connection(
-                conn, realm_id, circle_id, caller,
-            )
-            .await?
         }
         _ => None,
     };

@@ -90,7 +90,6 @@ fn trace_stream_read_refusal(
 fn diagnostic_stream_class(request: &StreamScanRequestBody) -> &'static str {
     match request.stream_ref {
         arkret_wire::CommitStreamRef::Realm { .. } => "realm",
-        arkret_wire::CommitStreamRef::Circle { .. } => "circle",
         arkret_wire::CommitStreamRef::Sidecar { .. } => "sidecar",
         _ => "other",
     }
@@ -1235,7 +1234,7 @@ async fn scan_stream(req: &mut Request, depot: &Depot, res: &mut Response) {
         && matches!(
             &request.stream_ref,
             arkret_wire::CommitStreamRef::Realm { .. }
-                | arkret_wire::CommitStreamRef::Circle { .. }
+
         )
     {
         match app_state
@@ -1280,7 +1279,7 @@ async fn scan_stream(req: &mut Request, depot: &Depot, res: &mut Response) {
         .await;
     tracing::debug!(target: "sync_network",
         after_position = match request.direction { arkret_wire::StreamScanDirection::After(position) => position, _ => None },
-        stream_kind = match request.stream_ref { arkret_wire::CommitStreamRef::Realm {..} => "realm", arkret_wire::CommitStreamRef::Circle {..} => "circle", arkret_wire::CommitStreamRef::Sidecar {..} => "sidecar", _ => "unknown" },
+        stream_kind = match request.stream_ref { arkret_wire::CommitStreamRef::Realm {..} => "realm", arkret_wire::CommitStreamRef::Sidecar {..} => "sidecar", _ => "unknown" },
         "authorized stream scan direction");
     if session.agent_session().is_some()
         && matches!(
@@ -1393,7 +1392,7 @@ impl ProjectSnapshotDelivery {
             .map_err(|_| denied())?;
         if self
             .snapshot
-            .parent_membership_revision(&arkret_wire::ActorId::account(self.account.clone()))
+            .active_realm_member_revision(&arkret_wire::ActorId::account(self.account.clone()))
             .is_none_or(|revision| revision.commit_id != query.membership_commit_id)
         {
             return Err(unavailable());
@@ -1446,7 +1445,7 @@ pub(crate) async fn project_snapshot_guard(
         || !matches!(
             basis.stream_ref,
             arkret_wire::CommitStreamRef::Realm { .. }
-                | arkret_wire::CommitStreamRef::Circle { .. }
+
         )
     {
         return Err(denied());
@@ -1530,7 +1529,7 @@ async fn hosted_project_scan(
         .prepare_hosted_agent_history(account, &state.service_core_id(), scan, &session_id, &input)
         .await
         .map_err(|cause| {
-            tracing::warn!(%cause, "hosted project history preparation failed");
+            tracing::warn!(?cause, "hosted project history preparation failed");
             denied()
         })?;
     // Resolve the governing floor before accepting the request. Business bytes
@@ -1615,7 +1614,7 @@ async fn native_stream_scan(
         || request.stream_ref.scope_ref() != device.metadata.effective_scope
         || !matches!(
             device.metadata.effective_scope,
-            arkret_wire::ScopeRef::Realm { .. } | arkret_wire::ScopeRef::Circle { .. }
+            arkret_wire::ScopeRef::Realm { .. }
         )
     {
         return Err(unavailable());

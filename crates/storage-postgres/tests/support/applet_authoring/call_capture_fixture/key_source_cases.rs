@@ -5,7 +5,7 @@ use coland_storage::MlsGroupCurrentStore as _;
 
 use super::*;
 
-async fn public_blob(fixture: &Fixture, bytes: Vec<u8>) -> arkret_wire::BlobRef {
+async fn public_blob(fixture: &Fixture, realm: &RealmId, bytes: Vec<u8>) -> arkret_wire::BlobRef {
     let sha256 = arkret_canonical::sha256_hex(&bytes);
     let reference = arkret_wire::BlobRef::new(format!("ak:blob:sha256:{sha256}")).unwrap();
     let storage_key = fixture.state.test_object_key_for_sha256(&sha256);
@@ -27,7 +27,7 @@ async fn public_blob(fixture: &Fixture, bytes: Vec<u8>) -> arkret_wire::BlobRef 
                 storage_key,
                 media_type: "application/octet-stream".into(),
                 filename: None,
-                realm_id: Some(fixture.realm.to_string()),
+                realm_id: Some(realm.to_string()),
                 encryption: None,
                 legal_hold: false,
                 redacted: false,
@@ -70,8 +70,8 @@ pub(super) async fn genesis(
             .unwrap(),
     );
     let (info, tree) = group.public_group_state_bytes().unwrap();
-    let info = public_blob(fixture, info).await;
-    let tree = public_blob(fixture, tree).await;
+    let info = public_blob(fixture, scope.realm_id(), info).await;
+    let tree = public_blob(fixture, scope.realm_id(), tree).await;
     let mut event=fixture.admin_event(EventKind::MlsGenesis,scope.clone(),json!({
         "cipher_suite":"MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519","group_info_ref":info,"ratchet_tree_ref":tree,
         "creator_leaf_authority":{"leaf_signature_key_base64url":arkret_canonical::base64url_encode(key.verifying_key().as_bytes()),
@@ -294,29 +294,7 @@ pub(super) async fn before_start(fixture: &Fixture, start: &Event) {
         "unaccepted Q",
     )
     .await;
-    let scope = realm_native_fixture::boxed_step(|| fixture.new_circle_scope()).await;
-    let actor = ActorId::account(fixture.pcr.history.account.clone());
-    let snapshot = fixture
-        .state
-        .test_persistence()
-        .authority_commits()
-        .realm_state_snapshot_material(&fixture.realm)
-        .await
-        .unwrap()
-        .unwrap();
-    let parent=snapshot.current_state_entries.iter().find_map(|row| {
-        let arkret_wire::CurrentState::Value {selector,revision,value,..}=row;
-        matches!(selector,arkret_wire::CurrentSelector::MemberState {actor_id} if actor_id==&actor)
-            .then_some((revision,value))
-    }).expect("the creator has an actual accepted parent membership");
-    assert_eq!(parent.1["membership"], "join");
-    let ScopeRef::Circle { circle_id, .. } = &scope else {
-        panic!("the foreign native scope is a Circle")
-    };
-    let join=fixture.admin_event(EventKind::CircleMemberState,scope.clone(),json!({
-        "circle_id":circle_id,"member_id":actor,"membership":"join","parent_membership_revision":parent.0
-    }));
-    realm_native_fixture::boxed_step(|| accepted_admin_domain_event(fixture, join)).await;
+    let scope = ScopeRef::realm(realm_native_fixture::boxed_step(|| fixture.create_realm()).await);
     let (_, foreign_key) = realm_native_fixture::boxed_step(|| genesis(fixture, &scope)).await;
     reject_start(
         fixture,

@@ -11,7 +11,7 @@
 //! revision the binding names, and every Welcome's claim ledger row, recipient
 //! authorization and queue capacity. Any refusal rolls the whole Commit back.
 //!
-//! Realm and Circle groups use their exact membership and authority cut. Sidecar
+//! Realm groups use their exact membership and authority cut. Sidecar
 //! groups need their own scope membership basis and stay closed.
 
 use arkret_event_draft::{
@@ -233,7 +233,7 @@ async fn qualify_mls_group<'a>(
             "an MLS Event commits only with its verified public transition".to_owned(),
         )
     })?;
-    if !matches!(&event.scope_ref, ScopeRef::Realm { realm_id } | ScopeRef::Circle { realm_id, .. } | ScopeRef::Sidecar { realm_id, .. } if realm_id == &event.realm_id)
+    if !matches!(&event.scope_ref, ScopeRef::Realm { realm_id } | ScopeRef::Sidecar { realm_id, .. } if realm_id == &event.realm_id)
     {
         return Err(PersistenceError::Internal(
             "the MLS effective scope has no supported authority cut".to_owned(),
@@ -403,20 +403,6 @@ async fn install_authorized_mls_group(
                 ));
             }
         }
-    }
-    // encryption-and-audit.md section 2.4.1: while a Circle tree holds a leaf
-    // of an actor that is no longer an effective Circle member, only a Commit
-    // whose post-state tree drops every such leaf proceeds with an Add
-    // (RFC 9420 proposal type 1); every Add target must itself be effective.
-    if event.kind == EventKind::MlsCommit
-        && installation
-            .consumed_proposals
-            .iter()
-            .any(|proposal| proposal.proposal_type == 1)
-        && circle_holds_invalid_owner(conn, &event.scope_ref, &installation.member_principals)
-            .await?
-    {
-        return Err(coland_storage::MlsSendGateRefusal::EpochUpdateRequired.into_conflict());
     }
     let deadlines =
         crate::boxed_future(|| fresh_claim_deadlines_in_connection(conn, transaction)).await?;
@@ -1096,8 +1082,6 @@ async fn require_registered_history_access(
     let history = match scope {
         ScopeRef::Realm { realm_id } => sql_query("SELECT value FROM realm_bootstrap_current_states WHERE realm_id=$1 AND state_family='realm_history_access' FOR SHARE")
             .bind::<Text, _>(realm_id.as_str()).get_result::<HistoryAccessRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?,
-        ScopeRef::Circle { realm_id, circle_id } => sql_query("SELECT value->'history_access' AS value FROM circle_current_states WHERE realm_id=$1 AND circle_id=$2 AND value->>'state'='active' FOR SHARE")
-            .bind::<Text, _>(realm_id.as_str()).bind::<Text, _>(circle_id.as_str()).get_result::<HistoryAccessRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?,
         _ => None,
     };
     if !matches!(
@@ -1581,12 +1565,6 @@ pub(crate) async fn require_mls_send_gate_in_connection(
             return Err(coland_storage::MlsSendGateRefusal::EpochUpdateRequired.into_conflict());
         }
     }
-    if envelopes.is_some()
-        && let Some(current) = &current
-        && circle_tree_holds_invalid_leaf(conn, &event.scope_ref, current).await?
-    {
-        return Err(coland_storage::MlsSendGateRefusal::EpochUpdateRequired.into_conflict());
-    }
     let envelopes = envelopes
         .as_ref()
         .map(|envelopes| envelopes.iter().collect::<Vec<_>>());
@@ -1596,61 +1574,6 @@ pub(crate) async fn require_mls_send_gate_in_connection(
         envelopes.as_deref(),
     )
     .map_err(coland_storage::MlsSendGateRefusal::into_conflict)
-}
-
-/// encryption-and-audit.md section 2.4.1: an activated Circle whose current
-/// public tree still holds a leaf of an actor that is no longer an effective
-/// Circle member (`circle.md` section 9.1) is `epoch_update_required`. A
-/// parent Realm leave, ban or rejoin never advances the Circle key-access
-/// revision; this same-cut leaf judgment is the other, independent gate.
-pub(crate) async fn circle_tree_holds_invalid_leaf(
-    conn: &mut AsyncPgConnection,
-    scope: &ScopeRef,
-    current: &MlsGroupCurrentRecord,
-) -> PersistenceResult<bool> {
-    if !matches!(scope, ScopeRef::Circle { .. }) {
-        return Ok(false);
-    }
-    let group_id = scope
-        .canonical_mls_group_id()
-        .map_err(|error| PersistenceError::Internal(error.to_string()))?;
-    let owners = arkret_mls::MlsPublicGroupTracker::restore(
-        &current.public_state,
-        group_id.as_str(),
-        current.value.epoch,
-    )
-    .and_then(|tracker| tracker.leaves())
-    .map_err(|error| {
-        PersistenceError::Internal(format!("stored public MLS state is unusable: {error}"))
-    })?
-    .into_iter()
-    .map(|leaf| leaf.actor_id)
-    .collect::<std::collections::BTreeSet<_>>();
-    circle_holds_invalid_owner(conn, scope, &owners).await
-}
-
-async fn circle_holds_invalid_owner(
-    conn: &mut AsyncPgConnection,
-    scope: &ScopeRef,
-    owners: &std::collections::BTreeSet<arkret_wire::ActorId>,
-) -> PersistenceResult<bool> {
-    let ScopeRef::Circle {
-        realm_id,
-        circle_id,
-    } = scope
-    else {
-        return Ok(false);
-    };
-    for owner in owners {
-        if !crate::circle_current_states::effective_member_in_connection(
-            conn, realm_id, circle_id, owner,
-        )
-        .await?
-        {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 /// encryption-and-audit.md §2.4.1: a membership change of the Realm scope
@@ -1666,7 +1589,7 @@ pub(crate) async fn advance_key_access_revision_in_connection(
         EventKind::MemberState
             | EventKind::InviteAccept
             | EventKind::RealmInviteLinkAccept
-            | EventKind::CircleMemberState
+
     ) {
         return Ok(());
     }

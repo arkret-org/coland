@@ -560,7 +560,7 @@ async fn joined_holder_terminal_real_fanout_signed_http_and_atomic_fence() {
         vec![coland_storage::RealmFanoutAuthorityWitness {
             member_id: ActorId::account(member.pcr.history.account.clone()),
             membership_event_ref: join.authority_commit.event.event_id.to_string(),
-            circle_membership_event_ref: None,
+
         }]
     );
     Box::pin(uow.commit_event(terminal.clone())).await.unwrap();

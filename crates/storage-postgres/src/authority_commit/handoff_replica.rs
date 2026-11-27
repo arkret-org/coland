@@ -70,8 +70,7 @@ pub(super) fn retain_outgoing_cut<'a>(
         for head in &snapshot.visible_stream_heads {
             let reader = match &head.stream_ref {
                 arkret_wire::CommitStreamRef::RealmControl { .. } => continue,
-                arkret_wire::CommitStreamRef::Realm { .. }
-                | arkret_wire::CommitStreamRef::Circle { .. } => {
+                arkret_wire::CommitStreamRef::Realm { .. } => {
                     super::replica::bootstrap_readers_in_connection(
                         conn,
                         &head.stream_ref,

@@ -724,7 +724,7 @@ async fn active_install_for_service_id(
     // had no matching row in the old scan, and must not become an internal error.
     if !matches!(
         scope,
-        arkret_wire::ScopeRef::Realm { .. } | arkret_wire::ScopeRef::Circle { .. }
+        arkret_wire::ScopeRef::Realm { .. }
     ) {
         return Ok(None);
     }
@@ -914,22 +914,15 @@ mod tests {
             arkret_wire::DidCoreId::new("ak:did_core:web:applet.example").unwrap(),1,
             arkret_wire::Hlc::new("01970e589d21-0001-a13f9c2e").unwrap(),
             serde_json::json!({"strand_id":"ak:strand:AQ9vwMrZNs64XfX4CVfhG2FPvja_JU2XLAIWCbvWK5kG","content":{"kind":"ak.content.text","body":"hello"}})).unwrap();
-        let mut circle = first.clone();
-        circle.scope_ref = arkret_wire::ScopeRef::Circle {
-            realm_id: realm.clone(),
-            circle_id: arkret_wire::CircleId::new(
-                "ak:circle:AXTOWXiR0H0NRFksL2Dt7uYvlaNckYIqkzsoMPPxW5MH",
-            )
-            .unwrap(),
-        };
+        let second = first.clone();
         assert_eq!(
-            signed_transaction_realm(&[first.clone(), circle.clone()]).unwrap(),
+            signed_transaction_realm(&[first.clone(), second.clone()]).unwrap(),
             realm
         );
         first.realm_id =
             arkret_wire::RealmId::new("ak:realm:AQpwDm7ZXVTjUWCnaqcmxxZ49Y8CpzFJ-vLzmvCjBXfw")
                 .unwrap();
-        assert!(signed_transaction_realm(&[first, circle]).is_err());
+        assert!(signed_transaction_realm(&[first, second]).is_err());
         assert!(signed_transaction_realm(&[]).is_err());
         let mut genesis=crate::test_event::raw_event(arkret_wire::EventKind::MessageCreate.as_str(),
             arkret_wire::ScopeRef::realm(realm.clone()),
@@ -946,14 +939,14 @@ mod tests {
     #[test]
     fn preview_requires_a_complete_scope_pointer() {
         let realm = "ak:realm:AXTOWXiR0H0NRFksL2Dt7uYvlaNckYIqkzsoMPPxW5MH";
-        let circle = serde_json::json!({"kind":"circle","realm_id":realm,"circle_id":"ak:circle:AXTOWXiR0H0NRFksL2Dt7uYvlaNckYIqkzsoMPPxW5MH"});
+        let scope = serde_json::json!({"kind":"realm","realm_id":realm});
         assert_eq!(
             serde_json::to_value(
-                signed_preview_scope(&serde_json::json!({"effective_scope":circle.clone()}))
+                signed_preview_scope(&serde_json::json!({"effective_scope":scope.clone()}))
                     .unwrap()
             )
             .unwrap(),
-            circle
+            scope
         );
         assert!(signed_preview_scope(&serde_json::json!({"effective_scope":realm})).is_err());
         assert!(signed_preview_scope(&serde_json::json!({})).is_err());

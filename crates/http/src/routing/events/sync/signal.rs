@@ -267,7 +267,6 @@ async fn verify_signal_scope_authority_with_product(
 
             scope: &envelope.scope_ref,
             authority_commit_id: &envelope.authority_commit_id,
-            parent_realm_authority_commit_id: envelope.parent_realm_authority_commit_id.as_ref(),
             sender: actor,
             signal_class: envelope.signal_class,
             sent_at: envelope.sent_at,

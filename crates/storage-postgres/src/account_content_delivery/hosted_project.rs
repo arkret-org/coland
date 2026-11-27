@@ -40,7 +40,7 @@ pub(crate) async fn prepare(
     let realm = &scan.realm_id;
     if !matches!(
         scan.stream_ref,
-        CommitStreamRef::Realm { .. } | CommitStreamRef::Circle { .. }
+        CommitStreamRef::Realm { .. }
     ) || !input.future_materials.is_empty()
     {
         return Err(denied());
@@ -264,7 +264,7 @@ impl HostedAgentHistoryRead for HostedRead {
             || snapshot.governance_generation != self.generation
             || snapshot.realm_id != scan.realm_id
             || snapshot
-                .parent_membership_revision(&ActorId::account(account.clone()))
+                .active_realm_member_revision(&ActorId::account(account.clone()))
                 .is_none_or(|r| r.commit_id != self.query.membership_commit_id)
         {
             return Err(denied());

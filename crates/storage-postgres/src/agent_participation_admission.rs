@@ -129,9 +129,7 @@ pub(crate) async fn require_current(
     }
 
     let mut scopes = vec![format!("realm:{}", event.realm_id)];
-    if let arkret_wire::ScopeRef::Circle { circle_id, .. } = &event.scope_ref {
-        scopes.push(format!("circle:{}:{circle_id}", event.realm_id));
-    }
+
     let message_id = match event.kind {
         EventKind::ReactionAdd | EventKind::ReactionRemove => {
             let payload: arkret_models_collaboration::events_payloads::reaction::ReactionPayload =
@@ -203,12 +201,9 @@ pub(crate) async fn require_current(
         let row = sql_query("SELECT s.value FROM strand_current_states s JOIN realm_commits c ON c.commit_id=s.current_commit_id AND c.realm_id=s.realm_id AND c.stream_position=s.current_stream_position WHERE s.realm_id=$1 AND s.strand_id=$2 FOR SHARE OF s")
             .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(strand)
             .get_result::<ValueRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?.ok_or_else(unresolved)?;
-        if let Some(circle) = row.value.get("scope_circle_id").and_then(Value::as_str) {
-            let key = format!("circle:{}:{circle}", event.realm_id);
-            if !scopes.contains(&key) {
-                scopes.push(key);
-            }
-        }
+        let object: arkret_models_collaboration::objects::strand::Strand =
+            serde_json::from_value(row.value).map_err(PersistenceError::database)?;
+        if object.realm_id != event.realm_id || object.id.as_ref().map(|id| id.as_str()) != Some(strand) { return Err(unresolved()); }
         scopes.push(format!("strand:{}:{strand}", event.realm_id));
     }
     let mut effective = if foreign_message {
@@ -264,9 +259,6 @@ pub(crate) async fn require_native_reply_current(
     let mut scopes = vec![format!("realm:{realm}")];
     match scope {
         arkret_wire::ScopeRef::Realm { .. } => {}
-        arkret_wire::ScopeRef::Circle { circle_id, .. } => {
-            scopes.push(format!("circle:{realm}:{circle_id}"))
-        }
         _ => return Err(unresolved()),
     }
     scopes.push(format!("strand:{realm}:{strand}"));
@@ -340,8 +332,6 @@ async fn governance_component_at_cut(
 ) -> PersistenceResult<Option<ParticipationBits>> {
     let query = if scope.starts_with("realm:") {
         "SELECT s.value FROM realm_policy_bundle_current_states s JOIN realm_commits c ON c.commit_id=s.current_commit_id AND c.realm_id=s.realm_id AND c.stream_position=s.current_stream_position WHERE s.realm_id=$1 AND 'realm:'||s.realm_id=$2"
-    } else if scope.starts_with("circle:") {
-        "SELECT s.value FROM circle_current_states s JOIN realm_commits c ON c.commit_id=s.current_commit_id AND c.realm_id=s.realm_id AND c.stream_position=s.current_stream_position WHERE s.realm_id=$1 AND 'circle:'||s.realm_id||':'||s.circle_id=$2"
     } else if scope.starts_with("strand:") {
         "SELECT s.value FROM strand_current_states s JOIN realm_commits c ON c.commit_id=s.current_commit_id AND c.realm_id=s.realm_id AND c.stream_position=s.current_stream_position WHERE s.realm_id=$1 AND 'strand:'||s.realm_id||':'||s.strand_id=$2"
     } else {
@@ -414,7 +404,6 @@ pub(crate) fn component(value: &Value) -> PersistenceResult<Option<Participation
 pub(crate) async fn require_child_tightens(
     conn: &mut AsyncPgConnection,
     realm: &str,
-    circle: Option<&str>,
     value: &Value,
 ) -> PersistenceResult<()> {
     let Some(child) = component(value)? else {
@@ -422,12 +411,6 @@ pub(crate) async fn require_child_tightens(
     };
     let mut parent = ParticipationBits::ALL;
     if let Some(bits) = governance_component(conn, realm, &format!("realm:{realm}")).await? {
-        parent = parent.intersect(bits);
-    }
-    if let Some(circle) = circle
-        && let Some(bits) =
-            governance_component(conn, realm, &format!("circle:{realm}:{circle}")).await?
-    {
         parent = parent.intersect(bits);
     }
     arkret_models_collaboration::governance::agent_participation::validate_agent_participation_tightens(parent, child)

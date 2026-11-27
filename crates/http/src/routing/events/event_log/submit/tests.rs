@@ -52,50 +52,6 @@ mod event_collision_reason_tests {
     }
 }
 
-mod circle_error_mapping_tests {
-    use super::*;
-
-    #[test]
-    fn non_realm_member_is_failed_precondition_with_registered_subreason() {
-        let error = submit_one_error_to_app_error(
-            "circle member admission",
-            StatusCode::UNPROCESSABLE_ENTITY,
-            arkret_wire::ReasonCode::CIRCLE_MEMBER_MUST_BE_REALM_MEMBER.to_owned(),
-            "target actor is not a Realm member",
-        );
-
-        assert_eq!(error.code, ErrorCode::FailedPrecondition);
-        assert_eq!(
-            error.http_status(),
-            coland_http::error::error_http_status(error.code)
-        );
-        assert_eq!(
-            error.reason_code.as_deref(),
-            Some(arkret_wire::ReasonCode::CIRCLE_MEMBER_MUST_BE_REALM_MEMBER)
-        );
-    }
-
-    #[test]
-    fn missing_circle_manage_capability_stays_capability_denied() {
-        let error = submit_one_error_to_app_error(
-            "circle member admission",
-            StatusCode::FORBIDDEN,
-            "circle_member_manage_capability_required".to_owned(),
-            "caller lacks Circle member management authority",
-        );
-
-        assert_eq!(error.code, ErrorCode::CapabilityDenied);
-        assert_eq!(error.http_status(), StatusCode::FORBIDDEN);
-        // Not a registered reason code: the internal discriminator rides the
-        // unstable `reason_detail` channel instead of `reason_code`.
-        assert_eq!(error.reason_code, None);
-        assert_eq!(
-            error.reason_detail.as_deref(),
-            Some("circle_member_manage_capability_required")
-        );
-    }
-}
-
 mod relation_error_mapping_tests {
     use super::*;
 
@@ -261,7 +217,7 @@ mod applet_formal_admission_tests {
         for (field, wrong_value) in [
             ("realm_id", "ak:realm:Awrong"),
             ("actor_id", "ak:did_core:web:other.example"),
-            ("kind", arkret_wire::EventKind::CircleCreate.as_str()),
+            ("kind", arkret_wire::EventKind::SpaceCreate.as_str()),
         ] {
             let original = object
                 .insert(field.to_owned(), Value::String(wrong_value.to_owned()))
@@ -368,23 +324,13 @@ mod received_at_stamp_tests {
             .with_timezone(&Utc);
         let mut device_authorize = operation_for_kind("ak.device.authorize", 1);
         let mut member_state = operation_for_kind(arkret_wire::EventKind::MemberState, 2);
-        let mut circle_member_state =
-            operation_for_kind(arkret_wire::EventKind::CircleMemberState, 3);
 
         stamp_projection_operation_received_at(&mut device_authorize, received_at);
         stamp_projection_operation_received_at(&mut member_state, received_at);
-        stamp_projection_operation_received_at(&mut circle_member_state, received_at);
 
         assert!(device_authorize.payload.get("event_received_at").is_none());
         assert_eq!(
             member_state
-                .payload
-                .get("event_received_at")
-                .and_then(Value::as_str),
-            Some("2026-07-07T05:20:58.398Z")
-        );
-        assert_eq!(
-            circle_member_state
                 .payload
                 .get("event_received_at")
                 .and_then(Value::as_str),

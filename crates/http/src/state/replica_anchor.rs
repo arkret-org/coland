@@ -226,43 +226,10 @@ async fn converge(state: &AppState, stream: &CommitStreamRef) -> Result<(), Stri
     // An installed anchor is verified durable prefix evidence. Requiring a
     // new join bootstrap for every gap would prevent consuming the terminal
     // membership Commit after that member's current join has ended.
-    let mut anchored = match &anchor.anchored_head {
+    let anchored = match &anchor.anchored_head {
         Some(head) => head.clone(),
         None => anchor_stream(state, &anchor, &governance, &mut located).await?,
     };
-    // An old anchor proves a prefix, not permission to import an ordinary
-    // Full tail with unproved current. Try the existing qualified bootstrap
-    // once before fill; a departed reader may still consume only its exact
-    // terminal fact through the storage interval gate below.
-    let mut pre_refresh_failure = None;
-    let pre_refresh = matches!(stream, CommitStreamRef::Circle { .. })
-        && commits
-            .replica_authorization_head(stream)
-            .await
-            .map_err(temporary)?
-            .is_none();
-    if pre_refresh {
-        for (member_account_id, join_commit) in commits
-            .replica_bootstrap_readers(stream, &state.service_core_id())
-            .await
-            .map_err(temporary)?
-        {
-            let reader = ReplicaStreamAnchor {
-                realm_id: realm_id.clone(),
-                member_account_id,
-                join_commit,
-                anchored_head: anchor.anchored_head.clone(),
-            };
-            match anchor_stream(state, &reader, &governance, &mut located).await {
-                Ok(refreshed) => {
-                    anchored = refreshed;
-                    pre_refresh_failure = None;
-                    break;
-                }
-                Err(error) => pre_refresh_failure = Some(error),
-            }
-        }
-    }
     fill_to_head(state, realm_id, &governance, &anchored, &mut located, None).await?;
     // Grant and policy replicas invalidate the previous authorization cut.
     // Holding their Commit chain cannot reconstruct the governing inputs
@@ -276,22 +243,6 @@ async fn converge(state: &AppState, stream: &CommitStreamRef) -> Result<(), Stri
         .map_err(temporary)?
         .is_none()
     {
-        if pre_refresh {
-            // A verified terminal tail can end the exact old reader without
-            // creating fresh current authority. No second network round is
-            // needed when no accepted current reader remains after fill.
-            if commits
-                .replica_stream_has_hosted_member(stream, &state.service_core_id())
-                .await
-                .map_err(temporary)?
-                == Some(false)
-            {
-                return Ok(());
-            }
-            return Err(pre_refresh_failure.unwrap_or_else(|| {
-                "Circle current remains unproved after bounded refresh".to_owned()
-            }));
-        }
         let readers = commits
             .replica_bootstrap_readers(stream, &state.service_core_id())
             .await
@@ -1752,7 +1703,6 @@ async fn fill_to_head(
                     item,
                     ScannedItemEvidence {
                         producer_signer_fact: fact,
-                        exact_self_result_account: None,
                     },
                 )
                 .await?;
@@ -2019,21 +1969,6 @@ pub(crate) async fn ensure_forwarded_target(
                 }
             }
             require_forward_source(state, session, event, located).await?;
-            let own_circle_leave = if is_target
-                && expected == Some(commit)
-                && event.kind == arkret_wire::EventKind::CircleMemberState
-            {
-                let payload: arkret_models_collaboration::events_payloads::CircleMemberStatePayload =
-                    serde_json::from_value(serde_json::to_value(&event.payload).map_err(temporary)?)
-                        .map_err(temporary)?;
-                session.session_grant.as_ref().filter(|_| {
-                    payload.membership == arkret_models_collaboration::governance::circle::CircleMembership::Leave
-                        && payload.member_id == event.actor_id
-                }).map(|grant| &grant.account_id)
-                    .filter(|account| event.actor_id.as_account_id() == Some(*account))
-            } else {
-                None
-            };
             store_scanned(
                 state,
                 &event.realm_id,
@@ -2043,7 +1978,6 @@ pub(crate) async fn ensure_forwarded_target(
                 item,
                 ScannedItemEvidence {
                     producer_signer_fact: fact,
-                    exact_self_result_account: own_circle_leave,
                 },
             )
             .await?;
@@ -2084,7 +2018,7 @@ async fn open_forwarded_join(
 ) -> Result<ReplicaStreamAnchor, String> {
     let commit = expected.ok_or("forward recovery has no authorized replica anchor")?;
     // The same hosted opening-join classifier used by committed replication
-    // includes Circle joins. Their parent Realm revision is rechecked by the
+    // is reused here. The accepted Realm join is checked by the
     // transactional OpeningJoin installer before it can create an anchor.
     let member = super::committed_replication::hosted_member_join(state, event, commit)
         .ok_or("forward recovery is not a hosted opening join")?;
@@ -2554,7 +2488,6 @@ async fn store_scanned_pair(
                 item,
                 ScannedItemEvidence {
                     producer_signer_fact: scan_fact(page, item.commit()),
-                    exact_self_result_account: None,
                 },
             )
             .await?;
@@ -2567,7 +2500,6 @@ async fn store_scanned_pair(
 struct ScannedItemEvidence<'a> {
     producer_signer_fact:
         Option<&'a arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact>,
-    exact_self_result_account: Option<&'a arkret_wire::AccountId>,
 }
 
 /// Authenticate the complete physical page before retaining its first row.
@@ -2701,12 +2633,7 @@ async fn store_scanned(
                     commit: commit.clone(),
                     producer_signer_fact: fact.cloned(),
                     genesis_event_ref: None,
-                    role: evidence.exact_self_result_account.map_or(
-                        CommittedReplicaRole::HeldStream,
-                        |account| CommittedReplicaRole::AcceptedOwnCircleLeave {
-                            member_account_id: account.clone(),
-                        },
-                    ),
+                    role: CommittedReplicaRole::HeldStream,
                     received_at: crate::wire::now(),
                     // A scanned item carries no Welcome; its item's
                     // committed replication queues them.

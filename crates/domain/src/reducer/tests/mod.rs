@@ -3,8 +3,6 @@ use super::*;
 mod agent_lifecycle;
 mod call_state;
 mod cells_realm;
-mod circle_encryption;
-mod circle_history;
 mod moderation;
 mod pending_replay;
 mod pin_rsvp_encryption;

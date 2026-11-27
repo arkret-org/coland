@@ -94,9 +94,9 @@ async fn snapshot_same_revision_conflicts_preserve_the_whole_installed_cut() {
             ..
         } = &mut candidates[1];
         if source_conflict {
-            *source_stream_ref = CommitStreamRef::Circle {
+            *source_stream_ref = CommitStreamRef::Sidecar {
                 realm_id: realm.clone(),
-                circle_id: arkret_wire::CircleId::from_event_id(
+                sidecar_id: arkret_wire::SidecarId::from_event_id(
                     &arkret_wire::EventId::from_digest(
                         arkret_canonical::DigestSuite::Sha256,
                         [33; 32],

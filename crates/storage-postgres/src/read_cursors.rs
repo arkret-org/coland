@@ -181,27 +181,6 @@ async fn prove_position(
             crate::account_stream_scan::caller_realm_floor_in_connection(conn, realm_id, &caller)
                 .await?
         }
-        CommitStreamRef::Circle {
-            realm_id,
-            circle_id,
-        } => {
-            // Pin the exact accepted Circle current and join while evaluating
-            // the same parent-bound interval used by ordinary stream reads.
-            sql_query(
-                "SELECT 1 FROM circle_current_states WHERE realm_id=$1 AND circle_id=$2 FOR SHARE",
-            )
-            .bind::<Text, _>(realm_id.as_str())
-            .bind::<Text, _>(circle_id.as_str())
-            .execute(&mut *conn)
-            .await?;
-            sql_query("SELECT 1 FROM circle_member_state_current_states WHERE realm_id=$1 AND circle_id=$2 AND member_id=$3 FOR SHARE")
-                .bind::<Text, _>(realm_id.as_str()).bind::<Text, _>(circle_id.as_str())
-                .bind::<Text, _>(&owner).execute(&mut *conn).await?;
-            crate::account_stream_scan::caller_circle_floor_in_connection(
-                conn, realm_id, circle_id, &caller,
-            )
-            .await?
-        }
         _ => {
             return Ok(Err(ReadCursorAdvanceRefusal::Unproved(
                 "the position stream visibility is not proved at this cut",

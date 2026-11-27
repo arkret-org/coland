@@ -55,9 +55,9 @@ async fn realm_runtime_cold_recovery_and_native_messages_use_real_https() {
 }
 
 #[tokio::test]
-async fn realm_runtime_circle_scope_never_becomes_an_account_or_foreign_realm() {
+async fn realm_runtime_restricted_device_cannot_borrow_sibling_read_rights() {
     let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
-    Box::pin(applet_authoring::realm_bridge_circle_runtime(
+    Box::pin(applet_authoring::realm_bridge_restricted_reader_runtime(
         database.pool(),
     ))
     .await;
@@ -77,11 +77,7 @@ async fn widget_native_inventory_preserves_consent_scope_and_all_three_revoke_mo
     Box::pin(applet_authoring::widget_inventory_native_install_and_revoke()).await;
 }
 
-#[tokio::test]
-async fn same_realm_device_cross_circle_pages_ack_only_the_disclosed_prefix() {
-    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
-    Box::pin(applet_authoring::realm_bridge_cross_circle_queue_boundaries(database.pool())).await;
-}
+
 
 #[tokio::test]
 async fn realm_device_welcome_checkpoint_lost_consume_and_cold_ack_preserve_originals() {

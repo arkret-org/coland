@@ -209,10 +209,6 @@ pub(super) fn exact_installation_scope(
             arkret_wire::ResourceSelectorKind::Realm => {
                 arkret_wire::ScopeRef::realm(resource.realm_id.clone()?)
             }
-            arkret_wire::ResourceSelectorKind::Circle => arkret_wire::ScopeRef::Circle {
-                realm_id: resource.realm_id.clone()?,
-                circle_id: resource.circle_id.clone()?,
-            },
             _ => return None,
         };
         if scope.realm_id() != realm

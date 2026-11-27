@@ -397,7 +397,7 @@ async fn postgres_notification_relay_delivers_large_payload_by_committed_referen
 #[tokio::test]
 async fn postgres_structured_projection_identities_round_trip() {
     use arkret_wire::{AccountId, ActorId, DidCoreId};
-    use coland_storage::{CircleProjectionStore, MorphProjectionStore};
+    use coland_storage::MorphProjectionStore;
     let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
     let pool = database.pool();
     let _db_guard = DB_GUARD.lock().await;
@@ -452,7 +452,7 @@ async fn postgres_structured_projection_identities_round_trip() {
         PgMorphProjectionStore,
         coland_storage::MorphProjectionRecord {
             morph_id: "ak:morph:AeJsr0sf3TZ_Cuzj2uLddhd-O-Cywvdj8ypnqpVG8zim".into(),
-            scope_circle_id: None,
+
             morph_kind: "document".into(),
             title: None,
             fields: serde_json::json!({}),
@@ -472,29 +472,6 @@ async fn postgres_structured_projection_identities_round_trip() {
             updated_at: Some(now),
         },
         morph_id
-    );
-    round_trip!(
-        PgCircleProjectionStore,
-        coland_storage::CircleProjectionRecord {
-            circle_id: "ak:circle:AeJsr0sf3TZ_Cuzj2uLddhd-O-Cywvdj8ypnqpVG8zim".into(),
-            profile_ref: None,
-            title: "identity persistence".into(),
-            summary: None,
-            display: serde_json::json!({}),
-            directory_visibility: "members".into(),
-            join_rule: "invite".into(),
-            history_access: "since_join".into(),
-            encryption_profile: "none".into(),
-            mls_group_ref: None,
-            realm_id: realm_id.into(),
-            state: "active".into(),
-            state_changed_at: None,
-            created_by: author.clone(),
-            created_at: now,
-            updated_by: None,
-            updated_at: Some(now),
-        },
-        circle_id
     );
 }
 
@@ -2811,7 +2788,7 @@ async fn postgres_applet_parent_sources_keep_exact_installation_instances() {
         wrong_scope.effective_scope=keeper.effective_scope.clone();
         assert!(ordinary_realm::case_future(||store.authority_material(
             &applet,&first_body.service_id,&target,&wrong_scope,
-        )).await.is_err(),"same Realm/Service does not bind an unrelated Circle resource");
+        )).await.is_err(),"an installation in another Realm cannot authorize this Service");
 
         // NULL generic and Some(I) parents of the same original registration
         // remain a valid historical material group. NULL supplies no finite I

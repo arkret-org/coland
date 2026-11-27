@@ -948,11 +948,6 @@ async fn boundary_publish_first_root(
     let head = client
         .native_key_backup_head(&arkret_models_crypto::RealmActorBackupHeadQuery::new(
             candidate.actor_id.as_realm_actor_id().unwrap().clone(),
-            match scope {
-                ScopeRef::Circle { circle_id, .. } => Some(circle_id.clone()),
-                ScopeRef::Realm { .. } => None,
-                _ => panic!("this native publication needs its exact Realm or Circle scope"),
-            },
         ))
         .await
         .unwrap();

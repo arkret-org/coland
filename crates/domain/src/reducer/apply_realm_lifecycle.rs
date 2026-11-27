@@ -503,9 +503,6 @@ impl ProjectionState {
                     .map(ToOwned::to_owned),
             },
         );
-        if matches!(new_state.as_str(), "leave" | "ban") {
-            self.invalidate_realm_member_circle_visibility(&realm_id, &member);
-        }
 
         // The facet subject is the complete tagged actor key (including its
         // Station binding); the Realm is the facet map's other key half.
@@ -531,17 +528,6 @@ impl ProjectionState {
         }
     }
 
-    fn invalidate_realm_member_circle_visibility(&mut self, realm_id: &str, member: &str) {
-        // Only the derived active set changes. Canonical Circle membership,
-        // join provenance and Circle metadata remain authored by Circle Events.
-        for circle in self
-            .circles
-            .values_mut()
-            .filter(|circle| circle.realm_id == realm_id)
-        {
-            circle.members.remove(member);
-        }
-    }
 
     /// COT-06-004 — apply `ak.realm.set_default_strand`. Points the Realm's
     /// `default_strand_id` at `payload.strand_id`. The named Strand MUST already be
@@ -1053,17 +1039,6 @@ impl ProjectionState {
     /// Spec `realm-and-space.md` §2.5.1:
     ///   ¶6 child Space-container placement (same Realm) → mark
     ///      `realm_destroyed_orphan` (locked read-only projection).
-    /// AKP-0007: `Strand.discussion_realm_ref` is a removed wire field.
-    /// Intra-Realm discussion boundaries now live on a Circle
-    /// (`scope_circle_id`) and never cross the Realm frontier, so no
-    /// cross-Realm discussion cascade is required here.
-    ///
-    /// The terminal-state admission check (event_log.rs) prevents
-    /// further writes against the destroyed Realm itself, which is the
-    /// load-bearing safety property; this cascade applies the
-    /// projection-side downgrade so UI / navigation surfaces honour
-    /// the destroy frontier without a fresh query against the
-    /// terminated Realm.
     pub(crate) fn cascade_realm_terminal(&mut self, terminal_realm_id: &str) {
         // ¶6 same-Realm child Space-container cascade.
         let mut orphaned_count = 0_usize;
@@ -1074,10 +1049,7 @@ impl ProjectionState {
             }
         }
 
-        // AKP-0007: no cross-Realm discussion edges to sever — Circles
-        // are intra-Realm and `ak.realm.destroy` already tombstones their
-        // parent Realm; further Circle writes fall under the terminal
-        // admission check in `event_log::validate_event_envelope`.
+
 
         tracing::info!(
             terminal_realm_id = %terminal_realm_id,

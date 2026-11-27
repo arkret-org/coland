@@ -49,7 +49,7 @@ fn validate_key_backup_active_series_structure(operation: &Operation) -> Result<
 /// `ak:message:`. The reducer may key the OR-Set on a storage Event id, but
 /// the signed `target_ref` itself must be the canonical Message object ref;
 /// every other typed object kind
-/// (`ak:strand:`, `ak:morph:`, `ak:circle:`, …) is rejected fail-closed with
+/// (`ak:strand:`, `ak:morph:`, …) is rejected fail-closed with
 /// active `schema_violation`. The narrower reason is reserved in v1.
 /// Profiles MAY register additional target kinds; v1 core does not.
 pub(crate) fn validate_reaction_target_kind(
@@ -231,8 +231,7 @@ fn operation_extra_validator_for_kind(kind: &arkret_wire::EventKind) -> Option<O
         arkret_wire::EventKind::InviteCancel | arkret_wire::EventKind::InviteRevoke => {
             Some(validate_invite_ref_payload)
         }
-        arkret_wire::EventKind::RealmHistoryAccess
-        | arkret_wire::EventKind::CircleHistoryAccess => Some(validate_history_access_payload),
+        arkret_wire::EventKind::RealmHistoryAccess => Some(validate_history_access_payload),
         arkret_wire::EventKind::ScopeReadReceiptPolicy => {
             Some(validate_read_receipt_policy_payload)
         }

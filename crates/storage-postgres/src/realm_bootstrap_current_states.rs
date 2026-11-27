@@ -1144,7 +1144,7 @@ mod tests {
             );
             uow.commit_event(request.clone()).await.unwrap();
             let mut conn = pool.get().await.unwrap();
-            let current = diesel::sql_query("SELECT current_commit_id,value FROM scope_read_receipt_policy_current_states WHERE realm_id=$1 AND scope_ref->>'kind'='realm'")
+            let current = diesel::sql_query("SELECT current_commit_id,value FROM scope_read_receipt_policy_current_states WHERE realm_id=$1")
                 .bind::<Text, _>(request.authority_commit.event.realm_id.as_str()).get_result::<Row>(&mut *conn).await.unwrap();
             assert_eq!(
                 current.current_commit_id,
@@ -1166,7 +1166,7 @@ mod tests {
         );
         assert!(uow.commit_event(denied.clone()).await.is_err());
         let mut conn = pool.get().await.unwrap();
-        let current = diesel::sql_query("SELECT current_commit_id,value FROM scope_read_receipt_policy_current_states WHERE realm_id=$1 AND scope_ref->>'kind'='realm'")
+        let current = diesel::sql_query("SELECT current_commit_id,value FROM scope_read_receipt_policy_current_states WHERE realm_id=$1")
             .bind::<Text, _>(previous.event.realm_id.as_str()).get_result::<Row>(&mut *conn).await.unwrap();
         assert_eq!(
             current.current_commit_id,

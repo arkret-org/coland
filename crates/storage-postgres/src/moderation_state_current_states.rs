@@ -6,9 +6,8 @@
 //! carries the complete payload, and neither writer removes an element. The
 //! active-decision fold and the queue item status are read-side derivations.
 //!
-//! A decision uses the signed Realm or Circle source stream. Its issuer holds
-//! the exact scope's moderation action at the accepting cut; a Realm root
-//! identity alone does not authorize a Circle decision.
+//! A decision uses the signed Realm source stream. Its issuer holds
+//! the exact scope's moderation action at the accepting cut.
 
 use coland_storage::{PersistenceError, PersistenceResult};
 use diesel::sql_types::{BigInt, Jsonb, Text, Timestamptz};

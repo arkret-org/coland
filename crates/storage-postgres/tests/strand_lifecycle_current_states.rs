@@ -658,9 +658,9 @@ async fn case_transition_actor_realm_and_scope_refusals_leave_no_durable_footpri
     .await;
     let event = ordinary_realm::event(
         EventKind::StrandStageSet,
-        arkret_wire::ScopeRef::Circle {
+        arkret_wire::ScopeRef::Sidecar {
             realm_id: discussion.realm_id(),
-            circle_id: arkret_wire::CircleId::from_event_id(&previous.event.event_id),
+            sidecar_id: arkret_wire::SidecarId::from_event_id(&previous.event.event_id),
         },
         previous.event.actor_id.signing_principal_id(),
         &ordinary_realm::station(),

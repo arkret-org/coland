@@ -77,15 +77,10 @@ pub(crate) async fn commit_with_audit_in_connection(
     if strand.value.get("state").and_then(Value::as_str) != Some("active") {
         return Err(refusal("watch target is not an active Strand"));
     }
-    let scope = match strand.value.get("scope_circle_id").and_then(Value::as_str) {
-        Some(circle) => ScopeRef::Circle {
-            realm_id: event.realm_id.clone(),
-            circle_id: circle.parse().map_err(PersistenceError::database)?,
-        },
-        None => ScopeRef::Realm {
-            realm_id: event.realm_id.clone(),
-        },
-    };
+    let strand_current: arkret_models_collaboration::objects::strand::Strand =
+        serde_json::from_value(strand.value.clone()).map_err(PersistenceError::database)?;
+    let scope = ScopeRef::Realm { realm_id: strand_current.realm_id };
+
     if event.scope_ref != scope
         || commit.stream_ref
             != CommitStreamRef::from_scope(&scope, None).map_err(PersistenceError::database)?
@@ -94,10 +89,7 @@ pub(crate) async fn commit_with_audit_in_connection(
             "watch source differs from the Strand effective namespace",
         ));
     }
-    if matches!(scope, ScopeRef::Circle { .. }) {
-        crate::circle_current_states::require_active_author_in_connection(conn, event, commit)
-            .await?;
-    }
+
     require_current_basis_in_connection(
         conn,
         &event.realm_id,

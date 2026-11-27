@@ -56,7 +56,7 @@ async fn object_scope(
         return Err(absent());
     };
     let query = format!(
-        "SELECT s.value,c.stream_ref,s.current_stream_position FROM {table} s JOIN realm_commits c ON c.realm_id=s.realm_id AND c.commit_id=s.current_commit_id WHERE s.realm_id=$1 AND s.{key}=$2 FOR SHARE OF s"
+        "SELECT s.value,c.stream_ref,s.current_stream_position FROM {table} s JOIN realm_commits c ON c.realm_id=s.realm_id AND c.commit_id=s.current_commit_id AND c.stream_position=s.current_stream_position WHERE s.realm_id=$1 AND s.{key}=$2 FOR SHARE OF s"
     );
     let row = diesel::sql_query(query)
         .bind::<Text, _>(realm.as_str())
@@ -68,28 +68,11 @@ async fn object_scope(
         .ok_or_else(absent)?;
     let stream: CommitStreamRef =
         serde_json::from_value(row.stream_ref).map_err(PersistenceError::database)?;
-    let circle = row
-        .value
-        .get("scope_circle_id")
-        .filter(|value| !value.is_null())
-        .map(|value| serde_json::from_value(value.clone()))
-        .transpose()
-        .map_err(PersistenceError::database)?;
+    if row.value.get("scope_circle_id").is_some_and(|field| !field.is_null()) {
+        return Err(absent());
+    }
     match stream {
-        CommitStreamRef::Realm { realm_id } if realm_id == *realm => Ok(match circle {
-            Some(circle_id) => ScopeRef::Circle {
-                realm_id,
-                circle_id,
-            },
-            None => ScopeRef::Realm { realm_id },
-        }),
-        CommitStreamRef::Circle {
-            realm_id,
-            circle_id,
-        } if realm_id == *realm => Ok(ScopeRef::Circle {
-            realm_id,
-            circle_id,
-        }),
+        CommitStreamRef::Realm { realm_id } if realm_id == *realm => Ok(ScopeRef::realm(realm_id)),
         _ => Err(absent()),
     }
 }
@@ -103,18 +86,6 @@ pub(crate) async fn pin_scope_in_connection(
         PinScope::Realm { id } if id == realm => Ok(ScopeRef::Realm {
             realm_id: realm.clone(),
         }),
-        PinScope::Circle { id } => {
-            let row = diesel::sql_query("SELECT s.value,c.stream_ref,s.current_stream_position FROM circle_current_states s JOIN realm_commits c ON c.commit_id=s.current_commit_id AND c.realm_id=s.realm_id WHERE s.realm_id=$1 AND s.circle_id=$2 AND s.value->>'state'='active' FOR SHARE OF s")
-                .bind::<Text,_>(realm.as_str()).bind::<Text,_>(id.as_str())
-                .get_result::<CurrentRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
-            if row.is_none() {
-                return Err(absent());
-            }
-            Ok(ScopeRef::Circle {
-                realm_id: realm.clone(),
-                circle_id: id.clone(),
-            })
-        }
         PinScope::Strand { id } => object_scope(conn, realm, id.as_str()).await,
         PinScope::Space { id } => object_scope(conn, realm, id.as_str()).await,
         _ => Err(absent()),
@@ -157,10 +128,7 @@ pub(crate) async fn commit_pin_in_connection(
             conn, event, commit, prepared,
         )
         .await?;
-        if matches!(effective, ScopeRef::Circle { .. }) {
-            crate::circle_current_states::require_active_author_in_connection(conn, event, commit)
-                .await?;
-        }
+
         let target = object_scope(conn, &event.realm_id, payload.target_ref()).await?;
         if target != effective && !matches!(target, ScopeRef::Realm { .. }) {
             return Err(absent());

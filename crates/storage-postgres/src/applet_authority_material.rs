@@ -200,7 +200,7 @@ pub(crate) async fn read(
             .as_ref()
             .ok_or_else(unavailable)?;
         // The acceptance transaction freezes each parent's exact registration,
-        // including parents issued after installation and Circle-scoped grants.
+        // including parents issued after installation.
         let rows = sql_query("SELECT r.envelope,rc.commit_json,s.install_id FROM applet_grant_registration_sources s JOIN canonical_events r ON r.envelope->>'event_id'=s.registration_event_ref JOIN realm_commits rc ON rc.event_pk=r.pk WHERE s.realm_id=$1 AND s.grant_id=$2 AND s.applet_id=$3 AND s.service_id=$4 AND r.state='committed' AND r.kind='ak.applet.registration' AND r.envelope#>>'{payload,registration_epoch}'=$5")
             .bind::<Text,_>(realm.as_str()).bind::<Text,_>(id.as_str())
             .bind::<Text,_>(applet.as_str()).bind::<Text,_>(service.as_str()).bind::<Text,_>(epoch.as_str())
@@ -362,63 +362,7 @@ pub(crate) async fn read(
         source_installation.as_deref(),
     )
     .await?;
-    if matches!(
-        request.effective_scope,
-        arkret_wire::ScopeRef::Circle { .. }
-    ) && matches!(
-        current_binding,
-        AppletInstallationCurrentBinding::Active { .. }
-    ) {
-        use arkret_models_collaboration::exact_current_state::{
-            AppletRegistrationExactCurrentSelector, AppletRegistrationExactCurrentSelectorKind,
-            CurrentAppletRegistration,
-        };
-        #[derive(QueryableByName)]
-        struct RegistrationCurrent {
-            #[diesel(sql_type=Text)]
-            current_commit_id: String,
-            #[diesel(sql_type=BigInt)]
-            current_stream_position: i64,
-            #[diesel(sql_type=Jsonb)]
-            value: Value,
-        }
-        let current = sql_query("SELECT current_commit_id,current_stream_position,value FROM applet_registration_current_states WHERE realm_id=$1 AND applet_id=$2 AND service_id=$3")
-            .bind::<Text,_>(realm.as_str()).bind::<Text,_>(applet.as_str()).bind::<Text,_>(service.as_str())
-            .get_result::<RegistrationCurrent>(&mut *conn).await.map_err(PersistenceError::database)?;
-        let stream = CommitStreamRef::Realm {
-            realm_id: realm.clone(),
-        };
-        let head = sql_query("SELECT commit_json AS value FROM realm_commits WHERE stream_key=$1 ORDER BY stream_position DESC LIMIT 1")
-            .bind::<Text,_>(crate::authority_commit::stream_key(&stream)?)
-            .get_result::<JsonRow>(&mut *conn).await.map_err(PersistenceError::database)?;
-        let head: arkret_wire::RealmCommit = decode(head.value)?;
-        current_states.push(ExactCurrentStateReadResponseBody::Present {
-            realm_id: realm.clone(),
-            governance_generation: generation,
-            effective_stream_head: CommitStreamHead {
-                stream_ref: stream.clone(),
-                commit_id: head.commit_id,
-                stream_position: head.stream_position,
-            },
-            current_state: ExactCurrentState::AppletRegistration(CurrentAppletRegistration {
-                selector: AppletRegistrationExactCurrentSelector {
-                    kind: AppletRegistrationExactCurrentSelectorKind::AppletRegistration,
-                    applet_id: applet.clone(),
-                    service_id: service.clone(),
-                },
-                source_stream_ref: stream,
-                revision: arkret_wire::CurrentRevision {
-                    commit_id: current
-                        .current_commit_id
-                        .parse()
-                        .map_err(PersistenceError::database)?,
-                    stream_position: u64::try_from(current.current_stream_position)
-                        .map_err(PersistenceError::database)?,
-                },
-                value: current.value,
-            }),
-        });
-    }
+
     let outcome = AppletAuthorityMaterialResponseBody {
         applet_id: applet.clone(),
         service_id: service.clone(),

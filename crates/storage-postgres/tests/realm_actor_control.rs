@@ -18,9 +18,9 @@ async fn native_root_first_put_fixed_retry_and_recovery_source_advance_use_real_
     .await;
 }
 #[tokio::test]
-async fn native_backup_head_and_exact_unlock_read_archived_realm_and_circle() {
+async fn native_backup_head_and_exact_unlock_read_archived_realm_and_realm() {
     let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
-    Box::pin(applet_authoring::realm_native_backup_archived_circle(
+    Box::pin(applet_authoring::realm_native_backup_archived_realm(
         database.pool(),
     ))
     .await;
@@ -69,13 +69,13 @@ async fn bridge_runtime_authors_realm_identity_and_device_over_real_https() {
 }
 
 #[tokio::test]
-async fn bridge_runtime_circle_only_device_preserves_blob_scope_over_real_https() {
+async fn bridge_runtime_realm_only_device_preserves_blob_scope_over_real_https() {
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::WARN)
         .with_test_writer()
         .try_init();
     let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
-    Box::pin(applet_authoring::realm_bridge_circle_runtime(
+    Box::pin(applet_authoring::realm_bridge_restricted_reader_runtime(
         database.pool(),
     ))
     .await;

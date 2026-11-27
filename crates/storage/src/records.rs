@@ -722,7 +722,7 @@ impl std::fmt::Display for FederationOutboxState {
 pub struct RealmFanoutAuthorityWitness {
     pub member_id: arkret_wire::ActorId,
     pub membership_event_ref: String,
-    pub circle_membership_event_ref: Option<arkret_wire::EventId>,
+
 }
 
 /// Durable metadata that distinguishes a Realm Event fanout obligation from
@@ -764,7 +764,7 @@ impl RealmFanoutBinding {
             if !witnesses.insert((
                 &witness.member_id,
                 witness.membership_event_ref.as_str(),
-                &witness.circle_membership_event_ref,
+
             )) {
                 return Err("Realm fanout authority witnesses must be unique".to_owned());
             }
@@ -1072,8 +1072,7 @@ pub struct FederationOutboxDeadLetterRecord {
 #[derive(Clone, Debug)]
 pub struct SignalRelayRecord {
     pub realm_id: String,
-    /// Signed security scope of the envelope. A Circle-scoped Signal is
-    /// delivered only to that Circle's eligible devices.
+    /// Signed Realm scope used to determine eligible devices for delivery.
     pub scope_ref: arkret_wire::ScopeRef,
     pub sender_actor_id: String,
     /// Present for an ordinary account-device sender and absent for an Agent.

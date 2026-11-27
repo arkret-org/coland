@@ -21,7 +21,7 @@ fn witness(join: &EventCommitRequest) -> RealmFanoutAuthorityWitness {
     RealmFanoutAuthorityWitness {
         member_id: join.authority_commit.event.actor_id.clone(),
         membership_event_ref: join.authority_commit.event.event_id.to_string(),
-        circle_membership_event_ref: None,
+
     }
 }
 
@@ -159,12 +159,12 @@ async fn witness_or_case() {
         RealmFanoutAuthorityWitness {
             member_id: carol.clone(),
             membership_event_ref: basis[0].membership_event_ref.clone(),
-            circle_membership_event_ref: None,
+
         },
         RealmFanoutAuthorityWitness {
             member_id: bob.clone(),
             membership_event_ref: basis[1].membership_event_ref.clone(),
-            circle_membership_event_ref: None,
+
         },
     ];
     assert!(

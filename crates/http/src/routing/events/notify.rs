@@ -5,7 +5,7 @@
 //! once the source Event's Commit is durable: the governing Station right
 //! after its accepting unit, a member Station right after it stores the
 //! committed replica. Every recipient fact -- membership, Strand scope,
-//! Circle membership, watch level and active assignment -- is read from the
+//! Realm membership, watch level and active assignment -- is read from the
 //! typed current results at that cut ([`NotificationFanoutBasis`]); the
 //! in-process reducer projection is not a notification source. The rows are
 //! a rebuildable derived projection, so a fanout failure is logged and never
@@ -31,7 +31,7 @@ use coland_services::delivery::NotificationFanoutBasis;
 use serde_json::Value;
 
 use crate::routing::agent_participation::{
-    circle_scope_key, realm_scope_key, resolve_agent_participation_for_scope_keys, strand_scope_key,
+    realm_scope_key, resolve_agent_participation_for_scope_keys, strand_scope_key,
 };
 use crate::state::AppState;
 
@@ -108,7 +108,7 @@ pub(crate) async fn dispatch_committed_event_notifications(
 
 async fn fan_out(state: &AppState, source: &CommittedSource<'_>, basis: &NotificationFanoutBasis) {
     for planned in plan(source, basis, &state.service_core_id()) {
-        if !mention_passes_agent_gate(state, source, basis, &planned).await {
+        if !mention_passes_agent_gate(state, source, &planned).await {
             continue;
         }
         put_notification(state, source, planned).await;
@@ -170,7 +170,6 @@ impl RecipientGate<'_> {
             && self.basis.joined_members.contains(actor)
             && self.basis.strand.as_ref().is_some_and(|strand| {
                 strand.realm_id == *self.source.realm_id
-                    && (strand.scope_circle_id.is_none() || strand.circle_members.contains(actor))
             })
             && self.basis.watch_levels.get(actor).map(String::as_str) != Some(WATCH_MUTED)
     }
@@ -339,7 +338,6 @@ fn canonical_patch_set_value(value: &Value) -> Option<&Value> {
 async fn mention_passes_agent_gate(
     state: &AppState,
     source: &CommittedSource<'_>,
-    basis: &NotificationFanoutBasis,
     planned: &PlannedNotification,
 ) -> bool {
     let agent = planned.recipient.signing_principal_id().as_str();
@@ -384,15 +382,7 @@ async fn mention_passes_agent_gate(
         return true;
     }
     let realm_id = source.realm_id.as_str();
-    let mut scope_keys = vec![realm_scope_key(realm_id)];
-    if let Some(circle_id) = basis
-        .strand
-        .as_ref()
-        .and_then(|strand| strand.scope_circle_id.as_ref())
-    {
-        scope_keys.push(circle_scope_key(realm_id, circle_id.as_str()));
-    }
-    scope_keys.push(strand_scope_key(realm_id, planned.strand_id.as_str()));
+    let scope_keys = [realm_scope_key(realm_id), strand_scope_key(realm_id, planned.strand_id.as_str())];
     resolve_agent_participation_for_scope_keys(state, agent, &scope_keys)
         .await
         .is_some_and(|resolved| resolved.effective.third_party_mention_delivery_allowed)
@@ -481,7 +471,6 @@ mod tests {
 
     const REALM: &str = "ak:realm:AS1XvoEwEve7yjNY6nVsquBYDGIKDIrmFJeSCVjzcASh";
     const STRAND: &str = "ak:strand:AYzqeQ1hbLexQxBuFmhDzV2R1jsnUEvB0ELJR10hOgtK";
-    const CIRCLE: &str = "ak:circle:Aecu1rM_o2niy2h_rtK9KBChw8L-QoAsngbVoP1bpNrl";
     const ALICE: &str = "ak:did_core:web:alice.example";
     const BOB: &str = "ak:did_core:web:bob.example";
     const CAROL: &str = "ak:did_core:web:carol.example";
@@ -629,8 +618,6 @@ mod tests {
             strand: Some(NotificationStrandScope {
                 realm_id: realm_id(),
                 active: true,
-                scope_circle_id: None,
-                circle_members: BTreeSet::new(),
             }),
             watch_levels: BTreeMap::new(),
             active_assignees: BTreeSet::new(),
@@ -729,19 +716,12 @@ mod tests {
     }
 
     #[test]
-    fn circle_scoped_strand_reaches_only_circle_members() {
+    fn mention_and_watch_require_a_current_realm_join() {
         let (alice, bob, carol) = (actor(ALICE), actor(BOB), actor(CAROL));
-        let mut basis = watching(basis(&[&alice, &bob, &carol]), &[(&carol, "all")]);
-        basis.strand = Some(NotificationStrandScope {
-            realm_id: realm_id(),
-            active: true,
-            scope_circle_id: Some(arkret_wire::CircleId::new(CIRCLE).unwrap()),
-            circle_members: [alice.clone(), bob.clone()].into_iter().collect(),
-        });
+        let basis = watching(basis(&[&alice, &bob]), &[(&carol, "all")]);
         assert_eq!(
             message("000000009976", alice.clone(), &[&bob, &carol]).plan(&basis),
             vec![(bob, NotificationKind::Mention)],
-            "a mentioned or watching Realm member outside the Circle gets no row"
         );
     }
 
@@ -1015,57 +995,5 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn circle_selection_cannot_supply_missing_accepted_governance_for_strand_mentions() {
-        let state = test_state();
-        let (controller, third_party, agent) = (actor(ALICE), actor(BOB), actor(AGENT));
-        let mut basis = basis(&[&controller, &third_party, &agent]);
-        basis.strand = Some(NotificationStrandScope {
-            realm_id: realm_id(),
-            active: true,
-            scope_circle_id: Some(arkret_wire::CircleId::new(CIRCLE).unwrap()),
-            circle_members: [controller.clone(), third_party.clone(), agent.clone()]
-                .into_iter()
-                .collect(),
-        });
-        put_agent(
-            &state,
-            AGENT,
-            ALICE,
-            "did:webvh:z6mkalicesummary:agents.example#managed-controller",
-        )
-        .await;
-        set_realm_selection(&state, false, 0).await;
-        set_selection(
-            &state,
-            json!({"kind": "circle", "realm_id": REALM, "circle_id": CIRCLE}),
-            "circle",
-            circle_scope_key(REALM, CIRCLE),
-            true,
-            0,
-        )
-        .await;
 
-        let delivered = message("000000009990", third_party.clone(), &[&agent]);
-        fan_out(&state, &delivered.source(), &basis).await;
-        assert!(notifications_for(&state, &agent).await.is_empty());
-        set_selection(
-            &state,
-            json!({"kind": "circle", "realm_id": REALM, "circle_id": CIRCLE}),
-            "circle",
-            circle_scope_key(REALM, CIRCLE),
-            false,
-            1,
-        )
-        .await;
-        let capped = message("000000009991", third_party.clone(), &[&agent]);
-        fan_out(&state, &capped.source(), &basis).await;
-        let rows = notifications_for(&state, &agent).await;
-        assert!(rows.is_empty());
-        assert!(
-            !rows
-                .iter()
-                .any(|row| row["source_event_id"] == capped.event_id.as_str())
-        );
-    }
 }

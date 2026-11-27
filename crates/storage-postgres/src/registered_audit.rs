@@ -130,14 +130,10 @@ async fn require_archived_slots(
 fn target(event: &arkret_wire::Event) -> PersistenceResult<WireResourceSelector> {
     let mut target = WireResourceSelector::realm(event.realm_id.clone());
     match &event.scope_ref {
-        ScopeRef::Circle { circle_id, .. } => {
-            target.kind = ResourceSelectorKind::Circle;
-            target.circle_id = Some(circle_id.clone());
-        }
         ScopeRef::Realm { .. } => {}
         _ => {
             return Err(conflict(
-                "failed_precondition: audit requires a Realm or Circle stream",
+                "failed_precondition: audit requires a Realm stream",
             ));
         }
     }
@@ -335,15 +331,10 @@ pub(crate) async fn read_visibility_in_connection(
             });
         }
     };
-    let scope = match strand.value.get("scope_circle_id").and_then(Value::as_str) {
-        Some(circle) => ScopeRef::Circle {
-            realm_id: event.realm_id.clone(),
-            circle_id: circle.parse().map_err(PersistenceError::database)?,
-        },
-        None => ScopeRef::Realm {
-            realm_id: event.realm_id.clone(),
-        },
-    };
+    let strand_current: arkret_models_collaboration::objects::strand::Strand =
+        serde_json::from_value(strand.value.clone()).map_err(PersistenceError::database)?;
+    let scope = ScopeRef::Realm { realm_id: strand_current.realm_id };
+
     if strand.value.get("state").and_then(Value::as_str) != Some("active")
         || event.scope_ref != scope
     {
@@ -374,32 +365,7 @@ pub(crate) async fn read_visibility_in_connection(
         },
     )
     .await?;
-    if let ScopeRef::Circle { circle_id, .. } = &scope {
-        let circle = sql_query("SELECT value,current_commit_id,current_stream_position,source_stream_ref FROM circle_current_states WHERE realm_id=$1 AND circle_id=$2 FOR SHARE")
-            .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(circle_id.as_str()).get_result::<Strand>(&mut *conn).await.optional().map_err(PersistenceError::database)?
-            .ok_or_else(|| unavailable("audited Circle current is missing"))?;
-        if circle.value.get("state").and_then(Value::as_str) != Some("active") {
-            return Err(PersistenceError::NotFound(
-                "audited Circle is not active".to_owned(),
-            ));
-        }
-        let stream =
-            serde_json::from_value(circle.source_stream_ref).map_err(PersistenceError::database)?;
-        crate::account_content_delivery::current_source_in_connection(
-            conn,
-            &event.realm_id,
-            &stream,
-            &arkret_wire::CurrentRevision {
-                commit_id: circle
-                    .current_commit_id
-                    .parse()
-                    .map_err(PersistenceError::database)?,
-                stream_position: u64::try_from(circle.current_stream_position)
-                    .map_err(PersistenceError::database)?,
-            },
-        )
-        .await?;
-    }
+
     let cut =
         crate::realm_authorization_cut::RealmAuthorizationCut::read_for_event(conn, event).await?;
     cut.require_open_lifecycle(event)
@@ -461,43 +427,7 @@ pub(crate) async fn read_visibility_in_connection(
             }
         }
     }
-    if let ScopeRef::Circle { circle_id, .. } = &event.scope_ref
-        && !crate::circle_current_states::effective_member_in_connection(
-            conn,
-            &event.realm_id,
-            circle_id,
-            &event.actor_id,
-        )
-        .await?
-    {
-        let explicit = bounded
-            .current_positive_grant_records(CapabilityActionId::CircleAudit.as_str(), &resource)?
-            .into_iter()
-            .any(|grant| {
-                grant
-                    .resources
-                    .iter()
-                    .any(|selector| selector.circle_id.as_ref() == Some(circle_id))
-                    && coland_storage::grant_names_target(
-                        grant,
-                        &[CapabilityActionId::CircleAudit.as_str()],
-                        &resource,
-                    )
-            });
-        let actions = [CapabilityActionId::CircleAudit.as_str()];
-        let markers = read_approval_markers_in_connection(conn, request).await?;
-        if !explicit
-            || (expected_generation.is_some()
-                && !matches!(
-                    bounded.evaluate_with_approvals(&actions, &resource, &facts, &markers),
-                    coland_storage::GrantEvaluation::Allowed(_)
-                ))
-        {
-            return Err(PersistenceError::NotFound(
-                "Circle audit is not visible".to_owned(),
-            ));
-        }
-    }
+
     Ok(())
 }
 
@@ -517,7 +447,6 @@ pub(crate) async fn begin_in_connection(
                     kind,
                     AuditAccessedKind::WatchAuditRead
                         | AuditAccessedKind::WatchSetOthers
-                        | AuditAccessedKind::CircleMemberSetOthers
                 ) {
                     return Err(conflict(
                         "failed_precondition: audit requires its registered unit or read command",
@@ -684,36 +613,7 @@ pub(crate) async fn begin_in_connection(
                     )
                     .await?,
                 ));
-            } else {
-                let primary = conn
-                    .transaction::<_, PgTransactionError, _>(async |conn| {
-                        action_in_connection(
-                            conn,
-                            business,
-                            &first.commit,
-                            approvals[0].as_ref(),
-                            CapabilityActionId::CircleMemberManage,
-                        )
-                        .await
-                    })
-                    .await;
-                let (action, approved) = if let Ok(approved) = primary {
-                    (CapabilityActionId::CircleMemberManage, approved)
-                } else {
-                    (
-                        CapabilityActionId::CircleMemberAddOthers,
-                        action_in_connection(
-                            conn,
-                            business,
-                            &first.commit,
-                            approvals[0].as_ref(),
-                            CapabilityActionId::CircleMemberAddOthers,
-                        )
-                        .await?,
-                    )
-                };
-                accepted_actions.push((0, action, approved));
-            }
+            } else { return Err(conflict("unsupported audited business operation").into()); }
             let audit = &batch.events[1].authority_commit;
             accepted_actions.push((
                 1,
@@ -737,28 +637,7 @@ pub(crate) async fn begin_in_connection(
                 None,
             )
             .await?;
-            if let ScopeRef::Circle { circle_id, .. } = &first.event.scope_ref
-                && !crate::circle_current_states::effective_member_in_connection(
-                    conn,
-                    &first.event.realm_id,
-                    circle_id,
-                    &first.event.actor_id,
-                )
-                .await?
-            {
-                accepted_actions.push((
-                    0,
-                    CapabilityActionId::CircleAudit,
-                    action_in_connection(
-                        conn,
-                        &first.event,
-                        &first.commit,
-                        batch.event_approvals.as_ref(),
-                        CapabilityActionId::CircleAudit,
-                    )
-                    .await?,
-                ));
-            }
+
             accepted_actions.push((
                 0,
                 CapabilityActionId::RealmNotificationAudit,

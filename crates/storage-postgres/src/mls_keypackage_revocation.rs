@@ -38,7 +38,7 @@ pub(crate) async fn revoke(
     expires_at: chrono::DateTime<Utc>,
 ) -> PersistenceResult<MlsKeyPackageRevocation> {
     if body.device_id != authority.device_id
-        || !matches!(scope, ScopeRef::Realm { .. } | ScopeRef::Circle { .. })
+        || !matches!(scope, ScopeRef::Realm { .. })
         || !authority.scopes.contains_scope(scope)
     {
         return Err(denied("revoke differs from original Device scope"));

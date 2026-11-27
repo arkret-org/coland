@@ -282,7 +282,7 @@ pub enum ConflictCode {
     /// A Realm entry was refused by its join rule or join policy; the
     /// applicant sees one non-enumerating result (`join-policy.md` §4).
     GateCheckFailed,
-    /// A Realm or Circle membership edge is outside its registered FSM.
+    /// A Realm membership edge is outside its registered FSM.
     InvalidMembershipTransition,
     /// The candidate durable Realm cut cannot be represented by the bounded
     /// inline v1 snapshot.
@@ -749,7 +749,6 @@ pub trait EventProjectionStoreRegistry: Send + Sync {
     fn device_keys(&self) -> &dyn DeviceKeyStore;
     fn one_time_keys(&self) -> &dyn OneTimeKeyStore;
     fn key_backups(&self) -> &dyn KeyBackupStore;
-    fn circle_projections(&self) -> &dyn CircleProjectionStore;
     fn object_current_snapshot(&self) -> &dyn ObjectCurrentSnapshotStore;
     fn morph_projections(&self) -> &dyn MorphProjectionStore;
     fn relation_current_states(&self) -> &dyn RelationCurrentStateStore;

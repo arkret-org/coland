@@ -114,7 +114,7 @@ async fn submit_inner(
     if !matches!(
         event.kind,
         EventKind::MemberState
-            | EventKind::CircleMemberState
+
             | EventKind::MessageCreate
             | EventKind::MessageRedact
             | EventKind::StrandCreate

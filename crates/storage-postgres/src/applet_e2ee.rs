@@ -32,15 +32,11 @@ pub(crate) async fn require_install_policy(
 ) -> PersistenceResult<()> {
     let basis = &body.authoring_request_basis;
     let scope = &basis.effective_scope;
-    let circle = match scope {
-        ScopeRef::Circle { circle_id, .. } => Some(circle_id),
-        _ => None,
-    };
+
     let policies =
         crate::policy_current_states::read_scoped_applet_management_policies_in_connection(
             conn,
             scope.realm_id(),
-            circle,
         )
         .await?;
     let mut resources = vec![PolicyResourceSelector {
@@ -48,13 +44,6 @@ pub(crate) async fn require_install_policy(
         realm_id: Some(scope.realm_id().clone()),
         resource_ref: Some(scope.realm_id().to_string()),
     }];
-    if let Some(circle) = circle {
-        resources.push(PolicyResourceSelector {
-            kind: PolicyResourceKind::Object,
-            realm_id: Some(scope.realm_id().clone()),
-            resource_ref: Some(circle.to_string()),
-        });
-    }
     let decision = arkret_policy::applet_management::select_applet_management(
         Some(&policies),
         &arkret_policy::applet_management::AppletManagementContext {

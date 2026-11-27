@@ -16,10 +16,7 @@ struct SnapshotSourceRow {
 }
 
 fn stream(endpoint: &AppletManagedDeviceScopeGuard) -> PersistenceResult<CommitStreamRef> {
-    if !matches!(
-        endpoint.effective_scope,
-        ScopeRef::Realm { .. } | ScopeRef::Circle { .. }
-    ) {
+    if !matches!(endpoint.effective_scope, ScopeRef::Realm { .. }) {
         return Err(refused("native snapshot has no supported business scope"));
     }
     CommitStreamRef::from_scope(&endpoint.effective_scope, None).map_err(PersistenceError::database)
@@ -39,15 +36,10 @@ pub(super) async fn restrict_material(
     material
         .visible_stream_heads
         .retain(|head| head.stream_ref == expected);
-    // Circle metadata is carried by a Realm authorization shell but belongs
-    // to the Circle. It cannot ride a Realm Device cut; its Realm source is
-    // also outside a Circle-only independent stream cut.
     material.current_state_entries.retain(|row| match row {
         CurrentState::Value {
-            selector,
-            source_stream_ref,
-            ..
-        } => source_stream_ref == &expected && !matches!(selector, CurrentSelector::Circle { .. }),
+            source_stream_ref, ..
+        } => source_stream_ref == &expected,
     });
     material
         .retention_and_history_floor
@@ -106,9 +98,6 @@ fn current_resources(
         S::Space { space_id }
         | S::SpaceParent { space_id }
         | S::SpaceChildScopePolicy { space_id } => vec![space_id.to_string()],
-        S::Circle { circle_id } | S::CircleMemberState { circle_id, .. } => {
-            vec![circle_id.to_string()]
-        }
         S::MessageRevision { message_id } => vec![message_id.to_string()],
         S::MessageReactions { target_ref }
         | S::ModerationState { target_ref }
@@ -134,7 +123,6 @@ fn current_resources(
             .collect(),
         S::Pin { pin_scope } => vec![match pin_scope {
             PinScope::Realm { id } => id.to_string(),
-            PinScope::Circle { id } => id.to_string(),
             PinScope::Strand { id } => id.to_string(),
             PinScope::Space { id } => id.to_string(),
         }],

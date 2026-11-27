@@ -12,19 +12,6 @@ use arkret_models_collaboration::governance::membership_invite::{
 use chrono::{DateTime, Duration, Utc};
 use serde_json::Value;
 
-/// AKP-0007 §8 — pulling *another* actor into a Circle (none/left → active by
-/// an actor other than the target) requires the requester_id to hold
-/// `ak.circle.member.manage` (narrowed by `allowed_circle_ids`) on this Circle.
-/// The HTTP surface decides it from the durable authorization cut and stamps a
-/// verdict into the operation payload; the reducer fails closed when that
-/// verdict is absent or false, so an unauthorised one-way add is rejected even
-/// if it bypasses the HTTP gate.
-pub(crate) const CIRCLE_MEMBER_MANAGE_CAPABILITY_REQUIRED: &str =
-    "circle_member_manage_capability_required";
-/// AKP-0007 §8 — a self-service join (none/left → active *by the target actor*)
-/// is only permitted on an `open` Circle. Self-joining a non-`open` Circle must
-/// go through an invite/manage path.
-pub(crate) const CIRCLE_JOIN_NOT_OPEN: &str = "circle_join_not_open";
 pub(crate) fn state_payload_value(payload: &Value) -> &Value {
     payload.get("value").unwrap_or(payload)
 }

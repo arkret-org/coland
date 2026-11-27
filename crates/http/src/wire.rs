@@ -882,7 +882,6 @@ pub fn describe(
                     "sync",
                     "index",
                     "authz_policy",
-                    "circle_management",
                     "identity_registry_local_dev",
                     "blob_node_local",
                     "directory_service",

@@ -87,9 +87,11 @@ pub(crate) fn resource_selector(
         return (resource == realm_id.as_str())
             .then(|| WireResourceSelector::realm(realm_id.clone()));
     }
+    if resource.starts_with("ak:circle:") {
+        return None;
+    }
     let typed = [
         ("ak:space:", "space", "space_id"),
-        ("ak:circle:", "circle", "circle_id"),
         ("ak:strand:", "strand", "strand_id"),
         ("ak:message:", "message", "message_id"),
         ("ak:morph:", "morph", "morph_id"),
@@ -170,10 +172,7 @@ mod tests {
             serde_json::to_value(resource_selector(&realm(), REALM).unwrap()).unwrap(),
             serde_json::json!({"kind": "realm", "realm_id": REALM})
         );
-        assert_eq!(
-            serde_json::to_value(resource_selector(&realm(), circle).unwrap()).unwrap(),
-            serde_json::json!({"kind": "circle", "realm_id": REALM, "circle_id": circle})
-        );
+        assert!(resource_selector(&realm(), circle).is_none());
         assert_eq!(
             serde_json::to_value(resource_selector(&realm(), strand).unwrap()).unwrap(),
             serde_json::json!({"kind": "strand", "realm_id": REALM, "strand_id": strand})

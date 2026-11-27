@@ -387,31 +387,31 @@ mod requested_scope_tests {
             &[]
         ));
 
-        let circle_ceiling = record_with_scope(json!({
+        let strand_ceiling = record_with_scope(json!({
             "actions": [CapabilityActionId::EVENT_READ],
             "resources": [{
-                "kind": "circle",
+                "kind": "strand",
                 "realm_id": "ak:realm:ASt7OPzypn1OkvoZOKtcz8H8ydfZ7fLDhL3nI1jLWTfX",
-                "resource_ref": "ak:circle:AfIEekeSLx-Ai7SaUc0Xi2ia757PQNByOFKfeuSIpLNw"
+                "resource_ref": "ak:strand:AfIEekeSLx-Ai7SaUc0Xi2ia757PQNByOFKfeuSIpLNw"
             }]
         }));
         assert!(agent_grant_within_requested_scope(
-            &circle_ceiling,
+            &strand_ceiling,
             &[CapabilityActionId::EVENT_READ.to_owned()],
             &[resource(json!({
-                "kind": "circle",
+                "kind": "strand",
                 "realm_id": "ak:realm:ASt7OPzypn1OkvoZOKtcz8H8ydfZ7fLDhL3nI1jLWTfX",
-                "circle_id": "ak:circle:AfIEekeSLx-Ai7SaUc0Xi2ia757PQNByOFKfeuSIpLNw"
+                "strand_id": "ak:strand:AfIEekeSLx-Ai7SaUc0Xi2ia757PQNByOFKfeuSIpLNw"
             }))],
             &[]
         ));
         assert!(!agent_grant_within_requested_scope(
-            &circle_ceiling,
+            &strand_ceiling,
             &[CapabilityActionId::EVENT_READ.to_owned()],
             &[resource(json!({
-                "kind": "circle",
+                "kind": "strand",
                 "realm_id": "ak:realm:ASt7OPzypn1OkvoZOKtcz8H8ydfZ7fLDhL3nI1jLWTfX",
-                "circle_id": "ak:circle:AcnPOZq8RRwOX2ep1JRrdBjYFCyVhwQeG8N3_N3YkArT"
+                "strand_id": "ak:strand:AcnPOZq8RRwOX2ep1JRrdBjYFCyVhwQeG8N3_N3YkArT"
             }))],
             &[]
         ));
@@ -850,7 +850,7 @@ async fn active_agent_key_authorizations(
 // the REAL ceiling check via the shared owner validators so the
 // "inner scope MUST NOT exceed the outer ceiling" invariant is enforced
 // at the edge. Persistence into `agent_participation`, ceiling
-// resolution from the realm/circle/strand policy projection,
+// resolution from the realm/strand policy projection,
 // capability-grant materialization (`ak.capability.grant` / `revoke`),
 // and the dispatcher mention gate are P2-impl — matching the rest of
 // this surface.

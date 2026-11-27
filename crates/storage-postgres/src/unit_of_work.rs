@@ -778,7 +778,6 @@ fn relation_current_value_for_create(
         schema: arkret_models_collaboration::objects::relation::Relation::SCHEMA.to_owned(),
         id: Some(arkret_wire::RelationId::from_event_id(&event.event_id)),
         realm_id: event.realm_id.clone(),
-        scope_circle_id: payload.relation.scope_circle_id,
         effective_scope: Some(event.scope_ref.clone()),
         relation_kind: payload.relation.relation_kind,
         from_ref: payload.relation.from_ref,
@@ -797,7 +796,7 @@ fn relation_current_value_for_create(
 /// Write the `relation` typed current of one accepted `ak.relation.*`.
 ///
 /// `authorize` is the governing Station's admission: the same-cut capability
-/// verdict, source stream, Circle author and the scope/endpoint rules of
+/// verdict, source stream and the scope/endpoint rules of
 /// `relation.md` sections 3.2 and 4.4. A verified replica fold passes `false`
 /// and only replays the primary-domain CAS the authority already decided.
 pub(crate) async fn commit_relation_current_state_in_connection(
@@ -1016,6 +1015,7 @@ pub(crate) async fn commit_relation_current_state_in_connection(
         crate::relation_current_states::require_relation_value_scope_in_connection(
             conn,
             event,
+            commit,
             before.as_ref(),
             &value,
             created,
@@ -2471,7 +2471,7 @@ async fn commit_one_inner(
         event.scope_ref,
         arkret_wire::ScopeRef::Realm { .. }
             | arkret_wire::ScopeRef::RealmControl { .. }
-            | arkret_wire::ScopeRef::Circle { .. }
+
             | arkret_wire::ScopeRef::Sidecar { .. }
     ) {
         // Shared writes acquire the Realm cut before controller or Agent producer current.
@@ -2623,7 +2623,7 @@ async fn commit_one_inner(
             arkret_wire::EventKind::MessageCreate
                 | arkret_wire::EventKind::MessageRedact
                 | arkret_wire::EventKind::StrandCreate
-                | arkret_wire::EventKind::CircleMemberState
+
                 | arkret_wire::EventKind::MlsGenesis
                 | arkret_wire::EventKind::MlsCommit
         ) {
@@ -3068,17 +3068,6 @@ async fn commit_prepared_event_authority(
     crate::approval_admission::validate_candidate(event, commit, event_approvals)?;
     if matches!(authority_write, AuthorityCommitWriteOutcome::Committed) {
         crate::boxed_future(|| {
-            crate::circle_current_states::admit_with_audit_in_connection(
-                conn,
-                event,
-                &request.authority_commit.commit,
-                &request.authority_commit.expected_authority.service_id,
-                audit_unit,
-                event_approvals,
-            )
-        })
-        .await?;
-        crate::boxed_future(|| {
             crate::agent_confirmation_admission::admit_confirmation(
                 conn,
                 event,
@@ -3472,11 +3461,6 @@ async fn commit_scope_current_states_inner(
     )
     .await?;
 
-    Box::pin(crate::circle_current_states::commit_in_connection(
-        conn, event, commit,
-    ))
-    .await?;
-
     Box::pin(
         crate::strand_watch_current_states::commit_with_audit_in_connection(
             conn, event, commit, audit_unit, prepared,
@@ -3802,7 +3786,7 @@ async fn commit_batch_in_connection(
     }
     // One Realm-wide lock makes capacity measurement part of the same
     // serialization boundary even when concurrent commits target different
-    // Circle or Sidecar streams.
+    // Sidecar streams.
     for realm_id in snapshot_contexts.keys() {
         advisory_lock(conn, format!("realm-snapshot-capacity:{realm_id}")).await?;
     }

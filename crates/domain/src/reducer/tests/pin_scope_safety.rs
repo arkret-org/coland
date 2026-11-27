@@ -1,7 +1,6 @@
 use super::*;
 
 const REALM_ID: &str = "ak:realm:AZpEa1TBWdyQensfzl-MJg8_sdcSNKSeAKHbyCN5ZXjb";
-const CIRCLE_ID: &str = "ak:circle:AbdQDXGeR-uKf6HZP1Mt7cCkg1aM2OhVqu7lVR0WpgiI";
 const STRAND_ID: &str = "ak:strand:AUAf2-oZl31wupPqnQLO-zloaqgMoX5xk2tpVSbi8zjD";
 const MESSAGE_EVENT_ID: &str = "ak:event:AYqEzQ3jW02EHkMjxFQTlyeowxPQXJE4fI6JGOnzi23t";
 
@@ -40,45 +39,6 @@ fn seed_scoped_message(state: &mut ProjectionState, hlc: &ServerHlc) {
             reason: None,
         },
     );
-    let circle = state.apply(
-        &make_operation(
-            arkret_wire::EventKind::CircleCreate,
-            REALM_ID,
-            serde_json::json!({
-                "object": {
-                    "id": CIRCLE_ID,
-                    "realm_id": REALM_ID,
-                    "title": "Private",
-                    "created_by": "ak:did_core:web:alice.example",
-                    "join_rule": "public",
-                    "encryption_profile": "mls_rfc9420",
-                    "content_scheme": "mls_rfc9420"
-                }
-            }),
-        ),
-        hlc,
-    );
-    assert!(
-        !matches!(circle, ProjectionEffect::Rejected { .. }),
-        "circle fixture failed: {circle:?}"
-    );
-    let member = state.apply(
-        &make_operation(
-            arkret_wire::EventKind::CircleMemberState,
-            REALM_ID,
-            serde_json::json!({
-                "circle_id": CIRCLE_ID,
-                "member_id": account_actor("ak:did_core:web:alice.example"),
-                "membership": "join",
-                "sender": "ak:did_core:web:alice.example"
-            }),
-        ),
-        hlc,
-    );
-    assert!(
-        !matches!(member, ProjectionEffect::Rejected { .. }),
-        "circle member fixture failed: {member:?}"
-    );
     let strand = state.apply(
         &make_operation(
             arkret_wire::EventKind::StrandCreate,
@@ -87,7 +47,6 @@ fn seed_scoped_message(state: &mut ProjectionState, hlc: &ServerHlc) {
                 "object": {
                     "id": STRAND_ID,
                     "realm_id": REALM_ID,
-                    "scope_circle_id": CIRCLE_ID,
                     "metadata": {"title": "Private discussion"},
                     "created_by": "ak:did_core:web:alice.example"
                 }
@@ -132,12 +91,12 @@ fn pin_add(pin_scope: serde_json::Value) -> Operation {
 }
 
 #[test]
-fn realm_pin_rejects_circle_scoped_message_target() {
+fn foreign_realm_pin_rejects_message_target() {
     let mut state = ProjectionState::new();
     let hlc = ServerHlc::new("test");
     seed_scoped_message(&mut state, &hlc);
 
-    let operation = pin_add(serde_json::json!({"kind": "realm", "id": REALM_ID}));
+    let operation = pin_add(serde_json::json!({"kind": "realm", "id": "ak:realm:AbdQDXGeR-uKf6HZP1Mt7cCkg1aM2OhVqu7lVR0WpgiI"}));
     assert_eq!(state.check_pin_scope_safety(&operation), Err("not_found"));
 
     let effect = state.apply(&operation, &hlc);
@@ -149,12 +108,12 @@ fn realm_pin_rejects_circle_scoped_message_target() {
 }
 
 #[test]
-fn circle_pin_accepts_same_circle_message_target() {
+fn realm_pin_accepts_same_realm_message_target() {
     let mut state = ProjectionState::new();
     let hlc = ServerHlc::new("test");
     seed_scoped_message(&mut state, &hlc);
 
-    let operation = pin_add(serde_json::json!({"kind": "circle", "id": CIRCLE_ID}));
+    let operation = pin_add(serde_json::json!({"kind": "realm", "id": REALM_ID}));
     assert_eq!(state.check_pin_scope_safety(&operation), Ok(()));
 
     let effect = state.apply(&operation, &hlc);
@@ -183,7 +142,7 @@ fn pin_rejects_redacted_message_target() {
         &hlc,
     );
 
-    let operation = pin_add(serde_json::json!({"kind": "circle", "id": CIRCLE_ID}));
+    let operation = pin_add(serde_json::json!({"kind": "realm", "id": REALM_ID}));
     assert_eq!(state.check_pin_scope_safety(&operation), Err("not_found"));
     assert!(!state.pin_target_is_visible_for_projection(MESSAGE_EVENT_ID));
 }
@@ -210,7 +169,7 @@ fn pin_rejects_quarantined_message_target() {
         }]),
     );
 
-    let operation = pin_add(serde_json::json!({"kind": "circle", "id": CIRCLE_ID}));
+    let operation = pin_add(serde_json::json!({"kind": "realm", "id": REALM_ID}));
     assert_eq!(state.check_pin_scope_safety(&operation), Err("not_found"));
     assert!(!state.pin_target_is_visible_for_projection(MESSAGE_EVENT_ID));
 }
@@ -246,7 +205,7 @@ fn pin_rejects_active_moderation_decision_head() {
         }]),
     );
 
-    let operation = pin_add(serde_json::json!({"kind": "circle", "id": CIRCLE_ID}));
+    let operation = pin_add(serde_json::json!({"kind": "realm", "id": REALM_ID}));
     assert_eq!(state.check_pin_scope_safety(&operation), Err("not_found"));
     assert!(!state.pin_target_is_visible_for_projection(MESSAGE_EVENT_ID));
 }

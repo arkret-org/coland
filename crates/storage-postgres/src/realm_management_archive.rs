@@ -474,7 +474,7 @@ async fn validate_blob_uploads(
             .as_realm_actor_id()
             .is_none_or(|id| &id.realm_id != realm)
             || scope.realm_id() != realm
-            || !matches!(scope, ScopeRef::Realm { .. } | ScopeRef::Circle { .. })
+            || !matches!(scope, ScopeRef::Realm { .. })
             || actual != reference
             || original.event.actor_id != actor
             || json!(payload.device_id) != binding["device_id"]

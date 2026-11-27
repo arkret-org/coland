@@ -1737,8 +1737,9 @@ mls_state: None, welcomes: vec![], recipient_queue_capacity: 0 },
     ));
     assert!(matches!(
         right.effective_scope,
-        arkret_wire::ScopeRef::Circle { .. }
+        arkret_wire::ScopeRef::Realm { .. }
     ));
+    assert_ne!(left.effective_scope, right.effective_scope);
     let (l, r) = tokio::join!(left.commit(stores.applets), right.commit(stores.applets));
     assert_eq!(usize::from(l.is_ok()) + usize::from(r.is_ok()), 1);
     let (winner, loser, loser_label, error) = match l {
@@ -2799,7 +2800,7 @@ pub async fn assert_federation_outbox_store_contract(
                 member_id: arkret_wire::ActorId::service(
                     DidCoreId::new("ak:did_core:web:alice.example").unwrap(),
                 ),
-                circle_membership_event_ref: None,
+
                 membership_event_ref: source_event.event_id.clone(),
             }],
         },

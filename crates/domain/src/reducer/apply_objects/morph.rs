@@ -28,27 +28,14 @@ impl ProjectionState {
                 reason: reason.to_owned(),
             };
         }
-        // AKP-0007 — when the Morph carries a `scope_circle_id`, the
-        // Circle MUST belong to this Realm and be active. Mirrors the
-        // Strand.scope_circle_id validation.
-        if let Some(scope_circle_id) = object.get("scope_circle_id").and_then(Value::as_str)
-            && let Err(reason) =
-                self.validate_scope_circle_id(scope_circle_id, operation.realm_id.as_ref())
-        {
-            return ProjectionEffect::Rejected {
-                reason: reason.to_owned(),
-            };
+        if object.contains_key("scope_circle_id") {
+            return ProjectionEffect::Rejected { reason: arkret_wire::ErrorCode::SCHEMA_VIOLATION.to_owned() };
         }
         let morph_kind = object
             .get("morph_kind")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_owned();
-        let scope_circle_id = object
-            .get("scope_circle_id")
-            .and_then(Value::as_str)
-            .filter(|value| value.starts_with("ak:circle:"))
-            .map(ToOwned::to_owned);
         let title = object
             .get("metadata")
             .and_then(Value::as_object)
@@ -90,7 +77,6 @@ impl ProjectionState {
         let projection = MorphProjection {
             morph_id: morph_id.clone(),
             realm_id,
-            scope_circle_id,
             morph_kind,
             title,
             fields,

@@ -71,7 +71,7 @@ use crate::wire::now;
 
 /// Canonical MLS event-payload field readers shared by every surface that
 /// inspects a raw `ak.mls.*` payload (submit preflight, projection mirroring,
-/// sync visibility, sidecar binding, MIMI interop, circle scope rotation).
+/// sync visibility, sidecar binding, MIMI interop, Realm epoch rotation).
 pub(crate) mod payload_fields;
 
 mod mls_keypackage_native;

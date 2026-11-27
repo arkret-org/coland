@@ -378,7 +378,7 @@ async fn group_scope(
         || scope.realm_id() != realm
         || !matches!(
             scope,
-            arkret_wire::ScopeRef::Realm { .. } | arkret_wire::ScopeRef::Circle { .. }
+            arkret_wire::ScopeRef::Realm { .. }
         )
         || scope.canonical_mls_group_id().map_err(denied)? != *group
     {

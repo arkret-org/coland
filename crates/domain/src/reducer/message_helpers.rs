@@ -105,26 +105,11 @@ pub(crate) fn pin_scope_parts(pin_scope: &Value) -> Option<(&str, &str)> {
     Some((kind, id))
 }
 
-/// Build the stored message content. `scope_circle_id` comes from the accepted
-/// scope reference, which admission has verified against the Strand. Any
-/// client-supplied `scope_circle_id` in message content is discarded.
-pub(crate) fn message_content_from_payload(
-    payload: &Value,
-    scope_circle_id: Option<String>,
-) -> Value {
-    let mut content = payload
-        .get("content")
+pub(crate) fn message_content_from_payload(payload: &Value) -> Value {
+    payload.get("content")
         .or_else(|| payload.get("encrypted_content"))
-        .cloned()
-        .unwrap_or_else(|| payload.clone());
-    if let Some(object) = content.as_object_mut() {
-        // Stamp the scope accepted by admission, never the client's content field.
-        object.remove("scope_circle_id");
-        if let Some(value) = scope_circle_id {
-            object.insert("scope_circle_id".to_owned(), Value::String(value));
-        }
-    }
-    content
+        .unwrap_or(payload)
+        .clone()
 }
 
 pub(crate) fn content_kind(content: &Value) -> Option<&str> {

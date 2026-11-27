@@ -12,13 +12,6 @@ fn scope_for_stream(stream: &CommitStreamRef) -> PersistenceResult<ScopeRef> {
         CommitStreamRef::Realm { realm_id } => Ok(ScopeRef::Realm {
             realm_id: realm_id.clone(),
         }),
-        CommitStreamRef::Circle {
-            realm_id,
-            circle_id,
-        } => Ok(ScopeRef::Circle {
-            realm_id: realm_id.clone(),
-            circle_id: circle_id.clone(),
-        }),
         _ => Err(refused(
             "native exact current has no applicable resource scope",
         )),

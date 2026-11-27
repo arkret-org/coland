@@ -446,7 +446,7 @@ fn space_container_child_order_tracks_rank_updates() {
             realm_id,
             serde_json::json!({
                 "space_id": third_id,
-                "patch": { "rank": "r000" }
+                "patch": { "rank": { "$op": "set", "value": "r000" } }
             }),
         ),
         &hlc,
@@ -745,47 +745,14 @@ fn board_archive_and_restore_preserve_child_lists_and_cards() {
 }
 
 #[test]
-fn child_scope_policy_requires_specific_circle_for_strand_placement() {
+fn child_scope_policy_requires_accepted_realm_mls_for_strand_placement() {
     let mut state = ProjectionState::new();
     let hlc = ServerHlc::new("test");
     let realm_id = "ak:realm:AZpEa1TBWdyQensfzl-MJg8_sdcSNKSeAKHbyCN5ZXjb";
-    let circle_id = "ak:circle:AbdQDXGeR-uKf6HZP1Mt7cCkg1aM2OhVqu7lVR0WpgiI";
     let list_id = "ak:space:AYqEzQ3jW02EHkMjxFQTlyeowxPQXJE4fI6JGOnzi23t";
     let public_strand_id = "ak:strand:AUAf2-oZl31wupPqnQLO-zloaqgMoX5xk2tpVSbi8zjD";
-    let scoped_strand_id = "ak:strand:ATz4yMg8D3eSMJ7kiPNr0BF70hg3o_DBZklFZd5GZSuJ";
 
     seed_realm_member(&mut state, realm_id, "ak:did_core:web:alice.example");
-    state.apply(
-        &make_operation(
-            arkret_wire::EventKind::CircleCreate,
-            realm_id,
-            serde_json::json!({
-                "object": {
-                    "id": circle_id,
-                    "realm_id": realm_id,
-                    "title": "Private",
-                    "created_by": "ak:did_core:web:alice.example",
-                    "join_rule": "public",
-                    "encryption_profile": "mls_rfc9420",
-                    "content_scheme": "mls_rfc9420"
-                }
-            }),
-        ),
-        &hlc,
-    );
-    state.apply(
-        &make_operation(
-            arkret_wire::EventKind::CircleMemberState,
-            realm_id,
-            serde_json::json!({
-                "circle_id": circle_id,
-                "member_id": account_actor("ak:did_core:web:alice.example"),
-                "membership": "join",
-                "sender": "ak:did_core:web:alice.example"
-            }),
-        ),
-        &hlc,
-    );
     let list_effect = state.apply(
         &make_operation(
             arkret_wire::EventKind::SpaceCreate,
@@ -797,10 +764,7 @@ fn child_scope_policy_requires_specific_circle_for_strand_placement() {
                     "kind": "list",
                     "title": "Private list",
                     "created_by": "ak:did_core:web:alice.example",
-                    "child_scope_policy": {
-                        "kind": "require_scope_circle_id",
-                        "scope_circle_id": circle_id
-                    }
+                    "child_scope_policy": true
                 }
             }),
         ),
@@ -870,52 +834,9 @@ fn child_scope_policy_requires_specific_circle_for_strand_placement() {
             .all(|relation| relation.to_object_ref() != Some(public_strand_id))
     );
 
-    let scoped_create = make_operation(
-        arkret_wire::EventKind::StrandCreate,
-        realm_id,
-        serde_json::json!({
-            "event_id": scoped_strand_id.replacen("ak:strand:", "ak:event:", 1),
-            "object": {
-                "schema": "ak.schema.strand.v1",
-                "realm_id": realm_id,
-                "scope_circle_id": circle_id,
-                "metadata": {
-                    "title": "Private task"
-                },
-                "stage": "draft",
-                "tracks": {
-                    "discussion": {
-                        "is_primary": true,
-                        "profile": "discussion"
-                    }
-                },
-                "created_by": account_actor("ak:did_core:web:alice.example"),
-                "created_at": "2026-06-19T00:00:00.000Z"
-            }
-        }),
-    );
-    assert!(matches!(
-        state.apply(&scoped_create, &hlc),
-        ProjectionEffect::StrandLifecycle { .. }
-    ));
-    assert_eq!(
-        state.strands[scoped_strand_id].scope_circle_id.as_deref(),
-        Some(circle_id)
-    );
-    let scoped_move = make_operation(
-        arkret_wire::EventKind::StrandMove,
-        realm_id,
-        serde_json::json!({
-            "strand_id": scoped_strand_id,
-            "board_space_id": list_id,
-            "target_space_id": list_id,
-            "rank": "r002"
-        }),
-    );
-    assert!(matches!(
-        state.apply(&scoped_move, &hlc),
-        ProjectionEffect::StrandLifecycle { .. }
-    ));
+    state.encrypted_realms.insert(realm_id.to_owned());
+    assert!(state.check_child_scope_policy_transition(&public_move).is_ok());
+    assert!(matches!(state.apply(&public_move, &hlc), ProjectionEffect::StrandLifecycle { .. }));
 }
 
 #[test]
@@ -923,43 +844,10 @@ fn child_scope_policy_gates_space_parent_edges() {
     let mut state = ProjectionState::new();
     let hlc = ServerHlc::new("test");
     let realm_id = "ak:realm:AZpEa1TBWdyQensfzl-MJg8_sdcSNKSeAKHbyCN5ZXjb";
-    let circle_id = "ak:circle:AfCkOEaCIpMvrdVN2n1-lqlms8Xmt4hO1yQr4WvMJ95T";
     let parent_id = "ak:space:AZaaHAEvC1DejakImwHCcJHb0F1pgE-Jd-3_9BGirbuW";
     let child_id = "ak:space:AUZVSPb9v-NuEN6dQgTA44vXJnQ1d-pxAvvfplV4zgOc";
-    let scoped_child_id = "ak:space:Ab-u0alSwVcrUhqmeFQmMzuYs83_IrjXlRSBnpm-B-JL";
 
     seed_realm_member(&mut state, realm_id, "ak:did_core:web:alice.example");
-    state.apply(
-        &make_operation(
-            arkret_wire::EventKind::CircleCreate,
-            realm_id,
-            serde_json::json!({
-                "object": {
-                    "id": circle_id,
-                    "realm_id": realm_id,
-                    "title": "Private",
-                    "created_by": "ak:did_core:web:alice.example",
-                    "join_rule": "public",
-                    "encryption_profile": "mls_rfc9420",
-                    "content_scheme": "mls_rfc9420"
-                }
-            }),
-        ),
-        &hlc,
-    );
-    state.apply(
-        &make_operation(
-            arkret_wire::EventKind::CircleMemberState,
-            realm_id,
-            serde_json::json!({
-                "circle_id": circle_id,
-                "member_id": account_actor("ak:did_core:web:alice.example"),
-                "membership": "join",
-                "sender": "ak:did_core:web:alice.example"
-            }),
-        ),
-        &hlc,
-    );
     state.apply(
         &make_operation(
             arkret_wire::EventKind::SpaceCreate,
@@ -971,29 +859,14 @@ fn child_scope_policy_gates_space_parent_edges() {
                     "kind": "folder",
                     "title": "Private parent",
                     "created_by": "ak:did_core:web:alice.example",
-                    "child_scope_policy": {
-                        "kind": "require_same_scope"
-                    },
-                    "scope_circle_id": circle_id
+                    "child_scope_policy": true
                 }
             }),
         ),
         &hlc,
     );
-    for (space_id, title, scope) in [
-        (child_id, "Public child", None),
-        (scoped_child_id, "Scoped child", Some(circle_id)),
-    ] {
-        let mut object = serde_json::json!({
-            "id": space_id,
-            "realm_id": realm_id,
-            "kind": "folder",
-            "title": title,
-            "created_by": "ak:did_core:web:alice.example"
-        });
-        if let Some(scope) = scope {
-            object["scope_circle_id"] = serde_json::json!(scope);
-        }
+    {
+        let object = serde_json::json!({"id":child_id,"realm_id":realm_id,"kind":"folder","title":"Child","created_by":"ak:did_core:web:alice.example"});
         state.apply(
             &make_operation(
                 arkret_wire::EventKind::SpaceCreate,
@@ -1018,28 +891,11 @@ fn child_scope_policy_gates_space_parent_edges() {
     ));
     assert_eq!(state.space_containers[child_id].parent_ref.as_deref(), None);
 
-    let scoped_parent = make_operation(
-        arkret_wire::EventKind::SpaceParent,
-        realm_id,
-        serde_json::json!({
-            "space_id": scoped_child_id,
-            "parent_space_id": parent_id
-        }),
-    );
-    assert!(matches!(
-        state.apply(&scoped_parent, &hlc),
-        ProjectionEffect::SpaceContainerLifecycle { .. }
-    ));
-    assert_eq!(
-        state.space_containers[scoped_child_id]
-            .parent_ref
-            .as_deref(),
-        Some(parent_id)
-    );
+    state.encrypted_realms.insert(realm_id.to_owned());
+    assert!(!matches!(state.apply(&public_parent, &hlc), ProjectionEffect::Rejected { .. }));
+    assert_eq!(state.space_containers[child_id].parent_ref.as_deref(), Some(parent_id));
 }
 
-/// realm-and-space.md §3.6 — every create-time placement carrier is rejected;
-/// the first legal placement is a separate `ak.strand.move`.
 #[test]
 fn create_time_placement_rejects_a_list_reference_that_is_not_a_space_id() {
     let mut state = ProjectionState::new();

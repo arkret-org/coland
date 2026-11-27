@@ -145,9 +145,9 @@ async fn terminal_states_supplied_call_ids_and_wrong_scope_have_no_writes() {
     }
     let mut event = ordinary_realm::event(
         EventKind::CallCreate,
-        arkret_wire::ScopeRef::Circle {
+        arkret_wire::ScopeRef::Sidecar {
             realm_id: discussion.realm_id(),
-            circle_id: arkret_wire::CircleId::from_event_id(&head.event.event_id),
+            sidecar_id: arkret_wire::SidecarId::from_event_id(&head.event.event_id),
         },
         head.event.actor_id.signing_principal_id(),
         &ordinary_realm::station(),

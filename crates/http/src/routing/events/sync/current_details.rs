@@ -476,7 +476,7 @@ pub(super) async fn frame(
             }
             (selection, Some(account)) => {
                 // Decide wakeups from this Account's proved visible set. A
-                // newly joined Circle can establish position 0 without moving
+                // newly visible Sidecar can establish position 0 without moving
                 // the Realm head; unfiltered frontier activity may disclose
                 // private stream existence through timing.
                 let material = match state
@@ -659,7 +659,7 @@ mod tests {
     #[test]
     fn stream_selection_keeps_explicit_scopes() {
         let (a, b) = (realm(1), realm(2));
-        let circle = arkret_wire::CircleId::from_event_id(&arkret_wire::EventId::from_digest(
+        let sidecar = arkret_wire::SidecarId::from_event_id(&arkret_wire::EventId::from_digest(
             arkret_canonical::DigestSuite::Sha256,
             [9; 32],
         ));
@@ -676,22 +676,22 @@ mod tests {
             }])
         );
         assert_eq!(realm_selection(&only_a, &b), RealmSelection::NotSelected);
-        let with_circle = filter(json!({
+        let with_sidecar = filter(json!({
             "realm_ids": [a],
             "stream_refs": [
                 {"kind": "realm", "realm_id": a},
-                {"kind": "circle", "realm_id": a, "circle_id": circle},
+                {"kind": "sidecar", "realm_id": a, "sidecar_id": sidecar},
             ],
         }));
         assert_eq!(
-            realm_selection(&with_circle, &a),
+            realm_selection(&with_sidecar, &a),
             RealmSelection::Explicit(vec![
                 arkret_wire::CommitStreamRef::Realm {
                     realm_id: a.clone()
                 },
-                arkret_wire::CommitStreamRef::Circle {
+                arkret_wire::CommitStreamRef::Sidecar {
                     realm_id: a.clone(),
-                    circle_id: circle
+                    sidecar_id: sidecar
                 },
             ])
         );
@@ -720,22 +720,22 @@ mod tests {
             false,
             now
         ));
-        let circle = arkret_wire::CircleId::from_event_id(&arkret_wire::EventId::from_digest(
+        let sidecar = arkret_wire::SidecarId::from_event_id(&arkret_wire::EventId::from_digest(
             arkret_canonical::DigestSuite::Sha256,
             [9; 32],
         ));
-        let circle_head = arkret_wire::CommitStreamHead {
-            stream_ref: arkret_wire::CommitStreamRef::Circle {
+        let sidecar_head = arkret_wire::CommitStreamHead {
+            stream_ref: arkret_wire::CommitStreamRef::Sidecar {
                 realm_id: a.clone(),
-                circle_id: circle,
+                sidecar_id: sidecar,
             },
             stream_position: 0,
             commit_id: arkret_wire::RealmCommitId::from_digest([10; 32]),
         };
-        // A Circle self-join establishes a new visible stream without moving
+        // A first Sidecar event establishes a new visible stream without moving
         // the already delivered Realm head. The account-visible cut wakes it.
         let (selected, limited) = selected_visible_heads(
-            &[heads[0].clone(), circle_head.clone()],
+            &[heads[0].clone(), sidecar_head.clone()],
             &a,
             &RealmSelection::Default,
         );
@@ -746,7 +746,7 @@ mod tests {
             limited,
             now
         ));
-        // An undisclosed Circle is absent from the account-visible material.
+        // An undisclosed Sidecar is absent from the account-visible material.
         let (selected, limited) = selected_visible_heads(&heads, &a, &RealmSelection::Default);
         assert!(!needs_new_window(
             Some(&progress),
@@ -756,11 +756,11 @@ mod tests {
             now
         ));
         let (selected, limited) = selected_visible_heads(
-            &[heads[0].clone(), circle_head.clone()],
+            &[heads[0].clone(), sidecar_head.clone()],
             &a,
-            &RealmSelection::Explicit(vec![circle_head.stream_ref.clone()]),
+            &RealmSelection::Explicit(vec![sidecar_head.stream_ref.clone()]),
         );
-        assert_eq!(selected, vec![circle_head]);
+        assert_eq!(selected, vec![sidecar_head]);
         assert!(needs_new_window(
             Some(&progress),
             0,

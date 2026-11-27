@@ -68,16 +68,8 @@ impl ProjectionState {
                 reason: reason.to_owned(),
             };
         }
-        // AKP-0007: intra-Realm discussion boundaries are expressed via
-        // `scope_circle_id` (Circle); when present, validate the Circle is in
-        // this Realm and active.
-        if let Some(scope_circle_id) = object.get("scope_circle_id").and_then(Value::as_str)
-            && let Err(reason) =
-                self.validate_scope_circle_id(scope_circle_id, operation.realm_id.as_ref())
-        {
-            return ProjectionEffect::Rejected {
-                reason: reason.to_owned(),
-            };
+        if object.contains_key("scope_circle_id") {
+            return ProjectionEffect::Rejected { reason: arkret_wire::ErrorCode::SCHEMA_VIOLATION.to_owned() };
         }
         if let Err(reason) = strand_position_from_create_payload(object) {
             return ProjectionEffect::Rejected {
@@ -129,11 +121,7 @@ impl ProjectionState {
             created_at: now,
             updated_by: None,
             updated_at: None,
-            scope_circle_id: object
-                .get("scope_circle_id")
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty())
-                .map(ToOwned::to_owned),
+
             schema_refs: strand_schema_refs(object),
             schedule_revision_source: has_calendar_schedule
                 .then(|| operation.context.event_id.event_digest().to_string()),
@@ -340,9 +328,7 @@ impl ProjectionState {
         if let Some((board_space_id, ..)) = position.as_ref()
             && let Err(reason) = self.check_space_child_scope_policy(
                 board_space_id,
-                strand.scope_circle_id.as_deref(),
                 &strand.realm_id,
-                false,
             )
         {
             return ProjectionEffect::Rejected {
@@ -352,9 +338,7 @@ impl ProjectionState {
         if let Some((_, list_space_id, _)) = position.as_ref()
             && let Err(reason) = self.check_space_child_scope_policy(
                 list_space_id,
-                strand.scope_circle_id.as_deref(),
                 &strand.realm_id,
-                false,
             )
         {
             return ProjectionEffect::Rejected {

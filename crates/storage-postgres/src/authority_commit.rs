@@ -6227,6 +6227,18 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         .map_err(PgTransactionError::into_persistence)
     }
 
+    async fn personal_keypackage_claim_allowed(
+        &self,
+        request: &arkret_models_crypto::KeyPackagesClaimRequestBody,
+    ) -> PersistenceResult<Option<bool>> {
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async |conn| {
+            Ok(crate::mls_keypackage_claim_admission::personal_claim(conn, request).await?)
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
+
     async fn sidecar_participant_authority_cut(
         &self,
         realm_id: &arkret_wire::RealmId,
@@ -6594,6 +6606,21 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         crate::issued_realm_snapshots::PgIssuedRealmSnapshotArchive::new(self.pool.clone())
             .by_actor_ref(actor, realm_id, snapshot_id, issuer)
             .await
+    }
+
+    async fn retained_project_history_candidate(
+        &self,
+        realm_id: &arkret_wire::RealmId,
+        account: &arkret_wire::AccountId,
+        snapshot_id: &arkret_wire::RealmSnapshotId,
+    ) -> PersistenceResult<Option<arkret_wire::RealmStateSnapshot>> {
+        crate::issued_realm_snapshots::retained_project_history_candidate(
+            &self.pool,
+            realm_id,
+            account,
+            snapshot_id,
+        )
+        .await
     }
 
     async fn issued_realm_state_snapshot(

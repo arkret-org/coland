@@ -2107,6 +2107,16 @@ impl AuthorityCommitApplication {
             .await?)
     }
 
+    pub async fn personal_keypackage_claim_allowed(
+        &self,
+        request: &arkret_models_crypto::KeyPackagesClaimRequestBody,
+    ) -> ServiceResult<Option<bool>> {
+        Ok(self
+            .store()
+            .personal_keypackage_claim_allowed(request)
+            .await?)
+    }
+
     pub async fn sidecar_participant_authority_cut(
         &self,
         realm_id: &arkret_wire::RealmId,
@@ -2748,6 +2758,18 @@ impl AuthorityCommitApplication {
         Ok(self
             .store()
             .issued_realm_state_snapshot_for_actor(realm_id, actor, snapshot_id, issuer)
+            .await?)
+    }
+
+    pub async fn retained_project_history_candidate(
+        &self,
+        realm_id: &arkret_wire::RealmId,
+        account: &arkret_wire::AccountId,
+        snapshot_id: &arkret_wire::RealmSnapshotId,
+    ) -> ServiceResult<Option<arkret_wire::RealmStateSnapshot>> {
+        Ok(self
+            .store()
+            .retained_project_history_candidate(realm_id, account, snapshot_id)
             .await?)
     }
 

@@ -1089,6 +1089,16 @@ async fn delivery_source_in_connection(
     if direct_delivery_in_connection(conn, realm).await? {
         return Ok(None);
     }
+    if !lock
+        && let Some(pair) =
+            crate::realm_authorization_cut::foreign_project_read_pair(conn, realm, actor, at)
+                .await?
+    {
+        return Ok(Some(arkret_models_collaboration::governance::grant_constraint::IssuerAuthorityRef::OwnedAgent {
+            realm_id: realm.clone(), controller_account_id: pair.controller,
+            controller_join_event_id: pair.controller_commit.event_ref, agent_join_event_id: pair.agent_commit.event_ref,
+        }));
+    }
     crate::realm_authorization_cut::owned_source_in_connection(conn, realm, actor, at, lock).await
 }
 

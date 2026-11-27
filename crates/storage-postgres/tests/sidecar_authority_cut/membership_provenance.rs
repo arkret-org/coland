@@ -1032,16 +1032,21 @@ async fn governing_history_snapshot(
         .map_err(|error| coland_storage::PersistenceError::Internal(error.to_string()))
     };
     let realm = sidecar_realm(pool, join).await;
-    let result = coland_storage_postgres::issue_governing_sidecar_agent_history_for_test(
-        pool,
-        &realm,
-        agent,
-        &principal.history.account.station_id,
-        sidecar,
-        join,
-        &sign,
-    )
-    .await;
+    let store = PgAuthorityCommitStore { pool: pool.clone() };
+    let stream = CommitStreamRef::Sidecar {
+        realm_id: realm.clone(),
+        sidecar_id: sidecar.clone(),
+    };
+    let result = store
+        .issue_stream_history_snapshot_for_account(
+            &realm,
+            agent,
+            &principal.history.account.station_id,
+            &stream,
+            Some(join),
+            &sign,
+        )
+        .await;
     if !matches!(&result, Ok(Some(_))) {
         assert_eq!(
             std::sync::atomic::AtomicUsize::load(&sign_calls, std::sync::atomic::Ordering::Relaxed,),

@@ -1398,17 +1398,6 @@ impl ProjectSnapshotDelivery {
         {
             return Err(unavailable());
         }
-        let archived =
-            crate::routing::realm_state_snapshot::issued_realm_state_snapshot_for_account(
-                &self.state,
-                self.scan.realm_id.as_str(),
-                &self.snapshot.snapshot_id,
-                &self.account,
-            )
-            .await?;
-        if archived != self.snapshot {
-            return Err(unavailable());
-        }
         crate::state::read_foreign_project_page(
             &self.state,
             &self.governor,
@@ -1416,6 +1405,7 @@ impl ProjectSnapshotDelivery {
             &self.secret,
             &query,
             &mut *held,
+            Some(&self.snapshot),
         )
         .await?;
         Ok(held)
@@ -1526,7 +1516,11 @@ async fn hosted_project_scan(
     crate::routing::identity::auth::revalidate_current_read_session(state, session, Some(&secret))
         .await
         .map_err(|cause| {
-            tracing::warn!(%cause, "hosted project history session revalidation failed");
+            tracing::warn!(
+                status = cause.0.as_u16(),
+                code = cause.1,
+                "hosted project history session revalidation failed"
+            );
             denied()
         })?;
     // Check eligibility before accepting a streaming response. Release the cut
@@ -1548,6 +1542,7 @@ async fn hosted_project_scan(
         &secret,
         &initial,
         &mut *preflight,
+        None,
     )
     .await?;
     preflight.discard().await.map_err(|_| denied())?;
@@ -1578,7 +1573,7 @@ async fn hosted_project_scan(
                 .await
                 .map_err(|_| refused())?;
             let page = crate::state::read_foreign_project_page(
-                &state, &governor, &session, &secret, &query, &mut *guard,
+                &state, &governor, &session, &secret, &query, &mut *guard, None,
             )
             .await
             .map_err(|_| refused())?;

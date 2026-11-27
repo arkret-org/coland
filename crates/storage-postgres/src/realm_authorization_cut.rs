@@ -177,6 +177,42 @@ pub(crate) async fn owned_controller_in_connection(
     .await
 }
 
+/// G can prove the two currently accepted project joins. H authenticates the
+/// foreign endpoint before requesting disclosure and again at byte handoff.
+pub(crate) async fn foreign_project_read_pair(
+    conn: &mut AsyncPgConnection,
+    realm: &RealmId,
+    actor: &ActorId,
+    at: chrono::DateTime<chrono::Utc>,
+) -> PersistenceResult<Option<crate::agent_interaction_current_states::GovernedJoinPair>> {
+    let Some(account) = actor.as_account_id() else {
+        return Ok(None);
+    };
+    let role = sql_query("SELECT EXISTS(SELECT 1 FROM realm_authorities a
+        JOIN realm_bootstrap_current_states g ON g.realm_id=a.realm_id AND g.state_family='realm_genesis'
+        WHERE a.realm_id=$1 AND g.value->>'purpose'='collaboration' AND a.service_id=current_device_inventory_station()
+        AND a.service_id<>$2 AND NOT EXISTS(SELECT 1 FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk
+        WHERE c.realm_id=a.realm_id AND c.governance_generation=a.generation AND e.kind='ak.realm.governance_station.change')) AS present")
+        .bind::<Text,_>(realm.as_str()).bind::<Text,_>(account.station_id.as_str())
+        .get_result::<crate::query_rows::ExistsRow>(&mut *conn).await.map_err(PersistenceError::database)?;
+    if !role.present || !is_owned_agent_in_connection(conn, realm, account).await? {
+        return Ok(None);
+    }
+    let pair = crate::agent_interaction_current_states::governed_join_pair(
+        conn, realm, account, at, false, None,
+    )
+    .await?
+    .ok_or_else(|| capability_denied("foreign Agent or controller is no longer joined"))?;
+    if pair.controller.station_id != account.station_id
+        || is_owned_agent_in_connection(conn, realm, &pair.controller).await?
+    {
+        return Err(capability_denied(
+            "foreign Agent has no eligible controller",
+        ));
+    }
+    Ok(Some(pair))
+}
+
 /// Read ownership without admission locks from one repeatable-read snapshot.
 pub(crate) async fn owned_controller_snapshot_in_connection(
     conn: &mut AsyncPgConnection,
@@ -184,6 +220,9 @@ pub(crate) async fn owned_controller_snapshot_in_connection(
     actor: &ActorId,
     at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<Option<ActorId>> {
+    if let Some(pair) = foreign_project_read_pair(conn, realm_id, actor, at).await? {
+        return Ok(Some(ActorId::account(pair.controller)));
+    }
     read_owned_controller_in_connection(conn, realm_id, actor, at, false).await
 }
 

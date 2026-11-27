@@ -276,9 +276,10 @@ async fn sidecar_genesis_reserves_exact_controller_and_current_in_one_commit() {
         arkret_wire::EventKind::SidecarCreate,
         &controller.principal_id,
         serde_json::json!({"source_realm_id": last.event.realm_id}),
-        at + chrono::Duration::seconds(1),
+        create.authority_commit.commit.committed_at + chrono::Duration::seconds(1),
     );
     let second = ordinary_realm::source_pcr_request(&pool, second).await;
+    assert_ne!(second.authority_commit.event.event_id, create.authority_commit.event.event_id);
     let error = uow.commit_event(second.clone()).await.unwrap_err();
     assert_eq!(
         error.conflict_code(),

@@ -18,35 +18,34 @@ mod owner_transfer;
 // Predicates are static SQL. Every exported row must survive the same scoped
 // query after import; unknown tables, columns and out-of-scope rows are rejected.
 const TABLES: &[(&str, &str)] = &[
-    // Event IDs exclude producer_proof. Keep the exact Full source envelopes
-    // once, under the same inventory commitment as their membership bases.
+    // Personal Sidecar inventory stays at the account home Station.
     (
         "canonical_events",
-        "t.realm_id=$1 AND (t.scope_ref->>'kind'='realm_control' OR (t.kind='ak.mls.commit' AND t.state<>'committed' AND EXISTS(SELECT 1 FROM idempotency_keys k WHERE k.source_event_pk=t.pk)) OR (t.state='committed' AND EXISTS(SELECT 1 FROM realm_commits c WHERE c.realm_id=$1 AND c.stream_ref->>'kind'='sidecar' AND c.sidecar_membership_basis IS NOT NULL AND (c.event_pk=t.pk OR c.sidecar_membership_basis->>'controller_join_event_ref'=t.envelope->>'event_id' OR (c.sidecar_membership_basis->'agent_join_event_refs') ? (t.envelope->>'event_id') OR (t.kind='ak.sidecar.create' AND EXISTS(SELECT 1 FROM sidecar_current_states s WHERE s.realm_id=$1 AND s.sidecar_id=c.stream_ref->>'sidecar_id' AND s.create_event_id=t.envelope->>'event_id'))))))",
+        "t.realm_id=$1 AND (t.scope_ref->>'kind'='realm_control' OR (t.scope_ref->>'kind'<>'sidecar' AND t.kind='ak.mls.commit' AND t.state<>'committed' AND EXISTS(SELECT 1 FROM idempotency_keys k WHERE k.source_event_pk=t.pk)))",
     ),
     (
         "idempotency_keys",
-        "EXISTS(SELECT 1 FROM canonical_events e WHERE e.pk=t.source_event_pk AND e.realm_id=$1 AND e.kind='ak.mls.commit')",
+        "EXISTS(SELECT 1 FROM canonical_events e WHERE e.pk=t.source_event_pk AND e.realm_id=$1 AND e.scope_ref->>'kind'<>'sidecar' AND e.kind='ak.mls.commit')",
     ),
     (
         "realm_commits",
-        "t.realm_id=$1 AND (t.stream_ref->>'kind'='realm_control' OR (t.stream_ref->>'kind'='sidecar' AND t.sidecar_membership_basis IS NOT NULL))",
+        "t.realm_id=$1 AND t.stream_ref->>'kind'='realm_control'",
     ),
     (
         "content_originals",
-        "EXISTS(SELECT 1 FROM canonical_events e WHERE e.pk=t.event_pk AND e.realm_id=$1 AND e.state='committed')",
+        "EXISTS(SELECT 1 FROM canonical_events e WHERE e.pk=t.event_pk AND e.realm_id=$1 AND e.scope_ref->>'kind'<>'sidecar' AND e.state='committed')",
     ),
     (
         "content_original_roots",
-        "EXISTS(SELECT 1 FROM content_originals o JOIN canonical_events e ON e.pk=o.event_pk WHERE o.event_id=t.event_id AND e.realm_id=$1 AND e.state='committed')",
+        "EXISTS(SELECT 1 FROM content_originals o JOIN canonical_events e ON e.pk=o.event_pk WHERE o.event_id=t.event_id AND e.realm_id=$1 AND e.scope_ref->>'kind'<>'sidecar' AND e.state='committed')",
     ),
     (
         "content_original_blobs",
-        "EXISTS(SELECT 1 FROM content_originals o JOIN canonical_events e ON e.pk=o.event_pk WHERE o.event_id=t.event_id AND e.realm_id=$1 AND e.state='committed')",
+        "EXISTS(SELECT 1 FROM content_originals o JOIN canonical_events e ON e.pk=o.event_pk WHERE o.event_id=t.event_id AND e.realm_id=$1 AND e.scope_ref->>'kind'<>'sidecar' AND e.state='committed')",
     ),
     (
         "content_key_domains",
-        "EXISTS(SELECT 1 FROM content_originals o JOIN canonical_events e ON e.pk=o.event_pk WHERE o.event_id=t.event_id AND e.realm_id=$1 AND e.state='committed')",
+        "EXISTS(SELECT 1 FROM content_originals o JOIN canonical_events e ON e.pk=o.event_pk WHERE o.event_id=t.event_id AND e.realm_id=$1 AND e.scope_ref->>'kind'<>'sidecar' AND e.state='committed')",
     ),
     (
         "agent_producer_signer_keys",
@@ -293,7 +292,6 @@ async fn state(conn: &mut AsyncPgConnection, realm: &RealmId) -> PersistenceResu
         .await
         .map_err(PersistenceError::database)?;
 
-    crate::sidecar_membership_provenance::validate_archive(conn, realm).await?;
     crate::realm_claim_source::validate_archive(conn, realm).await?;
     validate_blob_uploads(conn, realm).await?;
     crate::realm_actor_content_backup::validate_archived_namespaces(conn, realm).await?;
@@ -374,8 +372,6 @@ async fn state(conn: &mut AsyncPgConnection, realm: &RealmId) -> PersistenceResu
                 validate_mls_retry_source(conn, realm, &value).await?;
             }
             if *table == "canonical_events" {
-                let membership_source =
-                    value["state"] == "committed" && value["scope_ref"]["kind"] != "realm_control";
                 let object = value
                     .as_object_mut()
                     .ok_or_else(|| invalid("invalid Event row"))?;
@@ -383,10 +379,6 @@ async fn state(conn: &mut AsyncPgConnection, realm: &RealmId) -> PersistenceResu
                 // The local surrogate is recovered from the already installed
                 // canonical Realm. It is not part of the portable identity.
                 object.remove("realm_pk");
-                if membership_source {
-                    // The complete original is portable; local receive time is not.
-                    object.remove("received_at");
-                }
             }
             if matches!(
                 *table,
@@ -688,18 +680,9 @@ impl PgAuthorityCommitStore {
                         return Err(invalid("SQL null inventory names an unknown column").into());
                     }
                     let object=row.as_object().ok_or_else(|| invalid("private row is not an object"))?;
-                    let local_receipt=*table=="canonical_events" && row["state"]=="committed" && row["scope_ref"]["kind"]!="realm_control";
-                    let mut names=columns.names.as_array().ok_or_else(|| invalid("column inventory unavailable"))?.clone();
-                    if local_receipt { names.retain(|name|name.as_str()!=Some("received_at")); }
+                    let names=columns.names.as_array().ok_or_else(|| invalid("column inventory unavailable"))?;
                     if object.len()!=names.len() || names.iter().any(|name|name.as_str().is_none_or(|name|!object.contains_key(name))) {
                         return Err(invalid("unknown or missing private row column").into());
-                    }
-                    if *table=="realm_commits" && row["stream_ref"]["kind"]=="sidecar" {
-                        if null_names.contains(&json!("sidecar_membership_basis")) {
-                            return Err(invalid("Sidecar MLS inventory lacks its accepted membership basis").into());
-                        }
-                        crate::sidecar_membership_provenance::import_basis(conn, &manifest.realm_id, &row).await?;
-                        continue;
                     }
                     let projection=names.iter().map(|name| {
                         let key=name.as_str().expect("database column name");
@@ -708,9 +691,7 @@ impl PgAuthorityCommitStore {
                             else { format!("$1->'{key}' AS \"{key}\"") }
                         } else {format!("r.\"{key}\"")}
                     }).collect::<Vec<_>>().join(",");
-                    let insert_columns=if local_receipt {
-                        names.iter().map(|name|format!("\"{}\"",name.as_str().expect("database column name"))).collect::<Vec<_>>().join(",")
-                    } else { columns.columns.clone() };
+                    let insert_columns=&columns.columns;
                     let query=format!("INSERT INTO {table} ({insert_columns}) SELECT {projection} FROM jsonb_populate_record(NULL::{table},$1) r ON CONFLICT DO NOTHING");
                     sql_query(query).bind::<Jsonb,_>(&row).execute(&mut *conn).await?;
                 }

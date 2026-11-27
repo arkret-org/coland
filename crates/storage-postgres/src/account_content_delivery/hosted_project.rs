@@ -15,10 +15,7 @@ fn denied() -> PersistenceError {
     PersistenceError::Conflict("capability_denied: hosted Agent history is unavailable".into())
 }
 
-use crate::account_stream_scan::owned_agent::ProjectReadAuthority;
-
 struct HostedRead {
-    authority: ProjectReadAuthority,
     held: Box<DeliveryGuard>,
     query: OwnedAgentStreamScanRequestBody,
     generation: u64,
@@ -37,6 +34,9 @@ pub(crate) async fn prepare(
     OwnedAgentStreamScanRequestBody,
     Box<dyn HostedAgentHistoryRead>,
 )> {
+    let missing = |source: &str| {
+        PersistenceError::Conflict(format!("capability_denied: project history lacks {source}"))
+    };
     let realm = &scan.realm_id;
     if !matches!(
         scan.stream_ref,
@@ -45,14 +45,19 @@ pub(crate) async fn prepare(
     {
         return Err(denied());
     }
-    let endpoint = input.agent_endpoint.as_ref().ok_or_else(denied)?;
+    let endpoint = input
+        .agent_endpoint
+        .as_ref()
+        .ok_or_else(|| missing("an authenticated Agent endpoint"))?;
     let owner = &input
         .qualified_agent_scope_evidence
         .as_ref()
-        .ok_or_else(denied)?
+        .ok_or_else(|| missing("the credential owner binding"))?
         .accepted_binding()
         .controller_account;
-    let expiry = input.credential_expires_at.ok_or_else(denied)?;
+    let expiry = input
+        .credential_expires_at
+        .ok_or_else(|| missing("the credential deadline"))?;
     if &account.station_id != station || &owner.station_id != station || account == owner {
         return Err(denied());
     }
@@ -78,7 +83,7 @@ pub(crate) async fn prepare(
         AND NOT EXISTS(SELECT 1 FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk
             WHERE c.realm_id=a.realm_id AND c.governance_generation=a.generation AND e.kind='ak.realm.governance_station.change')")
         .bind::<Text,_>(realm.as_str()).bind::<Text,_>(station.as_str()).get_result::<Tenure>(held.connection())
-        .await.optional().map_err(PersistenceError::database)?.ok_or_else(denied)?;
+        .await.optional().map_err(PersistenceError::database)?.ok_or_else(|| missing("the current foreign governing tenure"))?;
     let pair = crate::agent_interaction_current_states::governed_join_pair(
         held.connection(),
         realm,
@@ -89,7 +94,7 @@ pub(crate) async fn prepare(
     )
     .await?
     .filter(|p| &p.controller == owner)
-    .ok_or_else(denied)?;
+    .ok_or_else(|| missing("the current Agent and controller joins"))?;
     crate::agent_interaction_current_states::owned_provenance_in_connection(
         held.connection(),
         account,
@@ -98,7 +103,7 @@ pub(crate) async fn prepare(
         true,
     )
     .await?
-    .ok_or_else(denied)?;
+    .ok_or_else(|| missing("active ownership provenance"))?;
     validate_private_delivery_credentials(
         &mut held,
         account,
@@ -135,7 +140,9 @@ pub(crate) async fn prepare(
         .accountability
         .push(values);
     if !held.permits_handoff() {
-        return Err(denied());
+        return Err(missing(
+            "an effective delivery credential and accountability scope",
+        ));
     }
     let request_digest = arkret_wire::Hash::new(
         arkret_canonical::canonical_sha256(scan).map_err(PersistenceError::database)?,
@@ -162,13 +169,12 @@ pub(crate) async fn prepare(
     query
         .validate_binding()
         .map_err(PersistenceError::database)?;
-    let authority = ProjectReadAuthority::load(held.connection(), &query, &pair, station).await?;
-    authority.check()?;
+    // G applies the project grant and management policies at the signed history read.
+    // H retains the native credential, ownership, membership generation and resource ceilings.
     Ok((
         query.clone(),
         Box::new(HostedRead {
             held,
-            authority,
             query,
             generation: u64::try_from(tenure.generation).map_err(PersistenceError::database)?,
             accepted_floor: None,
@@ -179,14 +185,74 @@ pub(crate) async fn prepare(
 
 #[async_trait::async_trait]
 impl HostedAgentHistoryRead for HostedRead {
+    async fn qualify_archived_history(
+        &mut self,
+        snapshot: &RealmStateSnapshot,
+    ) -> PersistenceResult<()> {
+        let account = &self.query.member_account_id;
+        let conn = self.held.connection();
+        let present = sql_query("SELECT EXISTS(SELECT 1 FROM realm_state_snapshots s JOIN realm_state_snapshot_issuances i USING(snapshot_id)
+            WHERE s.snapshot_id=$1 AND s.realm_id=$2 AND i.account_id=$3 AND s.snapshot_json=$4) AS present")
+            .bind::<Text,_>(snapshot.snapshot_id.as_str()).bind::<Text,_>(snapshot.realm_id.as_str())
+            .bind::<Text,_>(account.canonical_key().map_err(PersistenceError::database)?)
+            .bind::<Jsonb,_>(serde_json::json!(snapshot)).get_result::<crate::query_rows::ExistsRow>(conn).await.map_err(PersistenceError::database)?;
+        if !present.present {
+            return Err(denied());
+        }
+        let clock = self.held.clock.as_ref().ok_or_else(denied)?;
+        let restricted = !clock.key_scope.constraints.is_empty()
+            || !clock.provision_scope.constraints.is_empty()
+            || clock.session_scope.as_ref().is_some_and(|(_, session)| {
+                !session.strand_ids.is_empty()
+                    || !session.resources.strand_ids.is_empty()
+                    || !session.constraints.allowed_tracks.is_empty()
+                    || !session.constraints.allowed_data_labels.is_empty()
+                    || session.constraints.allowed_strand_ids.is_some()
+            });
+        if restricted {
+            let realm = &snapshot.realm_id;
+            let actor = ActorId::account(account.clone());
+            let cut = crate::realm_authorization_cut::RealmAuthorizationCut::read_accepted(
+                self.held.connection(),
+                realm,
+                &actor,
+            )
+            .await?;
+            for row in &snapshot.current_state_entries {
+                let arkret_wire::CurrentState::Value {
+                    source_stream_ref,
+                    revision,
+                    ..
+                } = row;
+                let event = super::current_source_in_connection(
+                    self.held.connection(),
+                    realm,
+                    source_stream_ref,
+                    revision,
+                )
+                .await?;
+                let (target, facts) =
+                    cut.content_scope_facts(&event, CapabilityActionId::EventRead)?;
+                self.held
+                    .clock
+                    .as_mut()
+                    .ok_or_else(denied)?
+                    .scope_operations
+                    .push((actor.clone(), target, facts, CapabilityActionId::EventRead));
+            }
+        }
+        if !self.held.permits_handoff() {
+            return Err(denied());
+        }
+        Ok(())
+    }
+
     async fn discard(self: Box<Self>) -> PersistenceResult<()> {
         self.held.finish().await
     }
 
     async fn permits_request(&mut self) -> bool {
-        self.held.probe().await.is_ok()
-            && self.held.permits_handoff()
-            && self.authority.check().is_ok()
+        self.held.probe().await.is_ok() && self.held.permits_handoff()
     }
     async fn accept_history(&mut self, snapshot: &RealmStateSnapshot) -> PersistenceResult<()> {
         let scan = &self.query.scan;
@@ -219,27 +285,34 @@ impl HostedAgentHistoryRead for HostedRead {
             .ok_or_else(denied)?
             .oldest_position;
         let conn = self.held.connection();
-        let mut known = crate::authority_commit::realm_state_snapshot_material_in_connection(
-            conn,
-            &scan.realm_id,
-        )
-        .await?
-        .ok_or_else(denied)?;
-        // All covered heads and their cut must already be on H's legitimately retained replica.
-        if snapshot
-            .visible_stream_heads
-            .iter()
-            .any(|h| !known.visible_stream_heads.contains(h))
-        {
-            return Err(denied());
+        // G attests the complete disclosure at this cut. H verifies only the
+        // covered streams, its own membership, and the originals it retained.
+        for covered in &snapshot.visible_stream_heads {
+            let exact = sql_query("SELECT EXISTS(SELECT 1 FROM (
+                SELECT commit_id,stream_position FROM realm_commits WHERE realm_id=$1 AND stream_ref=$2
+                ORDER BY stream_position DESC LIMIT 1) h WHERE h.commit_id=$3 AND h.stream_position=$4) AS present")
+                .bind::<Text,_>(scan.realm_id.as_str()).bind::<Jsonb,_>(serde_json::json!(covered.stream_ref))
+                .bind::<Text,_>(covered.commit_id.as_str()).bind::<BigInt,_>(i64::try_from(covered.stream_position).map_err(PersistenceError::database)?)
+                .get_result::<crate::query_rows::ExistsRow>(&mut *conn).await.map_err(PersistenceError::database)?;
+            if !exact.present {
+                return Err(PersistenceError::Conflict(
+                    "project history head differs from the covered local stream".into(),
+                ));
+            }
         }
-        let parent_floor = crate::account_stream_scan::snapshot_realm_floor_in_connection(
-            conn,
-            &scan.realm_id,
-            &ActorId::account(account.clone()),
-        )
-        .await?
-        .ok_or_else(denied)?;
+        let mut parent_floor = 0;
+        for subject in [account, &self.query.content_intent.controller_account_id] {
+            let covered = crate::account_stream_scan::hosted_project_member_floor(
+                conn,
+                &scan.realm_id,
+                &ActorId::account(subject.clone()),
+            )
+            .await?
+            .ok_or_else(|| {
+                PersistenceError::Conflict("project member history floor is unavailable".into())
+            })?;
+            parent_floor = parent_floor.max(covered.oldest_position);
+        }
         if !snapshot
             .retention_and_history_floor
             .stream_floors
@@ -249,7 +322,7 @@ impl HostedAgentHistoryRead for HostedRead {
                     == (CommitStreamRef::Realm {
                         realm_id: scan.realm_id.clone(),
                     })
-                    && f.oldest_position == parent_floor.oldest_position
+                    && f.oldest_position == parent_floor
             })
         {
             return Err(denied());
@@ -282,22 +355,31 @@ impl HostedAgentHistoryRead for HostedRead {
             .bind::<BigInt,_>(i64::try_from(head.stream_position).map_err(PersistenceError::database)?)
             .bind::<Text,_>(head.commit_id.as_str()).get_result::<Floor>(&mut *conn).await.optional()
             .map_err(PersistenceError::database)?.ok_or_else(denied)?;
-        // Only G supplies the two per-member floors. Their exact originals and chain were checked
-        // above.
-        for f in &mut known.retention_and_history_floor.stream_floors {
-            if let Some(verified) = snapshot
-                .retention_and_history_floor
-                .stream_floors
-                .iter()
-                .find(|v| v.stream_ref == f.stream_ref)
-            {
-                if verified.oldest_position < f.oldest_position {
-                    return Err(denied());
-                }
-                f.oldest_position = verified.oldest_position;
+        let held_rows = crate::replica_authorization::snapshot_current_evidence(
+            conn,
+            &scan.realm_id,
+            &snapshot.visible_stream_heads,
+        )
+        .await?;
+        for signed in &snapshot.current_state_entries {
+            let arkret_wire::CurrentState::Value {
+                selector, revision, ..
+            } = signed;
+            if held_rows.iter().any(|known| {
+                let arkret_wire::CurrentState::Value {
+                    selector: old,
+                    revision: observed,
+                    ..
+                } = known;
+                old == selector
+                    && observed.stream_position >= revision.stream_position
+                    && known != signed
+            }) {
+                return Err(PersistenceError::Conflict(
+                    "project history conflicts with an observed current revision".into(),
+                ));
             }
         }
-        crate::issued_realm_snapshots::require_observed_cut(snapshot, &known, &known)?;
         crate::replica_authorization::guard_current_rows(
             conn,
             &scan.realm_id,
@@ -346,7 +428,7 @@ impl HostedAgentHistoryRead for HostedRead {
             return Err(denied());
         }
         let actor = ActorId::account(self.query.member_account_id.clone());
-        let cut = crate::realm_authorization_cut::RealmAuthorizationCut::read(
+        let cut = crate::realm_authorization_cut::RealmAuthorizationCut::read_accepted(
             self.held.connection(),
             &self.query.scan.realm_id,
             &actor,
@@ -367,6 +449,9 @@ impl HostedAgentHistoryRead for HostedRead {
                 return Err(denied());
             }
             if let Some(event) = item.reducer_input() {
+                if event.scope_ref != self.query.content_intent.effective_scope {
+                    return Err(denied());
+                }
                 event
                     .verify_event_id_matches_content_with_digest_suite(
                         event.realm_id.digest_suite_code().digest_suite(),
@@ -385,7 +470,6 @@ impl HostedAgentHistoryRead for HostedRead {
         if !self.held.permits_handoff() {
             return Err(denied());
         }
-        self.authority.add_page(page)?;
         self.checked_page = true;
         Ok(())
     }

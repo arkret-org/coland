@@ -1815,6 +1815,10 @@ pub trait AccountContentDeliveryGuard: Send {
 /// governing signature and authority bundle before presenting the narrow snapshot.
 #[async_trait]
 pub trait HostedAgentHistoryRead: AccountContentDeliveryGuard {
+    async fn qualify_archived_history(
+        &mut self,
+        snapshot: &arkret_wire::RealmStateSnapshot,
+    ) -> PersistenceResult<()>;
     async fn permits_request(&mut self) -> bool;
     async fn discard(self: Box<Self>) -> PersistenceResult<()>;
     async fn accept_history(
@@ -3137,6 +3141,17 @@ pub trait AuthorityCommitStore: Send + Sync {
         ))
     }
 
+    /// A Human PCR permits MLS claims only for its owner's exact personal group.
+    /// None denotes an ordinary Realm whose own membership policy applies.
+    async fn personal_keypackage_claim_allowed(
+        &self,
+        _request: &arkret_models_crypto::KeyPackagesClaimRequestBody,
+    ) -> PersistenceResult<Option<bool>> {
+        Err(crate::PersistenceError::Internal(
+            "personal claim authority unavailable".into(),
+        ))
+    }
+
     /// Derive native Sidecar participants from one accepted durable cut.
     async fn sidecar_participant_authority_cut(
         &self,
@@ -3151,8 +3166,7 @@ pub trait AuthorityCommitStore: Send + Sync {
         ))
     }
 
-    /// H's exact-original native authoring decision. This is independent of
-    /// G's RFC transition, membership basis and governing acceptance cut.
+    /// H's exact-original native authoring decision for this private group.
     async fn sidecar_mls_authoring_is_current(
         &self,
         _event: &arkret_wire::Event,
@@ -3487,6 +3501,18 @@ pub trait AuthorityCommitStore: Send + Sync {
         Err(PersistenceError::Internal(
             "Actor read port is not configured".into(),
         ))
+    }
+
+    /// Load an account-bound foreign history candidate solely for a live G/H
+    /// disclosure check. Its presence does not authorize delivery.
+    async fn retained_project_history_candidate(
+        &self,
+        realm_id: &arkret_wire::RealmId,
+        account: &arkret_wire::AccountId,
+        snapshot_id: &arkret_wire::RealmSnapshotId,
+    ) -> PersistenceResult<Option<RealmStateSnapshot>> {
+        let _ = (realm_id, account, snapshot_id);
+        Ok(None)
     }
 
     async fn issued_realm_state_snapshot(

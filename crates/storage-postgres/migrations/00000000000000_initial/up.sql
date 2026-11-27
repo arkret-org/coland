@@ -1199,9 +1199,9 @@ CREATE TABLE public.realm_commits (
         sidecar_membership_basis IS NULL OR (
             stream_ref->>'kind'='sidecar' AND event_pk IS NOT NULL
             AND jsonb_typeof(sidecar_membership_basis)='object'
-            AND sidecar_membership_basis ?& ARRAY['controller_join_event_ref','agent_join_event_refs']
-            AND sidecar_membership_basis - ARRAY['controller_join_event_ref','agent_join_event_refs']='{}'::jsonb
-            AND jsonb_typeof(sidecar_membership_basis->'controller_join_event_ref')='string'
+            AND sidecar_membership_basis ?& ARRAY['controller_create_event_ref','agent_join_event_refs']
+            AND sidecar_membership_basis - ARRAY['controller_create_event_ref','agent_join_event_refs']='{}'::jsonb
+            AND jsonb_typeof(sidecar_membership_basis->'controller_create_event_ref')='string'
             AND jsonb_typeof(sidecar_membership_basis->'agent_join_event_refs')='array'
         )
     ),

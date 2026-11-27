@@ -644,6 +644,25 @@ pub(crate) async fn member_realm_floor_in_connection(
 
 /// Snapshot disclosure uses the same proven interval as the Account scan.
 /// A since-join replica need not hold the prefix preceding its opening join.
+/// The two local membership originals bound the hosted read. Only the project
+/// governor evaluates its management policies when disclosing the signed floor.
+pub(crate) async fn hosted_project_member_floor(
+    conn: &mut AsyncPgConnection,
+    realm: &arkret_wire::RealmId,
+    actor: &ActorId,
+) -> PersistenceResult<Option<ReadableFloor>> {
+    if held_genesis_floor_in_connection(conn, realm)
+        .await?
+        .is_some()
+    {
+        member_realm_floor_in_connection(conn, realm, actor).await
+    } else {
+        Ok(replica_realm_floor_in_connection(conn, realm, actor)
+            .await?
+            .ok())
+    }
+}
+
 pub(crate) async fn snapshot_realm_floor_in_connection(
     conn: &mut AsyncPgConnection,
     realm_id: &arkret_wire::RealmId,

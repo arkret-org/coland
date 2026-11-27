@@ -40,7 +40,7 @@ impl MembershipBasis {
                 .any(|pair| pair[0].as_str().as_bytes() >= pair[1].as_str().as_bytes())
         {
             return Err(invalid(
-                "Agent join references are duplicated, not canonically ordered or name the controller join",
+                "Agent join references are duplicated, not canonically ordered or name the controller create",
             ));
         }
         Ok(())
@@ -561,7 +561,7 @@ pub(crate) async fn agent_floor_in_connection(
     if actor.as_account_id() == Some(&controller) {
         return Ok(None);
     }
-    let Some(controller_join) = controller_creation(
+    let Some(controller_create) = controller_creation(
         conn,
         realm,
         sidecar,
@@ -599,7 +599,7 @@ pub(crate) async fn agent_floor_in_connection(
         })
         .map_err(invalid)?,
     )
-    .bind::<Text, _>(controller_join.event.event_id.as_str())
+    .bind::<Text, _>(controller_create.event.event_id.as_str())
     .bind::<Jsonb, _>(serde_json::json!([agent.event.event_id]))
     .get_result::<OriginalRow>(&mut *conn)
     .await
@@ -614,10 +614,10 @@ pub(crate) async fn agent_floor_in_connection(
             sidecar,
             &controller,
             &basis,
-            &[&controller_join, &agent],
+            &[&controller_create, &agent],
         )
         .await?;
-        if basis.controller_create_event_ref == controller_join.event.event_id
+        if basis.controller_create_event_ref == controller_create.event.event_id
             && agents.get(actor).map(|source| &source.event.event_id) == Some(&agent.event.event_id)
         {
             return Ok(Some(ReadableFloor {
@@ -632,111 +632,6 @@ pub(crate) async fn agent_floor_in_connection(
         }
     }
     Ok(None)
-}
-
-/// The private archive commits this column with its existing canonical inventory.
-pub(crate) async fn validate_archive(
-    conn: &mut AsyncPgConnection,
-    realm: &RealmId,
-) -> PersistenceResult<()> {
-    let rows = sql_query(
-        "SELECT e.envelope AS event,c.commit_json AS commit,c.sidecar_membership_basis AS basis \
-        FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk \
-        WHERE c.realm_id=$1 AND c.stream_ref->>'kind'='sidecar' AND e.state='committed' \
-          AND e.kind IN ('ak.mls.genesis','ak.mls.commit') ORDER BY c.stream_key,c.stream_position",
-    )
-    .bind::<Text, _>(realm.as_str())
-    .load::<OriginalRow>(&mut *conn)
-    .await
-    .map_err(PersistenceError::database)?;
-    for row in rows {
-        let source = full(realm, &row)?;
-        let ScopeRef::Sidecar { sidecar_id, .. } = &source.event.scope_ref else {
-            return Err(invalid("MLS source has another scope"));
-        };
-        let controller = controller_in_connection(conn, realm, sidecar_id)
-            .await?
-            .ok_or_else(|| invalid("archived Sidecar lacks its Create"))?;
-        let basis = state_basis(&source, row.basis.as_ref(), &source.event.scope_ref)?;
-        resolve_basis(conn, realm, sidecar_id, &controller, &basis, &[]).await?;
-    }
-    Ok(())
-}
-
-/// Attach only an explicit exported original, never today's membership reconstruction.
-pub(crate) async fn import_basis(
-    conn: &mut AsyncPgConnection,
-    realm: &RealmId,
-    row: &Value,
-) -> PersistenceResult<()> {
-    let commit: arkret_wire::RealmCommit =
-        serde_json::from_value(row["commit_json"].clone()).map_err(invalid)?;
-    let basis: MembershipBasis =
-        serde_json::from_value(row["sidecar_membership_basis"].clone()).map_err(invalid)?;
-    let installed = original(conn, realm, &commit.event_ref).await?;
-    let source = full(realm, &installed)?;
-    let ScopeRef::Sidecar { sidecar_id, .. } = &source.event.scope_ref else {
-        return Err(invalid("imported basis is not Sidecar"));
-    };
-    if source.commit.commit_id != commit.commit_id
-        || installed.commit != row["commit_json"]
-        || !matches!(
-            source.event.kind,
-            EventKind::MlsGenesis | EventKind::MlsCommit
-        )
-    {
-        return Err(invalid(
-            "import requires the exact already installed Event and wire Commit",
-        ));
-    }
-    let actual = sql_query(
-        "SELECT to_jsonb(c) AS payload FROM realm_commits c WHERE commit_id=$1 FOR UPDATE",
-    )
-    .bind::<Text, _>(commit.commit_id.as_str())
-    .get_result::<crate::JsonPayloadRow>(&mut *conn)
-    .await
-    .map_err(PersistenceError::database)?;
-    let mut actual = actual.payload;
-    let mut supplied = row.clone();
-    let actual_time: chrono::DateTime<chrono::Utc> =
-        serde_json::from_value(actual["committed_at"].clone()).map_err(invalid)?;
-    let supplied_time: chrono::DateTime<chrono::Utc> =
-        serde_json::from_value(supplied["committed_at"].clone()).map_err(invalid)?;
-    if actual_time != supplied_time {
-        return Err(invalid(
-            "membership inventory changes the original commit time",
-        ));
-    }
-    actual
-        .as_object_mut()
-        .ok_or_else(|| invalid("stored Commit row is not an object"))?
-        .remove("committed_at");
-    supplied
-        .as_object_mut()
-        .ok_or_else(|| invalid("imported Commit row is not an object"))?
-        .remove("committed_at");
-    actual
-        .as_object_mut()
-        .ok_or_else(|| invalid("stored Commit row is not an object"))?
-        .remove("sidecar_membership_basis");
-    supplied
-        .as_object_mut()
-        .ok_or_else(|| invalid("imported Commit row is not an object"))?
-        .remove("sidecar_membership_basis");
-    if actual != supplied {
-        return Err(invalid(
-            "membership inventory changes the installed Commit coordinates",
-        ));
-    }
-    let controller = controller_in_connection(conn, realm, sidecar_id)
-        .await?
-        .ok_or_else(|| invalid("imported basis lacks its accepted Create"))?;
-    resolve_basis(conn, realm, sidecar_id, &controller, &basis, &[]).await?;
-    match installed.basis {
-        None => attach(conn, &commit.commit_id, &row["sidecar_membership_basis"]).await,
-        Some(existing) if existing == row["sidecar_membership_basis"] => Ok(()),
-        Some(_) => Err(invalid("import changes an already frozen membership basis")),
-    }
 }
 
 #[cfg(test)]

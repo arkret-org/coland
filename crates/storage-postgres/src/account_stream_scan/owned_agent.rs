@@ -24,7 +24,7 @@ struct GoverningDelivery {
     authority: ProjectReadAuthority,
 }
 
-pub(crate) struct ProjectReadAuthority {
+struct ProjectReadAuthority {
     request: OwnedAgentStreamScanRequestBody,
     agent: RealmAuthorizationCut,
     controller: RealmAuthorizationCut,
@@ -35,11 +35,10 @@ pub(crate) struct ProjectReadAuthority {
 }
 
 impl ProjectReadAuthority {
-    pub(crate) async fn load(
+    async fn load(
         conn: &mut crate::AsyncPgConnection,
         request: &OwnedAgentStreamScanRequestBody,
         pair: &crate::agent_interaction_current_states::GovernedJoinPair,
-        local_station: &DidCoreId,
     ) -> PersistenceResult<Self> {
         let realm = &request.scan.realm_id;
         if !matches!(
@@ -50,18 +49,8 @@ impl ProjectReadAuthority {
         }
         let agent_actor = ActorId::account(request.member_account_id.clone());
         let controller_actor = ActorId::account(pair.controller.clone());
-        let (agent, controller) = if local_station == &request.member_account_id.station_id {
-            // H has the verified replica of G's grant/policy cut.
-            (
-                RealmAuthorizationCut::read_accepted(conn, realm, &agent_actor).await?,
-                RealmAuthorizationCut::read_accepted(conn, realm, &controller_actor).await?,
-            )
-        } else {
-            (
-                RealmAuthorizationCut::read(conn, realm, &agent_actor).await?,
-                RealmAuthorizationCut::read(conn, realm, &controller_actor).await?,
-            )
-        };
+        let agent = RealmAuthorizationCut::read(conn, realm, &agent_actor).await?;
+        let controller = RealmAuthorizationCut::read(conn, realm, &controller_actor).await?;
         let source = IssuerAuthorityRef::OwnedAgent {
             realm_id: realm.clone(),
             controller_account_id: pair.controller.clone(),
@@ -85,7 +74,7 @@ impl ProjectReadAuthority {
         })
     }
 
-    pub(crate) fn add_page(&mut self, page: &StreamScanResponseBody) -> PersistenceResult<()> {
+    fn add_page(&mut self, page: &StreamScanResponseBody) -> PersistenceResult<()> {
         for event in page
             .committed_events
             .iter()
@@ -111,7 +100,7 @@ impl ProjectReadAuthority {
         Ok(())
     }
 
-    pub(crate) fn check(&self) -> PersistenceResult<()> {
+    fn check(&self) -> PersistenceResult<()> {
         let now = chrono::Utc::now();
         let intent = &self.request.content_intent;
         let action = CapabilityActionId::EventRead;
@@ -284,7 +273,7 @@ pub(crate) async fn acquire(
     }
     page.validate_for_request(&request.scan)
         .map_err(PersistenceError::database)?;
-    let mut authority = ProjectReadAuthority::load(conn, request, &pair, governor).await?;
+    let mut authority = ProjectReadAuthority::load(conn, request, &pair).await?;
     authority.add_page(&page)?;
     let guard = GoverningDelivery { held, authority };
     Ok((page, Box::new(guard)))

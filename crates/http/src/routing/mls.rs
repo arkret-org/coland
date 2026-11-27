@@ -1233,7 +1233,8 @@ async fn claim_keypackage_at_destination_with_room(
             &arkret_wire::DidCoreId::new(target_principal_id.to_owned())
                 .map_err(|_| peer_claim_schema_violation("claim target identity is invalid"))?,
             &target_device_ids,
-            Some(body.intended_realm_id.as_str()),
+            (!matches!(body.effective_scope, arkret_wire::ScopeRef::Sidecar { .. }))
+                .then_some(body.intended_realm_id.as_str()),
         )
         .await
         .map_err(|_| peer_claim_failed())?
@@ -2031,6 +2032,16 @@ async fn peer_claim_policy_authorized(
     if !target_authority_current {
         return Ok(policy_refused("target_authority_not_current"));
     }
+    if let Some(allowed) = state
+        .authority_commits()
+        .personal_keypackage_claim_allowed(body)
+        .await
+        .map_err(|cause| {
+            AppError::internal(format!("private KeyPackage claim authority: {cause}"))
+        })?
+    {
+        return Ok(allowed);
+    }
     match body.claim_purpose {
         PeerKeyPackageClaimPurpose::RealmMembership => {
             // device-lifecycle §9.2.1 / §9.2.2: the requester and the target
@@ -2540,7 +2551,18 @@ async fn claim_keypackage_session(
         return replay_peer_claim(existing, &request_digest);
     }
     validate_peer_claim_time_window(&peer_body)?;
-    if body.claim_purpose == PeerKeyPackageClaimPurpose::RealmMembership
+    let personal = state
+        .authority_commits()
+        .personal_keypackage_claim_allowed(&body)
+        .await
+        .map_err(|cause| {
+            AppError::internal(format!("private KeyPackage claim authority: {cause}"))
+        })?;
+    if personal == Some(false) {
+        return Err(peer_claim_failed());
+    }
+    if personal.is_none()
+        && body.claim_purpose == PeerKeyPackageClaimPurpose::RealmMembership
         && !state
             .authority_commits()
             .accepted_current_member_joined(&body.intended_realm_id, &session_actor)

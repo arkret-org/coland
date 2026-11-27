@@ -625,6 +625,32 @@ pub(super) async fn realm_state_snapshot_by_ref(
     let actor =
         crate::routing::identity::session_actor::validated_session_actor(state, &session).await?;
     let account = actor.as_account_id().ok_or_else(denied)?;
+    let project_realm = arkret_wire::RealmId::new(realm_id.clone())
+        .map_err(|_| coland_http::error::AppError::param_invalid("invalid realm_id"))?;
+    if session.agent_session().is_some()
+        && let Some(authority) = state
+            .authority_commits()
+            .current_authority(&project_realm)
+            .await
+            .map_err(|_| denied())?
+        && authority.service_id != state.service_core_id()
+        && let Some(snapshot) = state
+            .authority_commits()
+            .retained_project_history_candidate(&project_realm, account, &snapshot_id)
+            .await
+            .map_err(|_| denied())?
+    {
+        let guard = crate::routing::authority_commit::project_snapshot_guard(
+            state,
+            &session,
+            account,
+            authority.service_id,
+            req,
+            &snapshot,
+        )
+        .await?;
+        return coland_http::result::guarded_json_ok(snapshot, Some(guard));
+    }
     if is_realm_deleted(state, &realm_id).await
         || !crate::routing::realm_state_snapshot::account_is_joined_member(
             state, &realm_id, account,
@@ -640,26 +666,6 @@ pub(super) async fn realm_state_snapshot_by_ref(
         account,
     )
     .await?;
-    if session.agent_session().is_some()
-        && snapshot.history_basis.is_some()
-        && let Some(authority) = state
-            .authority_commits()
-            .current_authority(&snapshot.realm_id)
-            .await
-            .map_err(|_| denied())?
-        && authority.service_id != state.service_core_id()
-    {
-        let guard = crate::routing::authority_commit::project_snapshot_guard(
-            state,
-            &session,
-            account,
-            authority.service_id,
-            req,
-            &snapshot,
-        )
-        .await?;
-        return coland_http::result::guarded_json_ok(snapshot, Some(guard));
-    }
     let input = coland_storage::AccountContentDeliveryInput::snapshot(&snapshot);
     let guard = super::content_delivery_guard(state, &session, &input).await?;
     coland_http::result::guarded_json_ok(snapshot, guard)

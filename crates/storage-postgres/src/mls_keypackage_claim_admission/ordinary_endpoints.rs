@@ -80,6 +80,11 @@ pub(super) async fn require_current(
     for endpoint in &counterparts {
         crate::boxed_future(|| endpoint.require_current(conn)).await?;
     }
+    if super::personal_claim(conn, request).await? == Some(false) {
+        return Err(super::denied(
+            "personal group or Agent enrollment changed before allocation",
+        ));
+    }
     if request.service_binding.source_id == station {
         crate::mls_keypackage_claim_endpoints::require_local_requester_signature(conn, request)
             .await?;

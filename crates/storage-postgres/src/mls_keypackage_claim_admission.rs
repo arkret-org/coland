@@ -6,6 +6,65 @@ use super::*;
 
 mod ordinary_endpoints;
 
+pub(crate) async fn personal_claim(
+    conn: &mut AsyncPgConnection,
+    request: &arkret_models_crypto::KeyPackagesClaimRequestBody,
+) -> PersistenceResult<Option<bool>> {
+    let ScopeRef::Sidecar {
+        realm_id: realm,
+        sidecar_id,
+    } = &request.effective_scope
+    else {
+        return Ok(None);
+    };
+    if realm != &request.intended_realm_id
+        || request
+            .effective_scope
+            .canonical_mls_group_id()
+            .map_err(denied)?
+            != request.mls_group_id
+    {
+        return Ok(Some(false));
+    }
+    let Some(owner) = &request.requester_account_id else {
+        return Ok(Some(false));
+    };
+    if request.claim_purpose != PeerKeyPackageClaimPurpose::RealmMembership
+        || !matches!(
+            request.requester_authorization,
+            PeerKeyPackageRequesterAuthorization::Device { .. }
+        )
+        || request.service_binding.source_id != owner.station_id
+        || request.service_binding.destination_id != owner.station_id
+    {
+        return Ok(Some(false));
+    }
+    let row = sql_query("SELECT g.value->'effective_scope' AS payload FROM mls_group_current_states g
+        JOIN pcr_genesis_units p ON p.realm_id=g.realm_id
+        WHERE g.realm_id=$1 AND g.mls_group_id=$2 AND g.value#>>'{effective_scope,kind}'='sidecar'
+        AND p.principal_id=$3 AND p.station_id=$4 AND p.station_id=current_device_inventory_station()")
+        .bind::<Text,_>(realm.as_str()).bind::<Text,_>(request.mls_group_id.as_str())
+        .bind::<Text,_>(owner.principal_id.as_str()).bind::<Text,_>(owner.station_id.as_str())
+        .get_result::<JsonPayloadRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+    let Some(row) = row else {
+        return Ok(Some(false));
+    };
+    let scope: ScopeRef =
+        serde_json::from_value(row.payload).map_err(PersistenceError::database)?;
+    if scope != request.effective_scope {
+        return Ok(Some(false));
+    }
+    let cut =
+        crate::sidecar_authority_cut::locked_in_connection(conn, realm, sidecar_id, owner).await?;
+    Ok(Some(cut.is_some_and(|cut| {
+        match (&request.target_account_id, &request.target_agent_id) {
+            (Some(account), None) => account == owner,
+            (None, Some(agent)) => cut.desired_agent_ids.contains(agent),
+            _ => false,
+        }
+    })))
+}
+
 fn denied(detail: impl std::fmt::Display) -> PersistenceError {
     PersistenceError::Conflict(format!("capability_denied: {detail}"))
 }

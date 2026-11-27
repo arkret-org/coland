@@ -1042,6 +1042,7 @@ pub(crate) async fn verify_foreign_project_history(
     local_secret: &str,
     query: &arkret_models_collaboration::authority_commit::OwnedAgentStreamScanRequestBody,
     guard: &mut dyn coland_storage::HostedAgentHistoryRead,
+    archived: Option<&arkret_wire::RealmStateSnapshot>,
 ) -> Result<LocatedRealmAuthority, crate::error::AppError> {
     let unavailable = || {
         crate::error::AppError::new(
@@ -1070,7 +1071,11 @@ pub(crate) async fn verify_foreign_project_history(
     )
     .await
     .map_err(|cause| {
-        tracing::warn!(%cause, "hosted project history session changed before bootstrap");
+        tracing::warn!(
+            status = cause.0.as_u16(),
+            code = cause.1,
+            "hosted project history session changed before bootstrap"
+        );
         denied()
     })?;
     let body = post_history_request(
@@ -1114,7 +1119,62 @@ pub(crate) async fn verify_foreign_project_history(
     guard
         .accept_history(&outcome.snapshot)
         .await
-        .map_err(|_| unavailable())?;
+        .map_err(|cause| {
+            tracing::warn!(%cause, "home Station rejected the signed project history cut");
+            unavailable()
+        })?;
+    if let Some(original) = archived {
+        guard
+            .qualify_archived_history(original)
+            .await
+            .map_err(|_| denied())?;
+        let current = &outcome.snapshot;
+        let still_covered = original.history_basis.as_ref().is_some_and(|basis| {
+            basis.account_id == query.member_account_id && basis.stream_ref == query.scan.stream_ref
+        }) && original.parent_membership_revision(
+            &arkret_wire::ActorId::account(query.member_account_id.clone()),
+        ) == current.parent_membership_revision(
+            &arkret_wire::ActorId::account(query.member_account_id.clone()),
+        ) && original.visible_stream_heads.iter().all(|old| {
+            current.visible_stream_heads.iter().any(|new| {
+                new.stream_ref == old.stream_ref
+                    && (new.stream_position > old.stream_position || new == old)
+            })
+        }) && original
+            .retention_and_history_floor
+            .stream_floors
+            .iter()
+            .all(|old| {
+                current
+                    .retention_and_history_floor
+                    .stream_floors
+                    .iter()
+                    .any(|new| {
+                        new.stream_ref == old.stream_ref
+                            && new.oldest_position <= old.oldest_position
+                    })
+            })
+            && original
+                .current_state_entries
+                .iter()
+                .all(|row| current.current_state_entries.contains(row));
+        if !still_covered {
+            // A changed value requires historical source disclosure checks at the current cut.
+            let rechecked = state
+                .authority_commits()
+                .issued_realm_state_snapshot(
+                    &query.scan.realm_id,
+                    &query.member_account_id,
+                    &original.snapshot_id,
+                    &state.service_core_id(),
+                )
+                .await
+                .map_err(|_| unavailable())?;
+            if rechecked.as_ref() != Some(original) {
+                return Err(unavailable());
+            }
+        }
+    }
     Ok(served)
 }
 
@@ -1125,6 +1185,7 @@ pub(crate) async fn read_foreign_project_page(
     local_secret: &str,
     query: &arkret_models_collaboration::authority_commit::OwnedAgentStreamScanRequestBody,
     guard: &mut dyn coland_storage::HostedAgentHistoryRead,
+    archived: Option<&arkret_wire::RealmStateSnapshot>,
 ) -> Result<arkret_wire::StreamScanResponseBody, crate::error::AppError> {
     let unavailable = || {
         crate::error::AppError::new(
@@ -1133,9 +1194,16 @@ pub(crate) async fn read_foreign_project_page(
         )
     };
     let denied = || crate::error::AppError::capability_denied("Agent history is unavailable");
-    let mut served =
-        verify_foreign_project_history(state, governor, session, local_secret, query, guard)
-            .await?;
+    let mut served = verify_foreign_project_history(
+        state,
+        governor,
+        session,
+        local_secret,
+        query,
+        guard,
+        archived,
+    )
+    .await?;
     if !guard.permits_request().await
         || crate::routing::identity::auth::revalidate_current_read_session(
             state,
@@ -1186,7 +1254,10 @@ pub(crate) async fn read_foreign_project_page(
                 .map_err(|_| unavailable())?,
         }
     }
-    guard.accept_page(&page).await.map_err(|_| denied())?;
+    guard.accept_page(&page).await.map_err(|cause| {
+        tracing::warn!(%cause, "home Station rejected the project history page");
+        denied()
+    })?;
     Ok(page)
 }
 

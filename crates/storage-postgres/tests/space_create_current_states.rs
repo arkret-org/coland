@@ -796,7 +796,7 @@ async fn space_create_root_and_child_have_three_sibling_results_and_exact_replay
             "board",
             "Board",
             None,
-            Some(json!({"kind":"allow_any"})),
+            Some(json!(false)),
         ),
         at,
     );
@@ -811,7 +811,7 @@ async fn space_create_root_and_child_have_three_sibling_results_and_exact_replay
     assert!(root_space.value.get("parent_space_id").is_none());
     assert!(root_space.value.get("child_scope_policy").is_none());
     assert_eq!(root_parent.value, json!({"parent_space_id": null}));
-    assert_eq!(root_policy.value, json!({"kind":"allow_any"}));
+    assert_eq!(root_policy.value, json!(false));
     for row in [&root_space, &root_parent, &root_policy] {
         assert_eq!(
             row.current_commit_id,
@@ -1136,7 +1136,7 @@ async fn space_create_child_policy_denial_leaves_event_commit_and_all_results_un
             "board",
             "Encrypted-only board",
             None,
-            Some(json!({"kind":"require_e2ee"})),
+            Some(json!(true)),
         ),
         at,
     );
@@ -1167,6 +1167,6 @@ async fn space_create_child_policy_denial_leaves_event_commit_and_all_results_un
         current(&pool, "space_child_scope_policy_current_states", &root_id)
             .await
             .value,
-        json!({"kind":"require_e2ee"})
+        json!(true)
     );
 }

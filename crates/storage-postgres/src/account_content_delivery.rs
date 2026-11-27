@@ -1770,6 +1770,14 @@ pub(crate) async fn acquire(
         ));
     }
     if !input.stream_scans.is_empty()
+        && input.agent_endpoint.is_some()
+        && personal_sidecar::requested(input)
+    {
+        let mut guard = DeliveryGuard::begin(pool).await?;
+        lock_scope_evidence_owner(guard.connection(), input).await?;
+        return Box::pin(personal_sidecar::acquire(guard, account, station, input)).await;
+    }
+    if !input.stream_scans.is_empty()
         || !input.keypackage_claims.is_empty()
         || !input.mls_group_material_reads.is_empty()
         || !input.mls_roster_reads.is_empty()

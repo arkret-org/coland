@@ -178,6 +178,9 @@ pub(crate) async fn mls_material(
     station: &arkret_wire::DidCoreId,
 ) -> PersistenceResult<HumanPcrHistoryRead<coland_storage::MlsMemberGroupStateMaterialRead>> {
     request.validate().map_err(unavailable)?;
+    if matches!(&request.effective_scope, ScopeRef::Sidecar { .. }) {
+        return Ok(HumanPcrHistoryRead::NotApplicable);
+    }
     let mut held = DeliveryGuard::begin(pool).await?;
     if !own_control_origin(held.connection(), reader, &request.realm_id).await? {
         held.finish().await?;

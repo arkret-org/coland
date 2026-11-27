@@ -4583,7 +4583,7 @@ CREATE TABLE space_child_scope_policy_current_states (
  current_stream_position BIGINT NOT NULL CHECK(current_stream_position BETWEEN 0 AND 9007199254740991),
  value JSONB NOT NULL,
  updated_at TIMESTAMPTZ NOT NULL,
- CHECK(jsonb_typeof(value) IN ('null','object'))
+ CHECK(jsonb_typeof(value) IN ('null','boolean'))
 );
 CREATE INDEX space_child_scope_policy_current_states_realm ON space_child_scope_policy_current_states(realm_id,space_id);
 

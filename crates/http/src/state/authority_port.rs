@@ -72,6 +72,7 @@ fn self_event_route(kind: &arkret_wire::EventKind) -> ServiceResult<SelfEventRou
         | EventKind::CircleCreate
         | EventKind::AppletBridgeError
         | EventKind::SidecarCreate
+        | EventKind::SidecarMemberState
         | EventKind::SidecarContextAttach
         | EventKind::AgentSidecarExchangeControl
         | EventKind::RealmOrganization
@@ -268,6 +269,7 @@ pub(super) fn require_guarded_unit_event(request: &EventAdmissionSubmission) -> 
             && matches!(
                 event.kind,
                 arkret_wire::EventKind::SidecarContextAttach
+                    | arkret_wire::EventKind::SidecarMemberState
                     | arkret_wire::EventKind::MlsHistoryRequest
                     | arkret_wire::EventKind::MlsHistoryGrant
                     | arkret_wire::EventKind::MessageCreate

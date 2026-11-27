@@ -243,14 +243,12 @@ async fn prepare_or_replicate_one(
     let event = &item.event_submission.event;
     super::authority_port::refuse_actor_private_event(&event.kind)?;
     let commit = &item.source_commit;
-    if !matches!(
-        commit.stream_ref,
-        CommitStreamRef::Realm { .. }
-            | CommitStreamRef::Circle { .. }
-            | CommitStreamRef::Sidecar { .. }
-    ) {
+    if event.kind == arkret_wire::EventKind::SidecarCreate
+        || matches!(event.scope_ref, arkret_wire::ScopeRef::Sidecar { .. })
+        || !matches!(commit.stream_ref, CommitStreamRef::Realm { .. } | CommitStreamRef::Circle { .. })
+    {
         return Err(ServiceError::UnsupportedEventKind(
-            "Circle and Sidecar replicas need their own scope membership basis".to_owned(),
+            "replication requires a shared Realm or Circle original".to_owned(),
         ));
     }
     let current_authority = state

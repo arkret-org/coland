@@ -591,7 +591,29 @@ impl Discussion {
 
 /// Prepare each new Human fixture source from the real PG cut before signing
 /// its final Commit. This is not acceptance, nor a cached authority result.
-pub async fn source_request(pool: &PgPool, mut request: EventCommitRequest) -> EventCommitRequest {
+pub async fn source_request(pool: &PgPool, request: EventCommitRequest) -> EventCommitRequest {
+    let request = signed_source_request(pool, request).await;
+    let tx = &request.authority_commit;
+    assert_eq!(
+        tx.producer_signer_fact.is_some(),
+        tx.event.account_device_producer().unwrap().is_some()
+    );
+    request
+}
+
+pub async fn source_pcr_request(pool: &PgPool, request: EventCommitRequest) -> EventCommitRequest {
+    let request = signed_source_request(pool, request).await;
+    assert!(
+        request.authority_commit.producer_signer_fact.is_none(),
+        "native PCR history supplies the producer key"
+    );
+    request
+}
+
+async fn signed_source_request(
+    pool: &PgPool,
+    mut request: EventCommitRequest,
+) -> EventCommitRequest {
     if let Some(event) = human_profile::sign_fixture_event(request.authority_commit.event.clone()) {
         request.event.event_id = event.event_id.to_string();
         request.event.actor_id = event.actor_id.to_string();
@@ -626,11 +648,6 @@ pub async fn source_request(pool: &PgPool, mut request: EventCommitRequest) -> E
         .await
         .unwrap()
         .map(Into::into);
-    if tx.event.account_device_producer().unwrap().is_some() {
-        assert!(tx.producer_signer_fact.is_some());
-    } else {
-        assert!(tx.producer_signer_fact.is_none());
-    }
     tx.commit.producer_signer_fact_digest = tx
         .producer_signer_fact
         .as_ref()

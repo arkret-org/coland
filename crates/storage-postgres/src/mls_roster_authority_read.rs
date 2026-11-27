@@ -598,6 +598,25 @@ async fn read_in_connection(
     }
     Ok(MlsRosterAuthorityRead::Authorized {
         facts: Some(MlsRosterAuthorityFacts {
+            sidecar_backup_strategy: if matches!(
+                &request.effective_scope,
+                arkret_wire::ScopeRef::Sidecar { .. }
+            ) {
+                use arkret_event_draft::EventPayloadExt as _;
+                let genesis =
+                    crate::content_dependencies::original_event(conn, &request.realm_id.event_id())
+                        .await?;
+                let create = genesis
+                    .as_realm_create()
+                    .map_err(PersistenceError::database)?;
+                if genesis.realm_id != request.realm_id || genesis.scope_ref != arkret_wire::ScopeRef::RealmGenesis
+                    || create.object.purpose != arkret_models_collaboration::events_payloads::realm::RealmPurpose::PrincipalControl {
+                    return Ok(unavailable());
+                }
+                Some(create.object.initial_encryption_backup_strategy)
+            } else {
+                None
+            },
             group_info_ref: payload.group_info_ref,
             ratchet_tree_ref: payload.ratchet_tree_ref,
             authority_head_commit_event_ref: head_event.event_id,

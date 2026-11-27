@@ -385,16 +385,6 @@ async fn lookup_pairing_record(
     Ok(record)
 }
 
-/// Read exact active authorization instances from the current accepted PCR frontier.
-pub(crate) async fn accepted_agent_key_authorizations(
-    state: &AppState,
-    agent: &AgentPrincipalRecord,
-) -> Result<BTreeSet<(String, String)>, AppError> {
-    accepted_agent_key_authorization_snapshot(state, agent)
-        .await
-        .map(|(keys, ..)| keys)
-}
-
 pub(crate) async fn accepted_active_agent_key_authorizations(
     state: &AppState,
     agent: &AgentPrincipalRecord,

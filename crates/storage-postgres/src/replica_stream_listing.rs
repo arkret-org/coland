@@ -68,17 +68,6 @@ pub(crate) async fn in_connection(
                     Err(reason) => return Ok(AccountRealmStreamList::Unproved(reason)),
                 }
             }
-            CommitStreamRef::Sidecar { sidecar_id, .. } => {
-                match crate::sidecar_replica_authority::floor_in_connection(
-                    conn, realm, sidecar_id, caller,
-                )
-                .await?
-                {
-                    Ok(Some(floor)) => floor,
-                    Ok(None) => continue,
-                    Err(reason) => return Ok(AccountRealmStreamList::Unproved(reason)),
-                }
-            }
             _ => continue,
         };
         let position = u64::try_from(head.stream_position).map_err(|_| {

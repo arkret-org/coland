@@ -15,6 +15,7 @@ pub enum SidecarLifecycleState {
 pub struct AgentSidecarRecord {
     pub sidecar_id: String,
     pub realm_id: String,
+    pub source_realm_id: String,
     pub controller_account_id: arkret_wire::AccountId,
     /// Lifecycle state; canonical SDK enum, persisted as its snake_case wire
     /// name (`active` | `suspended` | `tombstoned`).

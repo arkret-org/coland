@@ -1,5 +1,5 @@
 //! Native Sidecar genesis current is accepted with its RealmCommit, under
-//! the same singleton reservation. The public ensure route remains closed.
+//! the same private singleton reservation at the owner Station.
 
 #[path = "support/ordinary_realm.rs"]
 #[expect(
@@ -154,6 +154,52 @@ fn batch(create: EventCommitRequest, attach: EventCommitRequest) -> EventBatchCo
     }
 }
 
+/// Derive the native head from this controller's actually admitted PCR. The
+/// project fixture remains the source of the ordinary Strand locator.
+async fn private_create(
+    pool: &coland_storage_postgres::PgPool,
+    project: &coland_storage::AuthorityCommitTransaction,
+    owner: &arkret_wire::AccountId,
+) -> EventCommitRequest {
+    #[derive(diesel::QueryableByName)]
+    struct Head {
+        #[diesel(sql_type = Jsonb)]
+        original: serde_json::Value,
+        #[diesel(sql_type = Jsonb)]
+        receipt: serde_json::Value,
+    }
+    let mut conn = pool.get().await.unwrap();
+    let head = diesel::sql_query(
+        "SELECT e.envelope AS original,c.commit_json AS receipt
+        FROM pcr_genesis_units p JOIN realm_commits c ON c.realm_id=p.realm_id
+        JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed'
+        WHERE p.principal_id=$1 AND p.station_id=$2 AND c.stream_ref->>'kind'='realm'
+        ORDER BY c.stream_position DESC LIMIT 1",
+    )
+    .bind::<Text, _>(owner.principal_id.as_str())
+    .bind::<Text, _>(owner.station_id.as_str())
+    .get_result::<Head>(&mut *conn)
+    .await
+    .unwrap();
+    drop(conn);
+    let mut home = project.clone();
+    home.event = serde_json::from_value(head.original).unwrap();
+    home.commit = serde_json::from_value(head.receipt).unwrap();
+    home.expected_authority = PgAuthorityCommitStore { pool: pool.clone() }
+        .current_authority(&home.commit.realm_id)
+        .await
+        .unwrap()
+        .unwrap();
+    next_request(
+        &home,
+        arkret_wire::EventKind::SidecarCreate,
+        &owner.principal_id,
+        serde_json::json!({"source_realm_id": project.event.realm_id}),
+        std::cmp::max(project.commit.committed_at, home.commit.committed_at)
+            + chrono::Duration::seconds(1),
+    )
+}
+
 #[tokio::test]
 async fn sidecar_genesis_reserves_exact_controller_and_current_in_one_commit() {
     let database = TestDatabase::lease().await;
@@ -177,14 +223,8 @@ async fn sidecar_genesis_reserves_exact_controller_and_current_in_one_commit() {
     let uow = PgEventCommitUnitOfWork::new(pool.clone());
     let last = unit.transactions.last().unwrap();
     let at = last.commit.committed_at;
-    let create = next_request(
-        last,
-        arkret_wire::EventKind::SidecarCreate,
-        &controller.principal_id,
-        serde_json::json!({}),
-        at,
-    );
-    let create = ordinary_realm::source_request(&pool, create).await;
+    let create = private_create(&pool, last, &controller).await;
+    let create = ordinary_realm::source_pcr_request(&pool, create).await;
     uow.commit_event(create.clone()).await.unwrap();
     let stored = rows(&pool).await;
     assert_eq!(stored.len(), 1);
@@ -226,6 +266,8 @@ async fn sidecar_genesis_reserves_exact_controller_and_current_in_one_commit() {
         row.value["controller_account_id"],
         row.controller_account_id
     );
+    assert_eq!(row.value["source_realm_id"], last.event.realm_id.as_str());
+    assert_ne!(row.value["source_realm_id"], row.value["realm_id"]);
     assert_eq!(row.value["state"], "active");
     assert_eq!(row.value["created_at"], row.value["updated_at"]);
 
@@ -233,10 +275,10 @@ async fn sidecar_genesis_reserves_exact_controller_and_current_in_one_commit() {
         &create.authority_commit,
         arkret_wire::EventKind::SidecarCreate,
         &controller.principal_id,
-        serde_json::json!({}),
+        serde_json::json!({"source_realm_id": last.event.realm_id}),
         at + chrono::Duration::seconds(1),
     );
-    let second = ordinary_realm::source_request(&pool, second).await;
+    let second = ordinary_realm::source_pcr_request(&pool, second).await;
     let error = uow.commit_event(second.clone()).await.unwrap_err();
     assert_eq!(
         error.conflict_code(),
@@ -260,7 +302,7 @@ async fn sidecar_genesis_reserves_exact_controller_and_current_in_one_commit() {
         &create.authority_commit,
         arkret_wire::EventKind::SidecarCreate,
         service,
-        serde_json::json!({}),
+        serde_json::json!({"source_realm_id": last.event.realm_id}),
         at,
     );
     let error = uow.commit_event(wrong_actor.clone()).await.unwrap_err();
@@ -286,19 +328,14 @@ async fn sidecar_create_and_context_attach_case() {
     let discussion =
         heap_future(|| ordinary_realm::open_human_discussion(&pool, "sidecar-attach-cut")).await;
     let uow = PgEventCommitUnitOfWork::new(pool.clone());
-    let at = discussion.head.authority_commit.commit.committed_at;
-    let create = next_request(
-        &discussion.head.authority_commit,
-        arkret_wire::EventKind::SidecarCreate,
-        discussion
-            .head
-            .authority_commit
-            .event
-            .actor_id
-            .signing_principal_id(),
-        serde_json::json!({}),
-        at,
-    );
+    let previous = &discussion.head.authority_commit;
+    let create = private_create(
+        &pool,
+        previous,
+        previous.event.actor_id.as_account_id().unwrap(),
+    )
+    .await;
+    let create = heap_future(|| ordinary_realm::source_pcr_request(&pool, create)).await;
     let sidecar_id = arkret_wire::SidecarId::from_event_id(&create.authority_commit.event.event_id);
     let source = serde_json::json!({"kind":"strand","strand_id":discussion.strand_id});
     let attach = attach_request(
@@ -309,11 +346,11 @@ async fn sidecar_create_and_context_attach_case() {
         None,
         &create.authority_commit.event.event_id,
     );
-    let create = heap_future(|| ordinary_realm::source_request(&pool, create)).await;
+
     let mut attach = attach;
     attach.authority_commit.commit.authority_ref =
         create.authority_commit.commit.authority_ref.clone();
-    let attach = heap_future(|| ordinary_realm::source_request(&pool, attach)).await;
+    let attach = heap_future(|| ordinary_realm::source_pcr_request(&pool, attach)).await;
     uow.commit_event_batch(batch(create.clone(), attach.clone()))
         .await
         .unwrap();
@@ -342,7 +379,7 @@ async fn sidecar_create_and_context_attach_case() {
         Some(&attach.authority_commit.event.event_id),
         &create.authority_commit.event.event_id,
     );
-    let successor = heap_future(|| ordinary_realm::source_request(&pool, successor)).await;
+    let successor = heap_future(|| ordinary_realm::source_pcr_request(&pool, successor)).await;
     uow.commit_event(successor.clone()).await.unwrap();
     let current = contexts(&pool).await;
     assert_eq!(current.len(), 1);
@@ -360,7 +397,7 @@ async fn sidecar_create_and_context_attach_case() {
         Some(&successor.authority_commit.event.event_id),
         &create.authority_commit.event.event_id,
     );
-    let stale = heap_future(|| ordinary_realm::source_request(&pool, stale)).await;
+    let stale = heap_future(|| ordinary_realm::source_pcr_request(&pool, stale)).await;
     let error = uow.commit_event(stale.clone()).await.unwrap_err();
     assert_eq!(error.conflict_code(), Some(ConflictCode::CasConflict));
     assert_eq!(contexts(&pool).await[0].version, 2);
@@ -379,19 +416,15 @@ async fn sidecar_create_and_context_attach_case() {
     })
     .await;
     let other_uow = PgEventCommitUnitOfWork::new(other_pool.clone());
-    let other_at = other_discussion.head.authority_commit.commit.committed_at;
-    let other_create = next_request(
-        &other_discussion.head.authority_commit,
-        arkret_wire::EventKind::SidecarCreate,
-        other_discussion
-            .head
-            .authority_commit
-            .event
-            .actor_id
-            .signing_principal_id(),
-        serde_json::json!({}),
-        other_at,
-    );
+    let previous = &other_discussion.head.authority_commit;
+    let other_create = private_create(
+        &other_pool,
+        previous,
+        previous.event.actor_id.as_account_id().unwrap(),
+    )
+    .await;
+    let other_create =
+        heap_future(|| ordinary_realm::source_pcr_request(&other_pool, other_create)).await;
     let other_id =
         arkret_wire::SidecarId::from_event_id(&other_create.authority_commit.event.event_id);
     let absent_strand =
@@ -404,18 +437,14 @@ async fn sidecar_create_and_context_attach_case() {
         None,
         &other_create.authority_commit.event.event_id,
     );
-    let other_create =
-        heap_future(|| ordinary_realm::source_request(&other_pool, other_create)).await;
+
     let invalid_attach =
-        heap_future(|| ordinary_realm::source_request(&other_pool, invalid_attach)).await;
+        heap_future(|| ordinary_realm::source_pcr_request(&other_pool, invalid_attach)).await;
     let error = other_uow
         .commit_event_batch(batch(other_create.clone(), invalid_attach.clone()))
         .await
         .unwrap_err();
-    assert_eq!(
-        error.conflict_code(),
-        Some(ConflictCode::FailedPrecondition)
-    );
+    assert_eq!(error.conflict_code(), Some(ConflictCode::CapabilityDenied));
     assert!(rows(&other_pool).await.is_empty());
     assert!(contexts(&other_pool).await.is_empty());
     let store = PgAuthorityCommitStore {

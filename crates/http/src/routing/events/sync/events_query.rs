@@ -640,6 +640,26 @@ pub(super) async fn realm_state_snapshot_by_ref(
         account,
     )
     .await?;
+    if session.agent_session().is_some()
+        && snapshot.history_basis.is_some()
+        && let Some(authority) = state
+            .authority_commits()
+            .current_authority(&snapshot.realm_id)
+            .await
+            .map_err(|_| denied())?
+        && authority.service_id != state.service_core_id()
+    {
+        let guard = crate::routing::authority_commit::project_snapshot_guard(
+            state,
+            &session,
+            account,
+            authority.service_id,
+            req,
+            &snapshot,
+        )
+        .await?;
+        return coland_http::result::guarded_json_ok(snapshot, Some(guard));
+    }
     let input = coland_storage::AccountContentDeliveryInput::snapshot(&snapshot);
     let guard = super::content_delivery_guard(state, &session, &input).await?;
     coland_http::result::guarded_json_ok(snapshot, guard)

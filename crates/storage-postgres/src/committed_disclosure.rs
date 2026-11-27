@@ -207,7 +207,7 @@ pub(crate) fn ordinary_agent_read_ceiling(
     )
 }
 
-async fn member_event_visible_in_connection(
+pub(crate) async fn member_event_visible_in_connection(
     conn: &mut AsyncPgConnection,
     row: &CommittedEventFullView,
     caller: &arkret_wire::ActorId,

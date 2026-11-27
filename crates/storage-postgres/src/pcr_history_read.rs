@@ -213,6 +213,10 @@ pub(crate) async fn page(
     station: &arkret_wire::DidCoreId,
 ) -> PersistenceResult<HumanPcrHistoryRead<arkret_wire::StreamScanResponseBody>> {
     request.validate().map_err(unavailable)?;
+    if matches!(&request.stream_ref, CommitStreamRef::Sidecar { .. }) {
+        return Ok(HumanPcrHistoryRead::NotApplicable);
+    }
+
     let mut held = DeliveryGuard::begin(pool).await?;
     if !own_control_origin(held.connection(), reader, &request.realm_id).await? {
         held.finish().await?;
@@ -270,6 +274,12 @@ pub(crate) async fn event(
         held.finish().await?;
         return Ok(HumanPcrHistoryRead::NotApplicable);
     };
+    if matches!(&original.commit.stream_ref, CommitStreamRef::Sidecar { .. })
+        && original.commit.stream_ref.scope_ref() == original.event.scope_ref
+    {
+        held.finish().await?;
+        return Ok(HumanPcrHistoryRead::NotApplicable);
+    }
     let realm = original.event.realm_id.clone();
     if !own_control_origin(held.connection(), reader, &realm).await? {
         held.finish().await?;

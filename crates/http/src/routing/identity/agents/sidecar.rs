@@ -1,8 +1,6 @@
 use arkret_event_draft::{EventPayloadExt as _, TypedEventDraft};
 use arkret_identifiers::SidecarId;
-use arkret_models_collaboration::agent_operations::{
-    AgentLifecycleState, AgentSidecarPage, AgentSidecarView,
-};
+use arkret_models_collaboration::agent_operations::{AgentSidecarPage, AgentSidecarView};
 #[cfg(test)]
 use arkret_models_collaboration::agent_sidecar::SidecarAccessProvisioningPhase;
 use arkret_models_collaboration::agent_sidecar::{
@@ -14,10 +12,10 @@ use arkret_models_collaboration::events_payloads::sidecar::{
 };
 use arkret_models_collaboration::prepared_event_draft::PreparedEventDraft;
 use arkret_models_collaboration::sidecar_operations::{
-    SidecarContextRef, SidecarEnsureAcceptedPhase, SidecarEnsureAcceptedResponseBody,
-    SidecarEnsureAcceptedStatus, SidecarEnsureExistingBranch, SidecarEnsureNewBranch,
-    SidecarEnsurePreparedExistingResponseBody, SidecarEnsurePreparedNewResponseBody,
-    SidecarEnsurePreparedStatus, SidecarEnsureRequestBody, SidecarEnsureResponseBody,
+    SidecarEnsureAcceptedPhase, SidecarEnsureAcceptedResponseBody, SidecarEnsureAcceptedStatus,
+    SidecarEnsureExistingBranch, SidecarEnsureNewBranch, SidecarEnsurePreparedExistingResponseBody,
+    SidecarEnsurePreparedNewResponseBody, SidecarEnsurePreparedStatus, SidecarEnsureRequestBody,
+    SidecarEnsureResponseBody,
 };
 #[cfg(test)]
 use arkret_models_crypto::MlsGovernanceBindingPayload;
@@ -62,13 +60,6 @@ pub(super) fn sidecar_create_denied(message: impl Into<String>) -> AppError {
         .with_reason_code(arkret_wire::ReasonCode::SIDECAR_CREATE_DENIED)
 }
 
-pub(super) fn sidecar_failed_precondition(
-    reason: &'static str,
-    message: impl Into<String>,
-) -> AppError {
-    crate::app_error!(FailedPrecondition, message.into()).with_rejection_code(reason)
-}
-
 async fn authorize_sidecar_ensure(
     state: &AppState,
     session: &SessionRecord,
@@ -76,10 +67,14 @@ async fn authorize_sidecar_ensure(
 ) -> Result<(), AppError> {
     let controller_actor =
         crate::routing::identity::session_actor::session_actor_from_credential(state, session)?;
-    if controller_actor.as_account_id().is_none() {
-        return Err(sidecar_create_denied(
-            "Sidecar controller must be an Account",
-        ));
+    let account = controller_actor
+        .as_account_id()
+        .ok_or_else(|| sidecar_create_denied("controller Account required"))?;
+    let home =
+        super::dev_fanout::require_controller_principal_control_realm(state, session, account)
+            .await?;
+    if home.as_str() != realm_id {
+        return Err(sidecar_create_denied("controller Human PCR required"));
     }
     match crate::authz::authorize(
         state,
@@ -101,141 +96,7 @@ async fn authorize_sidecar_ensure(
         }
         _ => {}
     }
-    let realm = arkret_wire::RealmId::new(realm_id)
-        .map_err(|error| AppError::param_invalid(error.to_string()))?;
-    if state
-        .authority_commits()
-        .accepted_current_member_joined(&realm, &controller_actor)
-        .await
-        .map_err(|_| {
-            crate::app_error!(
-                ServiceUnavailable,
-                "Sidecar controller membership is unavailable"
-            )
-        })?
-    {
-        return Ok(());
-    }
-    Err(sidecar_create_denied(
-        "ak.self.agent.sidecar.command.ensure.v1 requires a Realm member controller",
-    ))
-}
-
-pub(super) fn realm_member_joined(state: &AppState, realm_id: &str, actor: &str) -> bool {
-    if serde_json::from_str::<arkret_wire::ActorId>(actor).is_err() {
-        return false;
-    }
-    let projection = state.projections().snapshot();
-    projection
-        .member(realm_id, actor)
-        .is_some_and(|membership| membership.state == "join")
-        && (projection
-            .agent_membership_binding(realm_id, actor)
-            .is_none()
-            || projection.effective_agent_membership_base(realm_id, actor))
-}
-
-async fn validate_sidecar_context(
-    state: &AppState,
-    realm_id: &RealmId,
-    context_ref: &SidecarContextRef,
-    controller: &arkret_wire::ActorId,
-) -> Result<(), AppError> {
-    match context_ref {
-        SidecarContextRef::Strand { strand_id } => {
-            // Canonical Strand writes do not depend on the reducer mirror.
-            // Prepare reads the accepted current, while the atomic attach
-            // transaction rechecks the source at its own locked cut.
-            let scope = state
-                .authority_commits()
-                .visible_strand_scope_for_actor(realm_id, strand_id, controller)
-                .await
-                .map_err(|error| AppError::internal(format!("Sidecar source current: {error}")))?
-                .ok_or_else(|| AppError::not_found("context_ref.strand_id not found"))?;
-            if scope
-                != (arkret_wire::ScopeRef::Realm {
-                    realm_id: realm_id.clone(),
-                })
-            {
-                return Err(AppError::not_found("context_ref.strand_id not found"));
-            }
-        }
-        SidecarContextRef::Relation { relation_id } => {
-            let projection = state.projections().snapshot();
-            let relation = projection
-                .relations
-                .get(relation_id.as_str())
-                .ok_or_else(|| AppError::not_found("context_ref.relation_id not found"))?;
-            if relation.realm_id != realm_id.as_str() {
-                return Err(sidecar_failed_precondition(
-                    "context_ref_realm_mismatch",
-                    "context_ref.relation_id belongs to another Realm",
-                ));
-            }
-            if relation.state != "active" {
-                return Err(sidecar_failed_precondition(
-                    "relation_not_active",
-                    "context_ref.relation_id is not active",
-                ));
-            }
-        }
-    }
     Ok(())
-}
-
-pub(crate) async fn derive_sidecar_desired_agent_ids(
-    state: &AppState,
-    realm_id: &str,
-    controller: &arkret_wire::AccountId,
-) -> Result<Vec<String>, AppError> {
-    let records = state
-        .agent_pairings()
-        .agents_for_controller(controller.principal_id.as_str())
-        .await
-        .map_err(|err| AppError::internal(format!("agent list failed: {err}")))?;
-    let mut desired = BTreeSet::new();
-    for record in &records {
-        if agent_record_is_desired_sidecar_member(state, realm_id, controller, record).await? {
-            desired.insert(record.id.clone());
-        }
-    }
-    Ok(desired.into_iter().collect())
-}
-
-async fn agent_record_is_desired_sidecar_member(
-    state: &AppState,
-    realm_id: &str,
-    controller: &arkret_wire::AccountId,
-    record: &AgentPrincipalRecord,
-) -> Result<bool, AppError> {
-    let agent_id = record.id.as_str();
-    if record.controller_principal_id != controller.principal_id.as_str()
-        || record.state != AgentLifecycleState::Active
-    {
-        return Ok(false);
-    }
-    let account =
-        crate::routing::identity::agent_pcr::agent_controller_account(state, record).await?;
-    if &account != controller {
-        return Ok(false);
-    }
-    let agent_actor = arkret_wire::ActorId::account(arkret_wire::AccountId::new(
-        arkret_wire::DidCoreId::new(agent_id)
-            .map_err(|error| AppError::internal(format!("invalid Agent principal: {error}")))?,
-        account.station_id,
-    ));
-    let has_authorization = !accepted_agent_key_authorizations(state, record)
-        .await?
-        .is_empty();
-    Ok(
-        realm_member_joined(state, realm_id, &agent_actor.to_string()) && {
-            let projection = state.projections().snapshot();
-            !matches!(
-                projection.agent_lifecycles.get(&agent_actor.to_string()),
-                Some(AgentLifecycleState::Paused | AgentLifecycleState::Deactivated)
-            ) && has_authorization
-        },
-    )
 }
 
 fn sidecar_from_record(record: &AgentSidecarRecord) -> Result<AgentSidecar, AppError> {
@@ -245,6 +106,8 @@ fn sidecar_from_record(record: &AgentSidecarRecord) -> Result<AgentSidecar, AppE
         schema: arkret_wire::SchemaId::AGENT_SIDECAR_V1.to_owned(),
         realm_id: RealmId::new(record.realm_id.clone())
             .map_err(|error| AppError::internal(format!("stored Realm id: {error}")))?,
+        source_realm_id: RealmId::new(record.source_realm_id.clone())
+            .map_err(|error| AppError::internal(error.to_string()))?,
         controller_account_id: record.controller_account_id.clone(),
         state: match record.state {
             coland_storage::SidecarLifecycleState::Active => AgentSidecarState::Active,
@@ -546,14 +409,16 @@ async fn prepare_sidecar(
             "Sidecar controller_account_id must match the authenticated session",
         ));
     }
-    authorize_sidecar_ensure(state, session, body.source_realm_id.as_str()).await?;
-    validate_sidecar_context(
-        state,
-        &body.source_realm_id,
-        &body.context_ref,
-        &arkret_wire::ActorId::account(authenticated_controller_account_id),
+    let home_realm = RealmId::new(
+        super::dev_fanout::require_controller_principal_control_realm(
+            state,
+            session,
+            &authenticated_controller_account_id,
+        )
+        .await?,
     )
-    .await?;
+    .map_err(|e| AppError::internal(e.to_string()))?;
+    authorize_sidecar_ensure(state, session, home_realm.as_str()).await?;
     let request_hash = arkret_canonical::canonical_sha256(&body)
         .map_err(|error| AppError::internal(format!("Sidecar prepare digest: {error}")))?;
     if let Some(cached) = state
@@ -597,21 +462,21 @@ async fn prepare_sidecar(
         })?;
     let controller_actor =
         crate::routing::identity::session_actor::session_actor_from_credential(state, session)?;
-    let digest_suite = state
-        .projections()
-        .realm_digest_suite(body.source_realm_id.as_str());
+    let digest_suite = state.projections().realm_digest_suite(home_realm.as_str());
     let created_at = chrono::Utc::now();
     let create_event = if existing_current.is_none() {
         Some(author_typed_sidecar_event::<
             arkret_wire::event_spec::SidecarCreate,
         >(
             arkret_wire::ScopeRef::Realm {
-                realm_id: body.source_realm_id.clone(),
+                realm_id: home_realm.clone(),
             },
             controller_actor.clone(),
             Vec::new(),
             created_at,
-            SidecarCreatePayload::default(),
+            SidecarCreatePayload {
+                source_realm_id: body.source_realm_id.clone(),
+            },
             digest_suite,
         )?)
     } else {
@@ -632,7 +497,7 @@ async fn prepare_sidecar(
     let (version, predecessor_event_ref) = next_sidecar_context_version(current_context.as_ref())?;
     let attach_event = author_typed_sidecar_event::<arkret_wire::event_spec::SidecarContextAttach>(
         arkret_wire::ScopeRef::Sidecar {
-            realm_id: body.source_realm_id.clone(),
+            realm_id: home_realm.clone(),
             sidecar_id: sidecar_id.clone(),
         },
         controller_actor,
@@ -830,12 +695,27 @@ async fn finalize_sidecar_projection_records(
     context_attach_event: &arkret_wire::Event,
 ) -> Result<(), AppError> {
     let sidecar_id = sidecar_prepared_sidecar_id(prepared)?;
+    let create_id = sidecar_id
+        .to_string()
+        .replacen("ak:sidecar:", "ak:event:", 1);
+    let create_id =
+        arkret_wire::EventId::new(create_id).map_err(|e| AppError::internal(e.to_string()))?;
+    let original = state
+        .authority_commits()
+        .committed_event(&create_id)
+        .await
+        .map_err(|e| AppError::internal(e.to_string()))?
+        .ok_or_else(|| AppError::internal("missing accepted Sidecar creation"))?;
+    let source: SidecarCreatePayload =
+        serde_json::from_value(serde_json::json!(original.event.payload))
+            .map_err(|e| AppError::internal(e.to_string()))?;
     let created_at = context_attach_event.created_at;
     state
         .agent_pairings()
         .ensure_sidecar(AgentSidecarRecord {
             sidecar_id: sidecar_id.to_string(),
             realm_id: context_attach_event.realm_id.to_string(),
+            source_realm_id: source.source_realm_id.to_string(),
             controller_account_id: arkret_wire::AccountId::new(
                 arkret_wire::DidCoreId::new(session.actor.clone()).map_err(|error| {
                     AppError::internal(format!("session actor invalid: {error}"))
@@ -1147,12 +1027,13 @@ use crate::historical_human::ordinary_realm as source_context_test_realm;
 
 #[cfg(test)]
 mod tests {
+    use arkret_models_collaboration::sidecar_operations::SidecarContextRef;
     use chrono::{TimeZone as _, Timelike as _};
 
     use super::*;
 
     #[tokio::test]
-    async fn sidecar_source_strand_reads_durable_current_without_a_reducer_mirror() {
+    async fn project_strand_membership_alone_cannot_prepare_a_personal_sidecar() {
         let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
         let pool = database.pool();
         let discussion = source_context_test_realm::open_human_discussion(
@@ -1170,24 +1051,12 @@ mod tests {
         let context = SidecarContextRef::Strand {
             strand_id: discussion.strand_id,
         };
-        validate_sidecar_context(&state, &realm, &context, &controller)
-            .await
-            .unwrap();
-        let foreign_station = arkret_wire::ActorId::account(arkret_wire::AccountId::new(
-            controller.as_account_id().unwrap().principal_id.clone(),
-            DidCoreId::new("ak:did_core:web:foreign-source-station.example").unwrap(),
-        ));
+        let account = controller.as_account_id().unwrap();
+        // Only the source Realm exists in this store; no owning Human PCR exists.
         assert!(
-            validate_sidecar_context(&state, &realm, &context, &foreign_station)
-                .await
-                .is_err()
-        );
-        let wrong_realm = RealmId::from_event_id(&arkret_wire::EventId::from_digest(
-            arkret_canonical::DigestSuite::Sha256,
-            [0x9f; 32],
-        ));
-        assert!(
-            validate_sidecar_context(&state, &wrong_realm, &context, &controller)
+            state
+                .authority_commits()
+                .sidecar_context_prepare_current(&realm, account, &context)
                 .await
                 .is_err()
         );
@@ -1521,14 +1390,18 @@ mod tests {
             RealmId::new("ak:realm:AQcksDTzb8Sxrn1BUVVlHtH4vBOy99RKUB4EwOq_413b".to_owned())
                 .unwrap();
         let event = author_typed_sidecar_event::<arkret_wire::event_spec::SidecarCreate>(
-            arkret_wire::ScopeRef::Realm { realm_id },
+            arkret_wire::ScopeRef::Realm {
+                realm_id: realm_id.clone(),
+            },
             arkret_wire::ActorId::account(arkret_wire::AccountId::new(
                 crate::test_actor_id_str("did:web:example.com:users:alice"),
                 crate::test_event::station_id(),
             )),
             Vec::new(),
             created_at,
-            SidecarCreatePayload::default(),
+            SidecarCreatePayload {
+                source_realm_id: realm_id.clone(),
+            },
             arkret_canonical::DigestSuite::Sha256,
         )
         .unwrap();
@@ -1576,62 +1449,6 @@ mod tests {
             sidecar_access_readiness(&[], false, false, false),
             AgentSidecarAccessReadiness::KeyMaterialPending
         );
-    }
-
-    #[test]
-    fn sidecar_membership_uses_exact_projected_actor_not_directory_principal() {
-        let state = AppState::new(
-            crate::config::AppConfig::test_default(),
-            coland_storage_postgres::Db { pool: None },
-        );
-        let realm_id = "ak:realm:AQcksDTzb8Sxrn1BUVVlHtH4vBOy99RKUB4EwOq_413b";
-        let principal = DidCoreId::new("ak:did_core:web:alice.example").unwrap();
-        let local_actor = arkret_wire::ActorId::account(arkret_wire::AccountId::new(
-            principal.clone(),
-            state.service_core_id(),
-        ));
-        let foreign_actor = arkret_wire::ActorId::account(arkret_wire::AccountId::new(
-            principal.clone(),
-            DidCoreId::new("ak:did_core:web:other-station.example").unwrap(),
-        ));
-        let mut directory = coland_services::events::RealmDirectoryEntry::new(
-            RealmId::new(realm_id).unwrap(),
-            "discovery only",
-            coland_services::events::DirectoryProvenance::LocalOnly,
-        );
-        directory.members.insert(principal.clone());
-        state.realm_directory().upsert(directory);
-        assert!(!realm_member_joined(
-            &state,
-            realm_id,
-            &local_actor.to_string()
-        ));
-        let now = chrono::Utc::now();
-        state.test_projection().lock().members.insert(
-            (realm_id.to_owned(), local_actor.to_string()),
-            coland_domain::reducer::ColandMembershipState {
-                member: local_actor.to_string(),
-                realm_id: realm_id.to_owned(),
-                state: "join".to_owned(),
-                role: "member".to_owned(),
-                membership_event_ref: None,
-                invited_at: None,
-                joined_at: now,
-                updated_at: now,
-                reason: None,
-            },
-        );
-        assert!(realm_member_joined(
-            &state,
-            realm_id,
-            &local_actor.to_string()
-        ));
-        assert!(!realm_member_joined(
-            &state,
-            realm_id,
-            &foreign_actor.to_string()
-        ));
-        assert!(!realm_member_joined(&state, realm_id, principal.as_str()));
     }
 
     #[test]

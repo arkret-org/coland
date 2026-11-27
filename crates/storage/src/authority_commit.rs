@@ -1065,6 +1065,7 @@ pub struct VerifiedMlsAddAuthorityAttestation {
 /// leaf indices and the claim batch never enter this result.
 #[derive(Clone, Debug)]
 pub struct MlsRosterAuthorityFacts {
+    pub sidecar_backup_strategy: Option<arkret_wire::EncryptionBackupStrategy>,
     pub group_info_ref: arkret_wire::BlobRef,
     pub ratchet_tree_ref: arkret_wire::BlobRef,
     pub authority_head_commit_event_ref: EventId,
@@ -1808,6 +1809,22 @@ pub trait AccountContentDeliveryGuard: Send {
         self.permits_handoff()
     }
     async fn finish(self: Box<Self>) -> PersistenceResult<()>;
+}
+
+/// Home-side checks for one live delivery. The caller verifies the original
+/// governing signature and authority bundle before presenting the narrow snapshot.
+#[async_trait]
+pub trait HostedAgentHistoryRead: AccountContentDeliveryGuard {
+    async fn permits_request(&mut self) -> bool;
+    async fn discard(self: Box<Self>) -> PersistenceResult<()>;
+    async fn accept_history(
+        &mut self,
+        snapshot: &arkret_wire::RealmStateSnapshot,
+    ) -> PersistenceResult<()>;
+    async fn accept_page(
+        &mut self,
+        page: &arkret_wire::StreamScanResponseBody,
+    ) -> PersistenceResult<()>;
 }
 
 /// Exact principals, accepted source and current cut used to prepare a native reply.
@@ -3582,6 +3599,37 @@ pub trait AuthorityCommitStore: Send + Sync {
     ) -> PersistenceResult<HumanPcrHistoryRead<MlsMemberGroupStateMaterialRead>> {
         Err(PersistenceError::Internal(
             "Human PCR MLS material reader is not configured".into(),
+        ))
+    }
+
+    async fn prepare_hosted_agent_history(
+        &self,
+        _account: &arkret_wire::AccountId,
+        _station: &arkret_wire::DidCoreId,
+        _scan: &arkret_wire::StreamScanRequestBody,
+        _session: &arkret_wire::SessionGrantId,
+        _input: &AccountContentDeliveryInput,
+    ) -> PersistenceResult<(
+        arkret_models_collaboration::authority_commit::OwnedAgentStreamScanRequestBody,
+        Box<dyn HostedAgentHistoryRead>,
+    )> {
+        Err(PersistenceError::Conflict(
+            "temporarily_unavailable: hosted Agent history is unavailable".into(),
+        ))
+    }
+
+    /// A live account delivery initiated by the authenticated owning Station.
+    async fn scan_for_remote_owned_agent(
+        &self,
+        _request: &arkret_models_collaboration::authority_commit::OwnedAgentStreamScanRequestBody,
+        _peer: &arkret_wire::DidCoreId,
+        _governor: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<(
+        arkret_wire::StreamScanResponseBody,
+        Box<dyn AccountContentDeliveryGuard>,
+    )> {
+        Err(PersistenceError::Conflict(
+            "temporarily_unavailable: remote Agent content source is unavailable".into(),
         ))
     }
 

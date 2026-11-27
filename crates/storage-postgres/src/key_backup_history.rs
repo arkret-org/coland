@@ -7,7 +7,7 @@ use arkret_models_crypto::{
     KeyBackup, KeyBackupUnlockAuthority, KeyBackupUnlockProof, KeysBackupsUnlockChallenge,
     KeysBackupsUnlockRequestBody, RecoveryMethod, RecoveryPolicy, RecoveryPolicyRef,
 };
-use arkret_wire::{ActorId, CommitStreamRef, ScopeRef};
+use arkret_wire::{ActorId, CommitStreamRef};
 use coland_storage::{
     AccountContentDeliveryGuard, HumanPcrHistoryReader, PersistenceError, PersistenceResult,
 };
@@ -142,17 +142,18 @@ pub(crate) async fn qualify(
     backup_id: &arkret_wire::BackupId,
 ) -> PersistenceResult<(KeyBackup, chrono::DateTime<chrono::Utc>)> {
     let realm = history.source.stream_ref.realm_id();
-    if history.source.stream_ref
-        != (CommitStreamRef::Realm {
-            realm_id: realm.clone(),
-        })
-        || history.root_refs.is_empty()
-    {
+    if !matches!(&history.source.stream_ref, CommitStreamRef::Realm { .. } | CommitStreamRef::Sidecar { .. })
+        || history.root_refs.is_empty() {
         return Err(denied("source or selection"));
     }
     let (owned_realm, expires) = current_reader(conn, reader).await?;
     if realm != &owned_realm {
         return Err(denied("source is outside the original Account PCR"));
+    }
+    if let CommitStreamRef::Sidecar { sidecar_id, .. } = &history.source.stream_ref {
+        let floor = crate::sidecar_authority_cut::controller_floor_in_connection(conn, realm, sidecar_id,
+            &ActorId::account(reader.account_id.clone())).await?.ok_or_else(|| denied("personal history unavailable"))?;
+        if history.source.stream_position < floor.oldest_position { return Err(denied("outside personal history")); }
     }
     let original = crate::committed_disclosure::accepted_full_event_in_connection(
         conn,
@@ -163,10 +164,7 @@ pub(crate) async fn qualify(
     if original.commit.commit_id != history.source.commit_id
         || original.commit.stream_ref != history.source.stream_ref
         || original.commit.stream_position != history.source.stream_position
-        || original.event.scope_ref
-            != (ScopeRef::Realm {
-                realm_id: realm.clone(),
-            })
+        || original.event.scope_ref != history.source.stream_ref.scope_ref()
         || original.event.actor_id != ActorId::account(reader.account_id.clone())
     {
         return Err(denied("original coordinates or subject"));

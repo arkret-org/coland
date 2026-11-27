@@ -1,4 +1,7 @@
 //! Current governing cut held through an Account content handoff.
+pub(crate) mod hosted_project;
+mod personal_sidecar;
+
 use arkret_models_collaboration::governance::operation_wire::AgentPolicyOperation;
 use arkret_wire::{AccountId, ActorId, CapabilityActionId, CommittedEventView, DidCoreId};
 use coland_storage::{AccountContentDeliveryGuard, PersistenceError, PersistenceResult};
@@ -407,12 +410,7 @@ pub(crate) async fn export_floor_in_connection(
             crate::sidecar_authority_cut::caller_floor_in_connection(conn, realm, sidecar_id, actor)
                 .await?
         }
-        CommitStreamRef::Sidecar { sidecar_id, .. } => {
-            crate::sidecar_replica_authority::floor_in_connection(conn, realm, sidecar_id, actor)
-                .await?
-                .ok()
-                .flatten()
-        }
+        CommitStreamRef::Sidecar { .. } => None,
         _ => {
             return Err(unavailable(
                 "Realm export stream has no registered visibility proof",
@@ -3294,6 +3292,14 @@ async fn acquire_with_native_reply(
         {
             realms.insert(realm.clone());
         }
+    }
+    if input.agent_endpoint.is_some() && personal_sidecar::requested(&input) {
+        if !realms.is_empty() || reply.is_some() {
+            return Err(unavailable(
+                "mixed project and private delivery requires independent authority cuts",
+            ));
+        }
+        return Box::pin(personal_sidecar::acquire(guard, account, station, &input)).await;
     }
     if realms.is_empty() && reply.is_some() {
         return Err(unavailable(

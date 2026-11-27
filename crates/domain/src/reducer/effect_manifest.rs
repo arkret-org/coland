@@ -870,6 +870,13 @@ const EFFECT_MANIFEST: &[EffectRegistration] = &[
         slot: CacheSlot::Shared(apply_sidecar_create_dispatch),
     },
     EffectRegistration {
+        kind: arkret_wire::event_kind_str::SIDECAR_MEMBER_STATE,
+        owner: EventEffectOwnership::DurableFactNoCurrentProjection,
+        scope: EventWireScope::DurableEvent,
+        reducer_input: true,
+        slot: CacheSlot::Shared(apply_durable_fact_dispatch),
+    },
+    EffectRegistration {
         kind: arkret_wire::CapabilityActionId::SPACE_ARCHIVE,
         owner: EventEffectOwnership::TypedStateWriter,
         scope: EventWireScope::DurableEvent,

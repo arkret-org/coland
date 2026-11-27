@@ -24,6 +24,8 @@
 //! Event's complete canonical bytes; a row withheld from that Station keeps
 //! only its Commit, so the page stays one verifiable chain.
 
+pub(crate) mod owned_agent;
+
 use arkret_wire::{
     AccountId, ActorId, CommitStreamRef, CommittedEventView, DidCoreId, ReadableFloor,
     ReadableFloorReason, StreamScanRequestBody, StreamScanResponseBody,
@@ -124,18 +126,20 @@ pub(crate) async fn scan_stream_for_actor_in_connection(
     }) {
         return Ok(AccountStreamScan::NotAuthorized);
     }
-    let members = sql_query(
-        "SELECT member_id, membership FROM member_state_current_states \
+    if !matches!(request.stream_ref, CommitStreamRef::Sidecar { .. }) {
+        let members = sql_query(
+            "SELECT member_id, membership FROM member_state_current_states \
          WHERE realm_id=$1 ORDER BY member_id",
-    )
-    .bind::<Text, _>(request.realm_id.as_str())
-    .load::<MemberRow>(&mut *conn)
-    .await?;
-    if !members
-        .iter()
-        .any(|row| row.member_id == caller && row.membership == "join")
-    {
-        return Ok(AccountStreamScan::NotAuthorized);
+        )
+        .bind::<Text, _>(request.realm_id.as_str())
+        .load::<MemberRow>(&mut *conn)
+        .await?;
+        if !members
+            .iter()
+            .any(|row| row.member_id == caller && row.membership == "join")
+        {
+            return Ok(AccountStreamScan::NotAuthorized);
+        }
     }
     let caller_actor = actor.clone();
     let floor = match (&request.stream_ref, tenure.service_id == issuer.as_str()) {
@@ -175,19 +179,7 @@ pub(crate) async fn scan_stream_for_actor_in_connection(
                 Err(reason) => return Ok(AccountStreamScan::Unproved(reason)),
             }
         }
-        (CommitStreamRef::Sidecar { sidecar_id, .. }, false) => {
-            match crate::sidecar_replica_authority::handshake_floor_in_connection(
-                conn,
-                &request.realm_id,
-                sidecar_id,
-                &caller_actor,
-            )
-            .await?
-            {
-                Ok(floor) => floor,
-                Err(reason) => return Ok(AccountStreamScan::Unproved(reason)),
-            }
-        }
+        (CommitStreamRef::Sidecar { .. }, false) => return Ok(AccountStreamScan::NotAuthorized),
         _ => {
             return Ok(AccountStreamScan::Unproved(
                 "the requested stream has no proved disclosure rule",
@@ -1294,36 +1286,6 @@ async fn peer_stream_intervals(
             realm_id,
             circle_id,
         } => peer_circle_intervals(conn, realm_id, circle_id, peer).await,
-        CommitStreamRef::Sidecar {
-            realm_id,
-            sidecar_id,
-        } => {
-            #[derive(QueryableByName)]
-            struct Owner {
-                #[diesel(sql_type = Jsonb)]
-                controller_account_id: serde_json::Value,
-            }
-            let owner = sql_query("SELECT controller_account_id FROM sidecar_current_states WHERE realm_id=$1 AND sidecar_id=$2")
-                .bind::<Text,_>(realm_id.as_str()).bind::<Text,_>(sidecar_id.as_str())
-                .get_result::<Owner>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
-            let Some(owner) = owner else {
-                return Ok((Vec::new(), Vec::new()));
-            };
-            let account: AccountId = serde_json::from_value(owner.controller_account_id)
-                .map_err(PersistenceError::database)?;
-            if &account.station_id != peer {
-                return Ok((Vec::new(), Vec::new()));
-            }
-            let actor = ActorId::account(account);
-            let Some(floor) = crate::sidecar_authority_cut::controller_floor_in_connection(
-                conn, realm_id, sidecar_id, &actor,
-            )
-            .await?
-            else {
-                return Ok((Vec::new(), Vec::new()));
-            };
-            Ok((vec![PeerInterval { floor, last: None }], vec![actor]))
-        }
         _ => Ok((Vec::new(), Vec::new())),
     }
 }
@@ -1632,11 +1594,7 @@ pub(crate) async fn committed_event_for_member_in_connection(
             )
             .await?
         } else {
-            crate::sidecar_replica_authority::handshake_floor_in_connection(
-                conn, &realm_id, sidecar_id, caller,
-            )
-            .await?
-            .unwrap_or_default()
+            None
         };
         if floor.is_none_or(|floor| commit.stream_position < floor.oldest_position) {
             return Ok(Read::NotVisible);

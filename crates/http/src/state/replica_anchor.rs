@@ -1033,6 +1033,202 @@ pub(crate) async fn foreign_content_ceiling(
     Ok(view)
 }
 
+/// The caller owns the native delivery guard. A narrow bootstrap establishes
+/// the member generation's floor. Only the subsequent live scan supplies bytes.
+pub(crate) async fn verify_foreign_project_history(
+    state: &AppState,
+    governor: &DidCoreId,
+    session: &coland_services::identity::SessionIdentityState,
+    local_secret: &str,
+    query: &arkret_models_collaboration::authority_commit::OwnedAgentStreamScanRequestBody,
+    guard: &mut dyn coland_storage::HostedAgentHistoryRead,
+) -> Result<LocatedRealmAuthority, crate::error::AppError> {
+    let unavailable = || {
+        crate::error::AppError::new(
+            arkret_wire::ErrorCode::TemporarilyUnavailable,
+            "governing history proof is unavailable",
+        )
+    };
+    let denied = || crate::error::AppError::capability_denied("Agent history is unavailable");
+    let request = PeerRealmJoinBootstrapRequestBody {
+        realm_id: query.scan.realm_id.clone(),
+        request_id: RequestId::new(format!("ak:request:{}", uuid::Uuid::now_v7()))
+            .map_err(|_| unavailable())?,
+        member_account_id: query.member_account_id.clone(),
+        membership_commit_id: query.membership_commit_id.clone(),
+        content_intent: None,
+        history_stream_ref: Some(query.scan.stream_ref.clone()),
+    };
+    if !guard.permits_request().await {
+        tracing::warn!("hosted project history authorization changed before bootstrap");
+        return Err(denied());
+    }
+    crate::routing::identity::auth::revalidate_current_read_session(
+        state,
+        session,
+        Some(local_secret),
+    )
+    .await
+    .map_err(|cause| {
+        tracing::warn!(%cause, "hosted project history session changed before bootstrap");
+        denied()
+    })?;
+    let body = post_history_request(
+        state,
+        governor,
+        BOOTSTRAP_PATH,
+        &request,
+        BOOTSTRAP_MAX_BYTES,
+    )
+    .await?;
+    let outcome: PeerRealmJoinBootstrapResponseBody =
+        serde_json::from_slice(&body).map_err(|_| unavailable())?;
+    if outcome.request_id != request.request_id
+        || outcome.visible_stream_heads != outcome.snapshot.visible_stream_heads
+    {
+        return Err(unavailable());
+    }
+    request
+        .validate_history_snapshot(&outcome.snapshot)
+        .map_err(|_| unavailable())?;
+    let nonce = crate::routing::realm_join::nonce_for_request(&request.request_id)
+        .map_err(|_| unavailable())?;
+    let mut served = crate::routing::realm_join::verify_served_bundle(
+        state,
+        outcome.authority_bundle.clone(),
+        &nonce,
+    )
+    .await
+    .map_err(|_| unavailable())?;
+    if served.authority.current_service_id() != governor
+        || served.bundle.realm_id != request.realm_id
+    {
+        return Err(unavailable());
+    }
+    verify_bootstrap_genesis(state, &outcome, &mut served)
+        .await
+        .map_err(|_| unavailable())?;
+    verify_snapshot(state, &mut served, &outcome.snapshot)
+        .await
+        .map_err(|_| unavailable())?;
+    guard
+        .accept_history(&outcome.snapshot)
+        .await
+        .map_err(|_| unavailable())?;
+    Ok(served)
+}
+
+pub(crate) async fn read_foreign_project_page(
+    state: &AppState,
+    governor: &DidCoreId,
+    session: &coland_services::identity::SessionIdentityState,
+    local_secret: &str,
+    query: &arkret_models_collaboration::authority_commit::OwnedAgentStreamScanRequestBody,
+    guard: &mut dyn coland_storage::HostedAgentHistoryRead,
+) -> Result<arkret_wire::StreamScanResponseBody, crate::error::AppError> {
+    let unavailable = || {
+        crate::error::AppError::new(
+            arkret_wire::ErrorCode::TemporarilyUnavailable,
+            "governing history proof is unavailable",
+        )
+    };
+    let denied = || crate::error::AppError::capability_denied("Agent history is unavailable");
+    let mut served =
+        verify_foreign_project_history(state, governor, session, local_secret, query, guard)
+            .await?;
+    if !guard.permits_request().await
+        || crate::routing::identity::auth::revalidate_current_read_session(
+            state,
+            session,
+            Some(local_secret),
+        )
+        .await
+        .is_err()
+    {
+        return Err(denied());
+    }
+    let body = post_history_request(state, governor, SCAN_PATH, query, SCAN_MAX_BYTES).await?;
+    let page: arkret_wire::StreamScanResponseBody =
+        serde_json::from_slice(&body).map_err(|_| unavailable())?;
+    page.validate_for_request(&query.scan)
+        .map_err(|_| unavailable())?;
+    for row in &page.committed_events {
+        let commit = row.commit();
+        ensure_historical_method_key(state, &mut served, &commit.signature)
+            .await
+            .map_err(|_| unavailable())?;
+        match row {
+            CommittedEventView::Full(full) => {
+                // The Event ID omits its producer proof. Verify that proof as
+                // well as the governor's signature on this disclosed original.
+                let fact = state
+                    .authority_commits()
+                    .producer_signer_fact(&full.event, commit)
+                    .await
+                    .map_err(|_| unavailable())?;
+                verify_committed_event_receipt_with_source(
+                    state.persistence(),
+                    &full.event,
+                    commit,
+                    CommitContinuity::Standalone,
+                    &served.authority,
+                    &served.keys,
+                    &state.service_core_id(),
+                    commit.realm_id.digest_suite_code().digest_suite(),
+                    fact.as_ref(),
+                )
+                .await
+                .map_err(|_| unavailable())?;
+            }
+            CommittedEventView::Withheld(_) => served
+                .authority
+                .verify_commit(commit, &served.keys)
+                .map_err(|_| unavailable())?,
+        }
+    }
+    guard.accept_page(&page).await.map_err(|_| denied())?;
+    Ok(page)
+}
+
+async fn post_history_request<T: serde::Serialize>(
+    state: &AppState,
+    governor: &DidCoreId,
+    path: &str,
+    request: &T,
+    max_bytes: usize,
+) -> Result<Vec<u8>, crate::error::AppError> {
+    let unavailable = || {
+        crate::error::AppError::new(
+            arkret_wire::ErrorCode::TemporarilyUnavailable,
+            "governing history is unavailable",
+        )
+    };
+    let body = arkret_canonical::canonical_json_bytes(request).map_err(|_| unavailable())?;
+    let response = crate::routing::federation::outbox::signed_peer_request(
+        state,
+        governor.as_str(),
+        path,
+        &body,
+        max_bytes,
+    )
+    .await
+    .map_err(|_| unavailable())?;
+    match response.status {
+        200 => Ok(response.body),
+        401 | 403 | 404 => {
+            tracing::warn!(
+                status = response.status,
+                path,
+                "governing Station refused project history"
+            );
+            Err(crate::error::AppError::capability_denied(
+                "Agent history is unavailable",
+            ))
+        }
+        _ => Err(unavailable()),
+    }
+}
+
 async fn post_peer<T: serde::Serialize>(
     state: &AppState,
     governance: &DidCoreId,

@@ -229,8 +229,6 @@ mod sidecar_effective_access;
 mod sidecar_exchange_controls;
 mod sidecar_membership_provenance;
 mod sidecar_mls_readiness;
-mod sidecar_replica_authority;
-mod sidecar_replica_current;
 mod sidecars;
 mod signal;
 mod signal_scope_authority;

@@ -463,6 +463,20 @@ async fn admit_sidecar_message(
             "private Message actor is outside the effective Sidecar access set",
         ));
     }
+    let owner =
+        crate::sidecar_access::controller_account_in_connection(conn, &event.realm_id, sidecar_id)
+            .await?
+            .ok_or_else(|| conflict("private controller unavailable"))?;
+    if event.actor_id.as_account_id() != Some(&owner) {
+        let agent = event
+            .actor_id
+            .as_account_id()
+            .ok_or_else(|| conflict("private Agent account required"))?;
+        let proof = event.producer_proof.as_ref().ok_or_else(|| conflict("signed private reply required"))?;
+        if !crate::sidecar_access::can_reply_in_connection(conn, &event.realm_id, sidecar_id, agent, &proof.verification_method, None).await? {
+            return Err(conflict("private reply permission is unavailable"));
+        }
+    }
     let payload: MessageCreatePayload = serde_json::from_value(
         serde_json::to_value(&event.payload).map_err(PersistenceError::database)?,
     )

@@ -65,24 +65,26 @@ fn remember(fact: &FactRow, streams: &mut Vec<CommitStreamRef>) -> PersistenceRe
     Ok(())
 }
 
-pub(crate) async fn member_fact(
+/// Latest accepted private choice on this exact Sidecar. It grants no parent membership.
+pub(crate) async fn enrollment(
     conn: &mut AsyncPgConnection,
     realm: &RealmId,
-    actor: &ActorId,
+    sidecar: &SidecarId,
+    account: &AccountId,
 ) -> PersistenceResult<Option<FactRow>> {
-    sql_query("SELECT e.envelope->>'event_id' AS event_id,c.commit_id,c.stream_position,c.stream_ref, \
-        m.value || jsonb_build_object('agent_controller_binding',e.envelope->'payload'->'agent_controller_binding') AS value \
-        FROM member_state_current_states m JOIN realm_commits c \
-          ON c.realm_id=m.realm_id AND c.commit_id=m.current_commit_id AND c.stream_position=m.current_stream_position \
-        JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' \
-        WHERE m.realm_id=$1 AND m.member_id=$2 AND m.value->>'membership'=m.membership \
-          AND c.stream_ref=jsonb_build_object('kind','realm','realm_id',$1) AND e.kind IN ('ak.member.state','ak.invite.accept','ak.realm_invite_link.accept')")
-        .bind::<Text,_>(realm.as_str()).bind::<Text,_>(actor.to_string())
-        .get_result(&mut *conn).await.optional().map_err(PersistenceError::database)
+    let stream = CommitStreamRef::Sidecar {
+        realm_id: realm.clone(),
+        sidecar_id: sidecar.clone(),
+    };
+    sql_query("SELECT e.envelope->>'event_id' AS event_id,c.commit_id,c.stream_position,c.stream_ref,e.envelope->'payload' AS value
+        FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk
+        WHERE c.realm_id=$1 AND c.stream_ref=$2 AND e.state='committed' AND e.kind='ak.sidecar.member.state'
+          AND e.envelope->'payload'->'agent_account_id'=$3 ORDER BY c.stream_position DESC LIMIT 1")
+        .bind::<Text,_>(realm.as_str()).bind::<Jsonb,_>(serde_json::json!(stream)).bind::<Jsonb,_>(serde_json::json!(account))
+        .get_result(conn).await.optional().map_err(PersistenceError::database)
 }
 
-/// The caller owns the already accepted Sidecar, and its parent membership,
-/// ownership, lifecycle and runtime-key facts all come from this connection.
+/// Resolve the signed private enrollment and current account, ownership and endpoint facts at H.
 pub(crate) async fn in_connection(
     conn: &mut AsyncPgConnection,
     realm: &RealmId,
@@ -105,13 +107,6 @@ pub(crate) async fn in_connection(
     {
         return Ok(None);
     }
-    let Some(member) = member_fact(conn, realm, &ActorId::account(controller.clone())).await?
-    else {
-        return Ok(None);
-    };
-    if member.value.get("membership").and_then(Value::as_str) != Some("join") {
-        return Ok(None);
-    }
     if SidecarId::from_event_id(
         &EventId::new(owner.create_event_id).map_err(PersistenceError::database)?,
     ) != *sidecar
@@ -123,8 +118,7 @@ pub(crate) async fn in_connection(
     let mut streams = vec![CommitStreamRef::Realm {
         realm_id: realm.clone(),
     }];
-    let member_controller_generation = member.event_id.clone();
-    remember(&member, &mut streams)?;
+
     #[derive(QueryableByName)]
     struct ControllerPcr {
         #[diesel(sql_type = Text)]
@@ -145,19 +139,20 @@ pub(crate) async fn in_connection(
     };
     // The accepted controller PCR genesis fixes the complete Account identity;
     // a matching principal string in another Station's PCR is insufficient.
+    if controller_pcr.realm_id != realm.as_str() {
+        return Err(invalid(
+            "Sidecar governance differs from the controller PCR",
+        ));
+    }
     let agents = sql_query("SELECT p.agent_id,p.value->>'principal_control_realm_id' AS principal_control_realm_id, \
         e.envelope->>'event_id' AS event_id,c.commit_id,c.stream_position,c.stream_ref \
         FROM agent_provisioning_current_states p JOIN pcr_genesis_units g ON g.realm_id=p.realm_id \
         JOIN realm_commits c ON c.realm_id=p.realm_id AND c.commit_id=p.current_commit_id AND c.stream_position=p.current_stream_position \
         JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' \
-        JOIN member_state_current_states m ON m.realm_id=$4 AND m.membership='join' \
-          AND m.value->>'membership'='join' \
-          AND m.member_id::jsonb=jsonb_build_object('kind','account','account_id', \
-              jsonb_build_object('principal_id',p.agent_id,'station_id',$2::text)) \
         WHERE g.principal_id=$1 AND g.station_id=$2 AND p.value->>'controller_principal_id'=$1 AND p.realm_id=$3 \
         ORDER BY p.agent_id")
         .bind::<Text,_>(controller.principal_id.as_str()).bind::<Text,_>(controller.station_id.as_str())
-        .bind::<Text,_>(&controller_pcr.realm_id).bind::<Text,_>(realm.as_str())
+        .bind::<Text,_>(&controller_pcr.realm_id)
         .load::<AgentRow>(&mut *conn).await.map_err(PersistenceError::database)?;
     let mut desired = Vec::new();
     let at = chrono::Utc::now();
@@ -167,34 +162,21 @@ pub(crate) async fn in_connection(
             agent_id.clone(),
             controller.station_id.clone(),
         ));
-        let Some(member) = member_fact(conn, realm, &actor).await? else {
-            return Err(invalid(
-                "Sidecar joined Agent lacks its accepted membership source",
-            ));
-        };
-        let binding = member
-            .value
-            .get("agent_controller_binding")
-            .filter(|binding| binding.is_object())
-            .ok_or_else(|| invalid("Sidecar Agent join lacks its controller binding"))?;
-        let bound_controller: AccountId = serde_json::from_value(
-            binding
-                .get("controller_account_id")
-                .cloned()
-                .ok_or_else(|| invalid("Agent join lacks its complete controller"))?,
+        let Some(member) = enrollment(
+            conn,
+            realm,
+            sidecar,
+            actor
+                .as_account_id()
+                .ok_or_else(|| invalid("Agent Account required"))?,
         )
-        .map_err(PersistenceError::database)?;
-        let controller_generation = binding
-            .get("controller_membership_generation_ref")
-            .and_then(Value::as_str)
-            .ok_or_else(|| invalid("Agent join lacks its controller membership generation"))?;
-        if bound_controller != *controller
-            || controller_generation != member_controller_generation.as_str()
-        {
+        .await?
+        else {
+            continue;
+        };
+        if member.value["membership"] != "join" {
             continue;
         }
-        // Only exact Realm members with a current controller binding require
-        // native provisioning/lifecycle/key inputs from H.
         let pcr =
             RealmId::new(&agent.principal_control_realm_id).map_err(PersistenceError::database)?;
         remember(&member, &mut streams)?;
@@ -383,8 +365,7 @@ pub async fn read_access(
     }).await.map_err(PgTransactionError::into_persistence)
 }
 
-/// Private controller stream access is tied to the complete Account and its
-/// accepted current parent membership. A Realm member is never sufficient.
+/// Resolve the private controller stream floor for the complete owner Account at H.
 pub(crate) async fn controller_floor_in_connection(
     conn: &mut AsyncPgConnection,
     realm: &RealmId,
@@ -408,11 +389,8 @@ pub(crate) async fn controller_floor_in_connection(
     {
         return Ok(None);
     }
-    if !member_fact(conn, realm, caller)
-        .await?
-        .is_some_and(|member| {
-            member.value.get("membership").and_then(Value::as_str) == Some("join")
-        })
+    if !crate::sidecar_access::is_owning_station_in_connection(conn, account).await?
+        || crate::morph_projection_reads::human_realm_in_connection(conn, account).await? != *realm
     {
         return Ok(None);
     }
@@ -458,18 +436,6 @@ pub(crate) async fn caller_floor_in_connection(
     let Some(account) = caller.as_account_id() else {
         return Ok(None);
     };
-    let Some(controller) =
-        crate::sidecar_access::controller_account_in_connection(conn, realm, sidecar).await?
-    else {
-        return Ok(None);
-    };
-    if !crate::sidecar_replica_authority::is_owning_station_in_connection(conn, &controller).await?
-    {
-        return crate::sidecar_replica_authority::agent_floor_in_connection(
-            conn, realm, sidecar, caller,
-        )
-        .await;
-    }
     let Some(cut) = crate::sidecar_access::cut_in_connection(conn, realm, sidecar).await? else {
         return Ok(None);
     };
@@ -480,7 +446,8 @@ pub(crate) async fn caller_floor_in_connection(
     {
         return Ok(None);
     }
-    crate::sidecar_replica_authority::agent_floor_in_connection(conn, realm, sidecar, caller).await
+    crate::sidecar_membership_provenance::agent_floor_in_connection(conn, realm, sidecar, caller)
+        .await
 }
 
 /// Preserve the ordinary effective interval, or prove the restricted public
@@ -510,18 +477,6 @@ pub(crate) async fn handshake_floor_in_connection(
     if let Some(floor) = controller_floor_in_connection(conn, realm, sidecar, caller).await? {
         return Ok(Some(floor));
     }
-    let Some(controller) =
-        crate::sidecar_access::controller_account_in_connection(conn, realm, sidecar).await?
-    else {
-        return Ok(None);
-    };
-    if !crate::sidecar_replica_authority::is_owning_station_in_connection(conn, &controller).await?
-    {
-        return crate::sidecar_replica_authority::agent_floor_in_connection(
-            conn, realm, sidecar, caller,
-        )
-        .await;
-    }
     let Some(cut) = crate::sidecar_access::cut_in_connection(conn, realm, sidecar).await? else {
         return Ok(None);
     };
@@ -538,7 +493,8 @@ pub(crate) async fn handshake_floor_in_connection(
     {
         return Ok(None);
     }
-    crate::sidecar_replica_authority::agent_floor_in_connection(conn, realm, sidecar, caller).await
+    crate::sidecar_membership_provenance::agent_floor_in_connection(conn, realm, sidecar, caller)
+        .await
 }
 
 /// H holds the controller ownership stream before discovering relevant Agent
@@ -570,26 +526,27 @@ pub(crate) async fn locked_in_connection(
         .load::<RealmRow>(&mut *conn)
         .await
         .map_err(PersistenceError::database)?;
-    let owned = sql_query(
-        "SELECT a.realm_id FROM realm_authorities a JOIN agent_provisioning_current_states p \
-        ON a.realm_id=p.value->>'principal_control_realm_id' \
-        JOIN member_state_current_states m ON m.realm_id=$2 AND m.membership='join' \
-          AND m.value->>'membership'='join' AND m.member_id::jsonb=jsonb_build_object('kind','account', \
-            'account_id',jsonb_build_object('principal_id',p.agent_id,'station_id',$3::text)) \
-        WHERE p.realm_id=$1 ORDER BY a.realm_id FOR SHARE OF a",
-    )
-    .bind::<Text, _>(&pcr.realm_id)
-    .bind::<Text, _>(realm.as_str())
-    .bind::<Text, _>(controller.station_id.as_str())
-    .load::<RealmRow>(&mut *conn)
-    .await
-    .map_err(PersistenceError::database)?;
-    let _ = owned;
+    let scope = CommitStreamRef::Sidecar {
+        realm_id: realm.clone(),
+        sidecar_id: sidecar.clone(),
+    };
+    sql_query("SELECT a.realm_id FROM realm_authorities a JOIN agent_provisioning_current_states p
+        ON a.realm_id=p.value->>'principal_control_realm_id'
+        JOIN LATERAL (SELECT e.envelope->'payload'->>'membership' AS membership
+          FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk
+          WHERE c.realm_id=$1 AND c.stream_ref=$2 AND e.state='committed' AND e.kind='ak.sidecar.member.state'
+            AND e.envelope->'payload'->'agent_account_id'=jsonb_build_object('principal_id',p.agent_id,'station_id',$3::text)
+          ORDER BY c.stream_position DESC LIMIT 1) choice ON choice.membership='join'
+        WHERE p.realm_id=$1 ORDER BY a.realm_id FOR SHARE OF a")
+        .bind::<Text, _>(&pcr.realm_id)
+        .bind::<Jsonb, _>(serde_json::json!(scope))
+        .bind::<Text, _>(controller.station_id.as_str())
+        .load::<RealmRow>(&mut *conn).await.map_err(PersistenceError::database)?;
     in_connection(conn, realm, sidecar, controller).await
 }
 
 /// H rechecks the signed desired/join digest after locking its relevant native
-/// sources. G independently checks its own membership/RFC/fence cut.
+/// sources and admits the native RFC transition there.
 pub(crate) async fn validate_mls_binding_in_connection(
     conn: &mut AsyncPgConnection,
     binding: &arkret_models_crypto::MlsGovernanceBindingPayload,
@@ -608,7 +565,7 @@ pub(crate) async fn validate_mls_binding_in_connection(
         .await?
         .ok_or_else(|| {
             PersistenceError::Conflict(format!(
-                "{}: Sidecar controller or parent membership is not current",
+                "{}: Sidecar controller authority is not current",
                 coland_storage::ConflictCode::CapabilityDenied
             ))
         })?;
@@ -624,9 +581,8 @@ pub(crate) async fn validate_mls_binding_in_connection(
     Ok(cut)
 }
 
-/// Check only H's native responsibility before its exact original is forwarded.
-/// Claim originals and signatures are verified by the serving owner; G separately
-/// decides the complete RFC transition and its own membership/fence cut.
+/// H validates the selected private endpoints and their original claims before accepting the native
+/// transition.
 pub(crate) async fn mls_authoring_is_current(
     pool: &PgPool,
     event: &arkret_wire::Event,
@@ -676,9 +632,7 @@ pub(crate) async fn mls_authoring_is_current(
         else {
             return Ok(false);
         };
-        if !crate::sidecar_replica_authority::is_owning_station_in_connection(conn, &controller)
-            .await?
-        {
+        if !crate::sidecar_access::is_owning_station_in_connection(conn, &controller).await? {
             return Ok(false);
         }
         let Some(cut) = in_connection(conn, realm_id, sidecar_id, &controller).await? else {

@@ -3035,6 +3035,41 @@ impl AuthorityCommitApplication {
             .await?)
     }
 
+    pub async fn prepare_hosted_agent_history(
+        &self,
+        account: &arkret_wire::AccountId,
+        station: &arkret_wire::DidCoreId,
+        scan: &arkret_wire::StreamScanRequestBody,
+        session: &arkret_wire::SessionGrantId,
+        input: &coland_storage::AccountContentDeliveryInput,
+    ) -> ServiceResult<(
+        arkret_models_collaboration::authority_commit::OwnedAgentStreamScanRequestBody,
+        Box<dyn coland_storage::HostedAgentHistoryRead>,
+    )> {
+        Ok(self
+            .store()
+            .prepare_hosted_agent_history(account, station, scan, session, input)
+            .await?)
+    }
+
+    pub async fn scan_for_remote_owned_agent(
+        &self,
+        request: &arkret_models_collaboration::authority_commit::OwnedAgentStreamScanRequestBody,
+        peer: &DidCoreId,
+        governor: &DidCoreId,
+    ) -> ServiceResult<(
+        arkret_wire::StreamScanResponseBody,
+        Box<dyn coland_storage::AccountContentDeliveryGuard>,
+    )> {
+        request
+            .validate_binding()
+            .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
+        Ok(self
+            .store()
+            .scan_for_remote_owned_agent(request, peer, governor)
+            .await?)
+    }
+
     pub async fn scan_stream_for_peer(
         &self,
         request: &StreamScanRequestBody,

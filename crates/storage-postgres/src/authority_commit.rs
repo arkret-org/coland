@@ -6717,6 +6717,35 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
             .await
     }
 
+    async fn prepare_hosted_agent_history(
+        &self,
+        account: &arkret_wire::AccountId,
+        station: &arkret_wire::DidCoreId,
+        scan: &arkret_wire::StreamScanRequestBody,
+        session: &arkret_wire::SessionGrantId,
+        input: &coland_storage::AccountContentDeliveryInput,
+    ) -> PersistenceResult<(
+        arkret_models_collaboration::authority_commit::OwnedAgentStreamScanRequestBody,
+        Box<dyn coland_storage::HostedAgentHistoryRead>,
+    )> {
+        crate::account_content_delivery::hosted_project::prepare(
+            &self.pool, account, station, scan, session, input,
+        )
+        .await
+    }
+
+    async fn scan_for_remote_owned_agent(
+        &self,
+        request: &arkret_models_collaboration::authority_commit::OwnedAgentStreamScanRequestBody,
+        peer: &arkret_wire::DidCoreId,
+        governor: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<(
+        arkret_wire::StreamScanResponseBody,
+        Box<dyn coland_storage::AccountContentDeliveryGuard>,
+    )> {
+        crate::account_stream_scan::owned_agent::acquire(&self.pool, request, peer, governor).await
+    }
+
     async fn scan_stream_for_peer(
         &self,
         request: &arkret_wire::StreamScanRequestBody,
@@ -7305,7 +7334,7 @@ impl PgAuthorityCommitStore {
                     .bind::<Jsonb,_>(serde_json::to_value(manifest).map_err(invalid)?).execute(&mut *conn).await?;
             }
             crate::replica_authorization::invalidate_circle_continuation(conn, &handoff.realm_id).await?;
-            handoff_replica::retain_outgoing_cut(conn, handoff, snapshot, &originals).await?;
+            handoff_replica::retain_outgoing_cut(conn, handoff, snapshot).await?;
             sql_query("INSERT INTO management_private_handoff_imports(handoff_id,realm_id,manifest) VALUES($1,$2,$3)")
                 .bind::<Text,_>(handoff.handoff_id.as_str()).bind::<Text,_>(handoff.realm_id.as_str())
                 .bind::<Jsonb,_>(serde_json::to_value(management).map_err(invalid)?).execute(&mut *conn).await?;

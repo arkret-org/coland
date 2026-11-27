@@ -120,6 +120,118 @@ pub(crate) fn content_root_index(
         .collect()
 }
 
+/// First publication of a personal epoch root is an exact native write.
+async fn require_personal_root_writer(
+    conn: &mut diesel_async::AsyncPgConnection,
+    backup: &arkret_models_crypto::KeyBackup,
+) -> PersistenceResult<()> {
+    use arkret_event_draft::EventPayloadExt as _;
+    let denied =
+        || PersistenceError::Conflict("capability_denied: private root writer unavailable".into());
+    for item in &backup.contents {
+        let Some(context) = &item.root_context else {
+            continue;
+        };
+        let arkret_wire::ScopeRef::Sidecar {
+            realm_id,
+            sidecar_id,
+        } = &context.effective_scope
+        else {
+            continue;
+        };
+        let subject = backup.actor_id.as_account_id().ok_or_else(denied)?;
+        let owner =
+            crate::sidecar_access::controller_account_in_connection(conn, realm_id, sidecar_id)
+                .await?
+                .ok_or_else(denied)?;
+        if !crate::sidecar_access::is_owning_station_in_connection(conn, &owner).await?
+            || crate::morph_projection_reads::human_realm_in_connection(conn, &owner).await?
+                != *realm_id
+        {
+            return Err(denied());
+        }
+        crate::realm_authorization_cut::lock_realm_authorization_cut(conn, realm_id).await?;
+        // Replacement packets may preserve an already admitted historical root in the same native custody.
+        let root = item.root_ref.as_ref().ok_or_else(denied)?;
+        let known = diesel::sql_query("SELECT EXISTS(SELECT 1 FROM content_original_roots WHERE root_ref=$1 AND backup_actor_id=$2 AND root_context=$3) AS present")
+            .bind::<Text,_>(root.as_str()).bind::<Text,_>(backup.actor_id.to_string()).bind::<Jsonb,_>(serde_json::json!(context))
+            .get_result::<crate::query_rows::ExistsRow>(&mut *conn).await.map_err(PersistenceError::database)?.present;
+        if known {
+            continue;
+        }
+        let group = crate::mls_group_current_states::held_current_value_in_connection(
+            conn,
+            &context.effective_scope,
+            None,
+        )
+        .await?
+        .ok_or_else(denied)?;
+        if group.effective_scope != context.effective_scope
+            || group.epoch != context.epoch
+            || group.genesis_event_ref != context.genesis_event_ref
+            || group.current_mls_commit_event_ref != context.group_state_ref
+            || group.cipher_suite.as_str() != context.cipher_suite
+        {
+            return Err(denied());
+        }
+        let strategy = crate::committed_disclosure::accepted_full_event_in_connection(
+            conn,
+            &context.backup_strategy_ref,
+        )
+        .await?
+        .ok_or_else(denied)?;
+        if strategy.event.realm_id != *realm_id
+            || strategy
+                .event
+                .as_realm_create()
+                .map_err(|_| denied())?
+                .object
+                .initial_encryption_backup_strategy
+                != context.encryption_backup_strategy
+        {
+            return Err(denied());
+        }
+        if subject == &owner {
+            let cut = crate::sidecar_authority_cut::locked_in_connection(
+                conn, realm_id, sidecar_id, &owner,
+            )
+            .await?
+            .ok_or_else(denied)?;
+            let device = backup
+                .signature_proof
+                .device_id
+                .as_ref()
+                .ok_or_else(denied)?;
+            if !crate::sidecar_mls_readiness::controller_device_ready_in_connection(
+                conn, &cut, &group, device,
+            )
+            .await?
+            {
+                return Err(denied());
+            }
+        } else {
+            let key = backup
+                .signature_proof
+                .agent_authorization_event_ref
+                .as_ref()
+                .ok_or_else(denied)?;
+            if !crate::sidecar_access::can_reply_in_connection(
+                conn,
+                realm_id,
+                sidecar_id,
+                subject,
+                &backup.signature_proof.verification_method,
+                Some(key),
+            )
+            .await?
+            {
+                return Err(denied());
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Store a verified immutable envelope together with its first-admission
 /// record. Ordinary deletion does not make either the identity or series new.
 pub(crate) async fn put_key_backup_in_connection(
@@ -186,6 +298,7 @@ pub(crate) async fn put_key_backup_in_connection(
             )),
         };
     }
+    require_personal_root_writer(conn, &typed).await?;
     let predecessor = sql_query(format!("SELECT {IDENTITY_COLUMNS} FROM key_backup_identities WHERE actor_id=$1 AND series_id=$2 ORDER BY series_sequence DESC LIMIT 1 FOR SHARE"))
         .bind::<Text,_>(&actor).bind::<Text,_>(typed.series_id.as_str())
         .get_result::<BackupIdentityRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;

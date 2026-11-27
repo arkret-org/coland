@@ -128,23 +128,21 @@ async fn validate_sidecar_mention_subjects(
     let controller_account = controller
         .as_account_id()
         .ok_or("addressed_agent_not_eligible")?;
-    let desired = crate::routing::identity::agents::sidecar::derive_sidecar_desired_agent_ids(
-        state,
-        &realm_id,
-        controller_account,
-    )
-    .await
-    .map_err(|_| "addressed_agent_not_eligible")?;
-    // A Sidecar's desired agents are hosted at the controller's own Station,
-    // so the eligible set is the complete account of each desired agent. An
-    // addressed account that only shares the principal component with a
-    // desired agent MUST NOT pass (identity-handles.md §3.8).
-    let eligible = desired
-        .iter()
-        .filter_map(|agent_id| arkret_wire::DidCoreId::new(agent_id.clone()).ok())
-        .map(|principal_id| {
+    let id = arkret_wire::SidecarId::new(sidecar_id.ok_or("addressed_agent_not_eligible")?)
+        .map_err(|_| "addressed_agent_not_eligible")?;
+    let realm = arkret_wire::RealmId::new(realm_id).map_err(|_| "addressed_agent_not_eligible")?;
+    let cut = state
+        .authority_commits()
+        .sidecar_participant_authority_cut(&realm, &id, controller_account)
+        .await
+        .map_err(|_| "addressed_agent_not_eligible")?
+        .ok_or("addressed_agent_not_eligible")?;
+    let eligible = cut
+        .desired_agent_ids
+        .into_iter()
+        .map(|agent| {
             arkret_wire::ActorId::account(arkret_wire::AccountId::new(
-                principal_id,
+                agent,
                 controller_account.station_id.clone(),
             ))
         })

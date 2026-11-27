@@ -1,0 +1,406 @@
+//! Endpoint-specific home checks before requesting history and handing it off.
+use arkret_models_collaboration::authority_commit::OwnedAgentStreamScanRequestBody;
+use arkret_models_collaboration::governance::realm_join_intake::{
+    OwnedAgentContentAction, OwnedAgentContentIntent,
+};
+use arkret_wire::{
+    CommitStreamRef, RealmStateSnapshot, StreamScanRequestBody, StreamScanResponseBody,
+};
+use coland_storage::HostedAgentHistoryRead;
+use diesel::sql_types::{BigInt, Jsonb};
+
+use super::*;
+
+fn denied() -> PersistenceError {
+    PersistenceError::Conflict("capability_denied: hosted Agent history is unavailable".into())
+}
+
+use crate::account_stream_scan::owned_agent::ProjectReadAuthority;
+
+struct HostedRead {
+    authority: ProjectReadAuthority,
+    held: Box<DeliveryGuard>,
+    query: OwnedAgentStreamScanRequestBody,
+    generation: u64,
+    accepted_floor: Option<(u64, arkret_wire::RealmCommitId, u64)>,
+    checked_page: bool,
+}
+
+pub(crate) async fn prepare(
+    pool: &crate::PgPool,
+    account: &AccountId,
+    station: &DidCoreId,
+    scan: &StreamScanRequestBody,
+    session: &arkret_wire::SessionGrantId,
+    input: &coland_storage::AccountContentDeliveryInput,
+) -> PersistenceResult<(
+    OwnedAgentStreamScanRequestBody,
+    Box<dyn HostedAgentHistoryRead>,
+)> {
+    let realm = &scan.realm_id;
+    if !matches!(
+        scan.stream_ref,
+        CommitStreamRef::Realm { .. } | CommitStreamRef::Circle { .. }
+    ) || !input.future_materials.is_empty()
+    {
+        return Err(denied());
+    }
+    let endpoint = input.agent_endpoint.as_ref().ok_or_else(denied)?;
+    let owner = &input
+        .qualified_agent_scope_evidence
+        .as_ref()
+        .ok_or_else(denied)?
+        .accepted_binding()
+        .controller_account;
+    let expiry = input.credential_expires_at.ok_or_else(denied)?;
+    if &account.station_id != station || &owner.station_id != station || account == owner {
+        return Err(denied());
+    }
+    let mut held = DeliveryGuard::begin(pool).await?;
+    crate::sync_cursor::retention::lock(held.connection(), false)
+        .await
+        .map_err(crate::PgTransactionError::into_persistence)?;
+    lock_scope_evidence_owner(held.connection(), input).await?;
+    for subject in [owner, account] {
+        crate::content_recovery_fence::require_unfenced(
+            held.connection(),
+            &ActorId::account(subject.clone()),
+        )
+        .await?;
+    }
+    crate::realm_authorization_cut::lock_realm_authorization_cut(held.connection(), realm).await?;
+    #[derive(QueryableByName)]
+    struct Tenure {
+        #[diesel(sql_type=BigInt)]
+        generation: i64,
+    }
+    let tenure = sql_query("SELECT generation FROM realm_authorities a WHERE realm_id=$1 AND service_id<>$2
+        AND NOT EXISTS(SELECT 1 FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk
+            WHERE c.realm_id=a.realm_id AND c.governance_generation=a.generation AND e.kind='ak.realm.governance_station.change')")
+        .bind::<Text,_>(realm.as_str()).bind::<Text,_>(station.as_str()).get_result::<Tenure>(held.connection())
+        .await.optional().map_err(PersistenceError::database)?.ok_or_else(denied)?;
+    let pair = crate::agent_interaction_current_states::governed_join_pair(
+        held.connection(),
+        realm,
+        account,
+        chrono::Utc::now(),
+        true,
+        None,
+    )
+    .await?
+    .filter(|p| &p.controller == owner)
+    .ok_or_else(denied)?;
+    crate::agent_interaction_current_states::owned_provenance_in_connection(
+        held.connection(),
+        account,
+        owner,
+        chrono::Utc::now(),
+        true,
+    )
+    .await?
+    .ok_or_else(denied)?;
+    validate_private_delivery_credentials(
+        &mut held,
+        account,
+        station,
+        input,
+        arkret_wire::WireResourceSelector::realm(realm.clone()),
+        Default::default(),
+        CapabilityActionId::EventRead,
+        expiry,
+    )
+    .await?;
+    let accountability = sql_query("SELECT value FROM identity_accountability_current_states WHERE subject_id=$1 AND issuer_id=$2 ORDER BY realm_id,scope_set_digest FOR SHARE")
+        .bind::<Text,_>(account.principal_id.as_str()).bind::<Text,_>(owner.principal_id.as_str())
+        .load::<ValueRow>(held.connection()).await.map_err(PersistenceError::database)?;
+    let values = accountability
+        .into_iter()
+        .map(|r| {
+            serde_json::from_value::<
+                arkret_models_collaboration::governance::accountability::AccountabilityProjection,
+            >(r.value)
+            .map_err(PersistenceError::database)
+        })
+        .collect::<PersistenceResult<Vec<_>>>()?
+        .into_iter()
+        .filter(|v| {
+            v.accountability_scope
+                .scopes()
+                .contains(&arkret_wire::AccountabilityScopeKind::AgentOperator)
+        })
+        .collect();
+    held.clock
+        .as_mut()
+        .ok_or_else(denied)?
+        .accountability
+        .push(values);
+    if !held.permits_handoff() {
+        return Err(denied());
+    }
+    let request_digest = arkret_wire::Hash::new(
+        arkret_canonical::canonical_sha256(scan).map_err(PersistenceError::database)?,
+    )
+    .map_err(PersistenceError::database)?;
+    let query = OwnedAgentStreamScanRequestBody {
+        request_id: arkret_wire::RequestId::new_v7_at(
+            chrono::Utc::now().timestamp_millis().max(0) as u64
+        ),
+        member_account_id: account.clone(),
+        membership_commit_id: pair.agent_commit.commit_id.clone(),
+        content_intent: OwnedAgentContentIntent {
+            controller_account_id: owner.clone(),
+            controller_membership_commit_id: pair.controller_commit.commit_id.clone(),
+            agent_key_authorization_ref: endpoint.authorization_ref.event_id.clone(),
+            action: OwnedAgentContentAction::EventRead,
+            effective_scope: scan.stream_ref.scope_ref(),
+            strand_id: None,
+            request_digest,
+        },
+        session_grant_id: session.clone(),
+        scan: scan.clone(),
+    };
+    query
+        .validate_binding()
+        .map_err(PersistenceError::database)?;
+    let authority = ProjectReadAuthority::load(held.connection(), &query, &pair, station).await?;
+    authority.check()?;
+    Ok((
+        query.clone(),
+        Box::new(HostedRead {
+            held,
+            authority,
+            query,
+            generation: u64::try_from(tenure.generation).map_err(PersistenceError::database)?,
+            accepted_floor: None,
+            checked_page: false,
+        }),
+    ))
+}
+
+#[async_trait::async_trait]
+impl HostedAgentHistoryRead for HostedRead {
+    async fn discard(self: Box<Self>) -> PersistenceResult<()> {
+        self.held.finish().await
+    }
+
+    async fn permits_request(&mut self) -> bool {
+        self.held.probe().await.is_ok()
+            && self.held.permits_handoff()
+            && self.authority.check().is_ok()
+    }
+    async fn accept_history(&mut self, snapshot: &RealmStateSnapshot) -> PersistenceResult<()> {
+        let scan = &self.query.scan;
+        let account = &self.query.member_account_id;
+        let basis = snapshot.history_basis.as_ref().ok_or_else(denied)?;
+        if self.accepted_floor.is_some()
+            || basis.account_id != *account
+            || basis.stream_ref != scan.stream_ref
+            || snapshot.governance_generation != self.generation
+            || snapshot.realm_id != scan.realm_id
+            || snapshot
+                .parent_membership_revision(&ActorId::account(account.clone()))
+                .is_none_or(|r| r.commit_id != self.query.membership_commit_id)
+        {
+            return Err(denied());
+        }
+        snapshot
+            .validate_purpose()
+            .map_err(PersistenceError::database)?;
+        let head = snapshot
+            .visible_stream_heads
+            .iter()
+            .find(|h| h.stream_ref == scan.stream_ref)
+            .ok_or_else(denied)?;
+        let floor = snapshot
+            .retention_and_history_floor
+            .stream_floors
+            .iter()
+            .find(|f| f.stream_ref == scan.stream_ref)
+            .ok_or_else(denied)?
+            .oldest_position;
+        let conn = self.held.connection();
+        let mut known = crate::authority_commit::realm_state_snapshot_material_in_connection(
+            conn,
+            &scan.realm_id,
+        )
+        .await?
+        .ok_or_else(denied)?;
+        // All covered heads and their cut must already be on H's legitimately retained replica.
+        if snapshot
+            .visible_stream_heads
+            .iter()
+            .any(|h| !known.visible_stream_heads.contains(h))
+        {
+            return Err(denied());
+        }
+        let parent_floor = crate::account_stream_scan::snapshot_realm_floor_in_connection(
+            conn,
+            &scan.realm_id,
+            &ActorId::account(account.clone()),
+        )
+        .await?
+        .ok_or_else(denied)?;
+        if !snapshot
+            .retention_and_history_floor
+            .stream_floors
+            .iter()
+            .any(|f| {
+                f.stream_ref
+                    == (CommitStreamRef::Realm {
+                        realm_id: scan.realm_id.clone(),
+                    })
+                    && f.oldest_position == parent_floor.oldest_position
+            })
+        {
+            return Err(denied());
+        }
+        let prior = crate::issued_realm_snapshots::disclosed_basis_from_snapshot(
+            conn,
+            account,
+            snapshot,
+            &scan.stream_ref,
+            head,
+            floor,
+        )
+        .await?;
+        if prior.is_none() {
+            return Err(denied());
+        }
+        #[derive(QueryableByName)]
+        struct Floor {
+            #[diesel(sql_type=Text)]
+            id: String,
+        }
+        let chain = sql_query("WITH chain AS (
+            SELECT commit_id,stream_position,previous_commit_ref,lag(commit_id) OVER (ORDER BY stream_position) AS prior
+            FROM realm_commits WHERE realm_id=$1 AND stream_ref=$2 AND stream_position BETWEEN $3 AND $4
+        ) SELECT min(commit_id) FILTER (WHERE stream_position=$3) AS id FROM chain
+          HAVING count(*)=$4-$3+1 AND bool_and(stream_position=$3 OR previous_commit_ref IS NOT DISTINCT FROM prior)
+            AND count(*) FILTER (WHERE stream_position=$4 AND commit_id=$5)=1")
+            .bind::<Text,_>(scan.realm_id.as_str()).bind::<Jsonb,_>(serde_json::json!(scan.stream_ref))
+            .bind::<BigInt,_>(i64::try_from(floor).map_err(PersistenceError::database)?)
+            .bind::<BigInt,_>(i64::try_from(head.stream_position).map_err(PersistenceError::database)?)
+            .bind::<Text,_>(head.commit_id.as_str()).get_result::<Floor>(&mut *conn).await.optional()
+            .map_err(PersistenceError::database)?.ok_or_else(denied)?;
+        // Only G supplies the two per-member floors. Their exact originals and chain were checked
+        // above.
+        for f in &mut known.retention_and_history_floor.stream_floors {
+            if let Some(verified) = snapshot
+                .retention_and_history_floor
+                .stream_floors
+                .iter()
+                .find(|v| v.stream_ref == f.stream_ref)
+            {
+                if verified.oldest_position < f.oldest_position {
+                    return Err(denied());
+                }
+                f.oldest_position = verified.oldest_position;
+            }
+        }
+        crate::issued_realm_snapshots::require_observed_cut(snapshot, &known, &known)?;
+        crate::replica_authorization::guard_current_rows(
+            conn,
+            &scan.realm_id,
+            &snapshot.current_state_entries,
+        )
+        .await?;
+        coland_storage::enforce_inline_realm_state_snapshot_capacity(snapshot)?;
+        let material = coland_storage::RealmStateSnapshotMaterial {
+            realm_id: snapshot.realm_id.clone(),
+            governance_generation: snapshot.governance_generation,
+            purpose: snapshot.purpose,
+            history_basis: snapshot.history_basis.clone(),
+            visible_stream_heads: snapshot.visible_stream_heads.clone(),
+            retention_and_history_floor: snapshot.retention_and_history_floor.clone(),
+            current_state_entries: snapshot.current_state_entries.clone(),
+        };
+        crate::issued_realm_snapshots::issue_head_in_connection(
+            conn,
+            account,
+            &material,
+            snapshot.clone(),
+        )
+        .await?;
+        self.accepted_floor = Some((
+            floor,
+            arkret_wire::RealmCommitId::new(chain.id).map_err(PersistenceError::database)?,
+            head.stream_position,
+        ));
+        Ok(())
+    }
+
+    async fn accept_page(&mut self, page: &StreamScanResponseBody) -> PersistenceResult<()> {
+        let (floor, id, head) = self.accepted_floor.as_ref().ok_or_else(denied)?;
+        page.validate_for_request(&self.query.scan)
+            .map_err(PersistenceError::database)?;
+        if self.checked_page
+            || page
+                .readable_floor
+                .as_ref()
+                .is_none_or(|f| f.oldest_position != *floor || f.floor_commit_id != *id)
+            || page
+                .committed_events
+                .iter()
+                .any(|row| row.commit().stream_position > *head)
+        {
+            return Err(denied());
+        }
+        let actor = ActorId::account(self.query.member_account_id.clone());
+        let cut = crate::realm_authorization_cut::RealmAuthorizationCut::read(
+            self.held.connection(),
+            &self.query.scan.realm_id,
+            &actor,
+        )
+        .await?;
+        for item in &page.committed_events {
+            let original = sql_query(
+                "SELECT commit_json AS value FROM realm_commits WHERE realm_id=$1 AND commit_id=$2",
+            )
+            .bind::<Text, _>(self.query.scan.realm_id.as_str())
+            .bind::<Text, _>(item.commit().commit_id.as_str())
+            .get_result::<ValueRow>(self.held.connection())
+            .await
+            .optional()
+            .map_err(PersistenceError::database)?
+            .ok_or_else(denied)?;
+            if original.value != serde_json::json!(item.commit()) {
+                return Err(denied());
+            }
+            if let Some(event) = item.reducer_input() {
+                event
+                    .verify_event_id_matches_content_with_digest_suite(
+                        event.realm_id.digest_suite_code().digest_suite(),
+                    )
+                    .map_err(PersistenceError::database)?;
+                let (target, facts) =
+                    cut.content_scope_facts(event, CapabilityActionId::EventRead)?;
+                self.held
+                    .clock
+                    .as_mut()
+                    .ok_or_else(denied)?
+                    .scope_operations
+                    .push((actor.clone(), target, facts, CapabilityActionId::EventRead));
+            }
+        }
+        if !self.held.permits_handoff() {
+            return Err(denied());
+        }
+        self.authority.add_page(page)?;
+        self.checked_page = true;
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl AccountContentDeliveryGuard for HostedRead {
+    async fn prepare_handoff(&mut self) -> bool {
+        self.checked_page && self.permits_request().await
+    }
+    async fn finish(self: Box<Self>) -> PersistenceResult<()> {
+        if self.checked_page {
+            self.held.commit().await
+        } else {
+            self.held.finish().await
+        }
+    }
+}

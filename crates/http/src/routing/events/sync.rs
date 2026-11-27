@@ -116,28 +116,13 @@ pub(crate) fn content_delivery_guard<'a>(
     Box::pin(content_delivery_guard_inner(state, session, input))
 }
 
-async fn content_delivery_guard_inner(
+pub(crate) async fn bind_agent_delivery_endpoint(
     state: &AppState,
     session: &SessionIdentityState,
-    input: &coland_storage::AccountContentDeliveryInput,
-) -> Result<Option<Box<dyn coland_storage::AccountContentDeliveryGuard>>, crate::error::AppError> {
-    let actor =
-        crate::routing::identity::session_actor::validated_session_actor(state, session).await?;
-    let account = actor.as_account_id().ok_or_else(|| {
-        crate::error::AppError::capability_denied("content recipient is not an Account")
-    })?;
-    let mut input = input.clone();
-    input.credential_expires_at = Some(session.expires_at);
-    if session.agent_session().is_none()
-        && (!input.realm_lifecycle_reads.is_empty()
-            || !input.realm_link_reads.is_empty()
-            || !input.realm_exports.is_empty())
-    {
-        input
-            .account_status_observations
-            .push(super::peer::refresh_current_account_status(state, account).await?);
-    }
-
+    actor: &arkret_wire::ActorId,
+    account: &arkret_wire::AccountId,
+    input: &mut coland_storage::AccountContentDeliveryInput,
+) -> Result<(), crate::error::AppError> {
     if let Some(agent_session) = session.agent_session() {
         let grant = session.session_grant.as_ref().ok_or_else(|| {
             crate::error::AppError::capability_denied("Agent delivery credential is unavailable")
@@ -195,6 +180,32 @@ async fn content_delivery_guard_inner(
             Some(state.qualified_agent_scope_evidence(&guard).await?);
         input.agent_endpoint = Some(guard);
     }
+    Ok(())
+}
+
+async fn content_delivery_guard_inner(
+    state: &AppState,
+    session: &SessionIdentityState,
+    input: &coland_storage::AccountContentDeliveryInput,
+) -> Result<Option<Box<dyn coland_storage::AccountContentDeliveryGuard>>, crate::error::AppError> {
+    let actor =
+        crate::routing::identity::session_actor::validated_session_actor(state, session).await?;
+    let account = actor.as_account_id().ok_or_else(|| {
+        crate::error::AppError::capability_denied("content recipient is not an Account")
+    })?;
+    let mut input = input.clone();
+    input.credential_expires_at = Some(session.expires_at);
+    if session.agent_session().is_none()
+        && (!input.realm_lifecycle_reads.is_empty()
+            || !input.realm_link_reads.is_empty()
+            || !input.realm_exports.is_empty())
+    {
+        input
+            .account_status_observations
+            .push(super::peer::refresh_current_account_status(state, account).await?);
+    }
+
+    bind_agent_delivery_endpoint(state, session, &actor, account, &mut input).await?;
     state
         .authority_commits()
         .acquire_committed_content_delivery(account, &state.service_core_id(), &input)

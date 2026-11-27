@@ -370,9 +370,7 @@ async fn install_authorized_mls_group(
         .ok_or_else(|| failed_precondition("Sidecar controller is unavailable"))?;
         // A deployment that is both H and G still performs both duties. A
         // remote G must never infer H ownership from a missing native PCR.
-        if crate::sidecar_replica_authority::is_owning_station_in_connection(conn, &controller)
-            .await?
-        {
+        if crate::sidecar_access::is_owning_station_in_connection(conn, &controller).await? {
             let binding = if event.kind == EventKind::MlsGenesis {
                 event
                     .as_mls_genesis()

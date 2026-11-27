@@ -98,6 +98,14 @@ pub(crate) async fn effective_agents_in_connection(
     conn: &mut AsyncPgConnection,
     cut: &SidecarParticipantAuthorityCut,
 ) -> PersistenceResult<Vec<DidCoreId>> {
+    effective_agents_for_endpoint_in_connection(conn, cut, None).await
+}
+
+pub(crate) async fn effective_agents_for_endpoint_in_connection(
+    conn: &mut AsyncPgConnection,
+    cut: &SidecarParticipantAuthorityCut,
+    endpoint: Option<(&DidCoreId, &arkret_wire::DidUrl, Option<&arkret_wire::EventId>)>,
+) -> PersistenceResult<Vec<DidCoreId>> {
     let scope = ScopeRef::Sidecar {
         realm_id: cut.realm_id.clone(),
         sidecar_id: cut.sidecar_id.clone(),
@@ -153,6 +161,9 @@ pub(crate) async fn effective_agents_in_connection(
     let leaves = group_leaves(&scope, &current, &group.public_state)?;
     let mut effective = Vec::new();
     for agent in &cut.desired_agent_ids {
+        if endpoint.is_some_and(|(id, _, _)| id != agent) {
+            continue;
+        }
         let actor = ActorId::account(arkret_wire::AccountId::new(
             agent.clone(),
             cut.controller_account_id.station_id.clone(),
@@ -204,6 +215,9 @@ pub(crate) async fn effective_agents_in_connection(
                     continue;
                 };
                 let event = arkret_wire::EventId::new(dot).map_err(PersistenceError::database)?;
+                if endpoint.is_some_and(|(_, method, reference)| method != &authorization.verification_method || reference.is_some_and(|dot| dot != &event)) {
+                    continue;
+                }
                 let consumed = crate::sidecar_mls_readiness::consumed_endpoint_in_connection(
                     conn,
                     &scope,

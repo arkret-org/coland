@@ -586,7 +586,6 @@ pub(crate) async fn home_content_queries(
                 action,
                 effective_scope: target.scope.clone(),
                 request_digest: request.intent_digest.clone(),
-                backup_root_context: None,
                 strand_id: target.resource.strand_id.clone(),
             });
         }
@@ -619,8 +618,44 @@ async fn read_at_cut(
     }
     let purpose = crate::account_stream_scan::realm_purpose(conn, realm).await?;
     use arkret_models_collaboration::events_payloads::realm::RealmPurpose;
+    let personal = purpose == Some(RealmPurpose::PrincipalControl)
+        && matches!(target.scope, ScopeRef::Realm { .. })
+        && crate::morph_projection_reads::human_realm_in_connection(
+            conn,
+            &request.controller_account_id,
+        )
+        .await?
+            == *realm;
+    // This is a credential ceiling. Each private consumer still verifies its exact
+    // Sidecar, accepted enrollment and current endpoint at the point of delivery.
+    let mut enabled_private_read = false;
+    let mut private_reply = false;
+    if personal {
+        let rows=sql_query("SELECT to_jsonb(sidecar_id) AS payload FROM sidecar_current_states WHERE realm_id=$1 AND controller_account_id=$2 AND value->>'state'='active' ORDER BY sidecar_id")
+            .bind::<Text,_>(realm.as_str()).bind::<Jsonb,_>(serde_json::to_value(&request.controller_account_id).map_err(unavailable)?)
+            .load::<crate::JsonPayloadRow>(&mut *conn).await.map_err(PersistenceError::database)?;
+        for row in rows {
+            let id = serde_json::from_value(row.payload).map_err(unavailable)?;
+            if let Some(cut) = crate::sidecar_access::cut_in_connection(conn, realm, &id).await?
+                && cut
+                    .desired_agent_ids
+                    .contains(&request.agent_account_id.principal_id)
+            {
+                enabled_private_read = true;
+                private_reply |= crate::sidecar_authority_cut::enrollment(
+                    conn,
+                    realm,
+                    &id,
+                    &request.agent_account_id,
+                )
+                .await?
+                .is_some_and(|r| r.value["private_reply_allowed"] == true);
+            }
+        }
+    }
     let direct = match purpose {
         Some(RealmPurpose::Collaboration) => false,
+        Some(RealmPurpose::PrincipalControl) if personal && enabled_private_read => false,
         Some(RealmPurpose::DirectConversation)
             if matches!(target.scope, ScopeRef::Realm { .. }) =>
         {
@@ -670,6 +705,7 @@ async fn read_at_cut(
         }
     }
     if !direct
+        && !personal
         && authorization.agent_ceiling.as_ref().is_none_or(|ceiling| {
             ceiling.controller.actor != ActorId::account(request.controller_account_id.clone())
         })
@@ -678,7 +714,7 @@ async fn read_at_cut(
             "current controller/membership backing is unavailable",
         ));
     }
-    let can_read = read_source(conn, request, &target, direct).await?;
+    let can_read = enabled_private_read || read_source(conn, request, &target, direct).await?;
     let direct_write = if direct && can_read {
         let bound = crate::direct_conversation_admission::binding_current_snapshot_in_connection(
             conn, realm,
@@ -714,7 +750,9 @@ async fn read_at_cut(
     if let Some(strand) = &target.resource.strand_id {
         scopes.push(format!("strand:{realm}:{strand}"));
     }
-    let private_selection = if !direct {
+    // Only shared project actions inherit Realm, Circle and Strand participation policy.
+    let project_participation = !direct && !personal;
+    let private_selection = if project_participation {
         crate::agent_participation_admission::selection_snapshot(
             conn,
             request.agent_account_id.principal_id.as_str(),
@@ -724,7 +762,7 @@ async fn read_at_cut(
     } else {
         None
     };
-    if !direct {
+    if project_participation {
         for scope in scopes {
             if let Some(component) =
                 crate::agent_participation_admission::governance_component_snapshot(
@@ -792,8 +830,9 @@ async fn read_at_cut(
         }
         let mut action_refs = BTreeSet::new();
         let mut action_requires_approval = false;
-        let profile_write = direct_write
-            && crate::direct_conversation_admission::participant_session_action(action);
+        let profile_write = (private_reply && action_id == CapabilityActionId::MessageCreate)
+            || (direct_write
+                && crate::direct_conversation_admission::participant_session_action(action));
         for track in &tracks {
             let facts = coland_storage::OperationFacts {
                 strand_id: target.resource.strand_id.as_ref().map(ToString::to_string),

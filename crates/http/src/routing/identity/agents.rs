@@ -81,9 +81,7 @@ pub(crate) use common::agent_grant_within_requested_scope;
 pub(crate) mod evidence;
 mod lifecycle;
 mod pairing;
-pub(crate) use pairing::{
-    accepted_active_agent_key_authorizations, accepted_agent_key_authorizations,
-};
+pub(crate) use pairing::accepted_active_agent_key_authorizations;
 mod participation;
 pub(crate) mod sidecar;
 

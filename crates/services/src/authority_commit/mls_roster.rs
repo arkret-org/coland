@@ -388,6 +388,7 @@ fn sign_page(
     let issued_at = cursor.as_ref().map_or(now, |cursor| cursor.issued_at);
     let total_record_count = facts.records.len();
     let mut manifest = MlsRosterAuthorityManifest {
+        sidecar_backup_strategy: facts.sidecar_backup_strategy,
         governance_station_id: issuer.clone(),
         realm_id: request.realm_id.clone(),
         effective_scope: request.effective_scope.clone(),
@@ -660,6 +661,7 @@ mod tests {
         };
 
         MlsRosterAuthorityFacts {
+            sidecar_backup_strategy: None,
             group_info_ref: BlobRef::new(format!("ak:blob:sha256:{}", "3".repeat(64))).unwrap(),
             ratchet_tree_ref: BlobRef::new(format!("ak:blob:sha256:{}", "4".repeat(64))).unwrap(),
             authority_head_commit_event_ref: commit.clone(),
@@ -756,6 +758,7 @@ mod tests {
             cursor: None,
         };
         let facts = MlsRosterAuthorityFacts {
+            sidecar_backup_strategy: None,
             group_info_ref: BlobRef::new(format!("ak:blob:sha256:{}", "1".repeat(64))).unwrap(),
             ratchet_tree_ref: BlobRef::new(format!("ak:blob:sha256:{}", "2".repeat(64))).unwrap(),
             authority_head_commit_event_ref: target.clone(),

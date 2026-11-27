@@ -129,6 +129,7 @@ fn decided_at_commit_cut(kind: &arkret_wire::EventKind) -> bool {
             | arkret_wire::EventKind::ProfileCreate
             | arkret_wire::EventKind::ProfileUpdate
             | arkret_wire::EventKind::SidecarCreate
+            | arkret_wire::EventKind::SidecarMemberState
             | arkret_wire::EventKind::SidecarContextAttach
             | arkret_wire::EventKind::AgentSidecarExchangeControl
             | arkret_wire::EventKind::CircleMemberState

@@ -68,7 +68,8 @@ pub use notification::{
 };
 pub use replica_anchor::spawn_pending_anchor_sweeper;
 pub(crate) use replica_anchor::{
-    account_continuation_recoverable, foreign_content_ceiling, refresh_account_snapshot,
+    account_continuation_recoverable, foreign_content_ceiling, read_foreign_project_page,
+    refresh_account_snapshot, verify_foreign_project_history,
 };
 pub(crate) use service_route_fetcher::VerifiedBindingRouteFetcher;
 

@@ -1231,6 +1231,49 @@ async fn scan_stream(req: &mut Request, depot: &Depot, res: &mut Response) {
         }
         return;
     }
+    if session.agent_session().is_some()
+        && matches!(
+            &request.stream_ref,
+            arkret_wire::CommitStreamRef::Realm { .. }
+                | arkret_wire::CommitStreamRef::Circle { .. }
+        )
+    {
+        match app_state
+            .authority_commits()
+            .current_authority(&request.realm_id)
+            .await
+        {
+            Ok(Some(authority)) if authority.service_id != app_state.service_core_id() => {
+                if let Err(error) = hosted_project_scan(
+                    app_state,
+                    &session,
+                    account,
+                    &authority.service_id,
+                    &request,
+                    req,
+                    res,
+                )
+                .await
+                {
+                    crate::routing::render_error(
+                        res,
+                        error.http_status(),
+                        error.wire_code(),
+                        &error.message,
+                    );
+                }
+                return;
+            }
+            Ok(Some(_)) => {}
+            _ => {
+                return crate::error::render_error_code(
+                    ErrorCode::TemporarilyUnavailable,
+                    res,
+                    "governing history authority is unavailable",
+                );
+            }
+        }
+    }
     let result = app_state
         .authority()
         .scan_stream_for_account(account, request.clone())
@@ -1239,7 +1282,328 @@ async fn scan_stream(req: &mut Request, depot: &Depot, res: &mut Response) {
         after_position = match request.direction { arkret_wire::StreamScanDirection::After(position) => position, _ => None },
         stream_kind = match request.stream_ref { arkret_wire::CommitStreamRef::Realm {..} => "realm", arkret_wire::CommitStreamRef::Circle {..} => "circle", arkret_wire::CommitStreamRef::Sidecar {..} => "sidecar", _ => "unknown" },
         "authorized stream scan direction");
+    if session.agent_session().is_some()
+        && matches!(
+            &request.stream_ref,
+            arkret_wire::CommitStreamRef::Sidecar { .. }
+        )
+        && let Ok(coland_storage::AccountStreamScan::Page(page)) = &result
+    {
+        let input = coland_storage::AccountContentDeliveryInput {
+            realms: vec![request.realm_id.clone()],
+            stream_scans: vec![(request.clone(), page.clone())],
+            ..Default::default()
+        };
+        let output =
+            match crate::routing::events::sync::content_delivery_guard(app_state, &session, &input)
+                .await
+            {
+                Ok(Some(guard)) => coland_http::result::guarded_json_ok(page.clone(), Some(guard)),
+                Ok(None) => Err(crate::error::AppError::capability_denied(
+                    "no private delivery authority",
+                )),
+                Err(error) => Err(error),
+            };
+        match output {
+            Ok(output) => {
+                no_store(res);
+                salvo::Scribe::render(output, res);
+            }
+            Err(error) => crate::routing::render_error(
+                res,
+                error.http_status(),
+                error.wire_code(),
+                &error.message,
+            ),
+        }
+        return;
+    }
     render_stream_scan(res, &request, result);
+}
+
+/// A loopback-only conformance observer postpones one actual transport poll.
+/// It receives no request data and cannot grant or override authorization.
+#[cfg(feature = "conformance-harness")]
+async fn observe_agent_history_handoff() -> std::io::Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let Ok(value) = std::env::var("COTEST_AGENT_HISTORY_HANDOFF") else {
+        return Ok(());
+    };
+    let address = value
+        .parse::<std::net::SocketAddr>()
+        .ok()
+        .filter(|a| a.ip().is_loopback())
+        .ok_or_else(|| std::io::Error::other("invalid history timing observer"))?;
+    tokio::time::timeout(std::time::Duration::from_secs(45), async {
+        let mut connection = tokio::net::TcpStream::connect(address).await?;
+        connection.write_u8(1).await?;
+        if connection.read_u8().await? != 1 {
+            return Err(std::io::Error::other("history observation cancelled"));
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|_| std::io::Error::other("history observation timed out"))?
+}
+
+/// Revalidate an archived original against the current project generation when
+/// its bytes are handed to transport. A reference read never advances a cursor.
+struct ProjectSnapshotDelivery {
+    state: AppState,
+    session: coland_services::identity::SessionIdentityState,
+    account: arkret_wire::AccountId,
+    governor: arkret_wire::DidCoreId,
+    secret: String,
+    input: coland_storage::AccountContentDeliveryInput,
+    snapshot: arkret_wire::RealmStateSnapshot,
+    scan: StreamScanRequestBody,
+    held: Option<Box<dyn coland_storage::HostedAgentHistoryRead>>,
+}
+
+impl ProjectSnapshotDelivery {
+    async fn current_cut(
+        &mut self,
+    ) -> Result<Box<dyn coland_storage::HostedAgentHistoryRead>, crate::error::AppError> {
+        let denied = || crate::error::AppError::capability_denied("project history is unavailable");
+        let unavailable = || {
+            crate::error::AppError::new(
+                ErrorCode::RealmStateSnapshotUnavailable,
+                "the archived project generation is unavailable",
+            )
+        };
+        let grant = self.session.session_grant.as_ref().ok_or_else(denied)?;
+        crate::routing::identity::auth::revalidate_current_read_session(
+            &self.state,
+            &self.session,
+            Some(&self.secret),
+        )
+        .await
+        .map_err(|_| denied())?;
+        let (query, mut held) = self
+            .state
+            .authority_commits()
+            .prepare_hosted_agent_history(
+                &self.account,
+                &self.state.service_core_id(),
+                &self.scan,
+                &grant.id,
+                &self.input,
+            )
+            .await
+            .map_err(|_| denied())?;
+        if self
+            .snapshot
+            .parent_membership_revision(&arkret_wire::ActorId::account(self.account.clone()))
+            .is_none_or(|revision| revision.commit_id != query.membership_commit_id)
+        {
+            return Err(unavailable());
+        }
+        let archived =
+            crate::routing::realm_state_snapshot::issued_realm_state_snapshot_for_account(
+                &self.state,
+                self.scan.realm_id.as_str(),
+                &self.snapshot.snapshot_id,
+                &self.account,
+            )
+            .await?;
+        if archived != self.snapshot {
+            return Err(unavailable());
+        }
+        crate::state::read_foreign_project_page(
+            &self.state,
+            &self.governor,
+            &self.session,
+            &self.secret,
+            &query,
+            &mut *held,
+        )
+        .await?;
+        Ok(held)
+    }
+}
+
+#[async_trait::async_trait]
+impl coland_storage::AccountContentDeliveryGuard for ProjectSnapshotDelivery {
+    async fn prepare_handoff(&mut self) -> bool {
+        let Ok(mut held) = self.current_cut().await else {
+            return false;
+        };
+        if !held.prepare_handoff().await {
+            return false;
+        }
+        self.held = Some(held);
+        true
+    }
+    async fn finish(mut self: Box<Self>) -> coland_storage::PersistenceResult<()> {
+        if let Some(held) = self.held.take() {
+            held.discard().await?;
+        }
+        Ok(())
+    }
+}
+
+pub(crate) async fn project_snapshot_guard(
+    state: &AppState,
+    session: &coland_services::identity::SessionIdentityState,
+    account: &arkret_wire::AccountId,
+    governor: arkret_wire::DidCoreId,
+    req: &Request,
+    snapshot: &arkret_wire::RealmStateSnapshot,
+) -> Result<Box<dyn coland_storage::AccountContentDeliveryGuard>, crate::error::AppError> {
+    let denied = || crate::error::AppError::capability_denied("project history is unavailable");
+    let basis = snapshot.history_basis.as_ref().ok_or_else(denied)?;
+    if basis.account_id != *account
+        || !matches!(
+            basis.stream_ref,
+            arkret_wire::CommitStreamRef::Realm { .. }
+                | arkret_wire::CommitStreamRef::Circle { .. }
+        )
+    {
+        return Err(denied());
+    }
+    let secret = coland_http::util::dpop_token(req)
+        .ok_or_else(denied)?
+        .to_owned();
+    let mut input = coland_storage::AccountContentDeliveryInput::default();
+    crate::routing::events::sync::bind_agent_delivery_endpoint(
+        state,
+        session,
+        &arkret_wire::ActorId::account(account.clone()),
+        account,
+        &mut input,
+    )
+    .await?;
+    let mut delivery = ProjectSnapshotDelivery {
+        state: state.clone(),
+        session: session.clone(),
+        account: account.clone(),
+        governor,
+        secret,
+        input,
+        snapshot: snapshot.clone(),
+        scan: StreamScanRequestBody {
+            realm_id: snapshot.realm_id.clone(),
+            stream_ref: basis.stream_ref.clone(),
+            direction: arkret_wire::StreamScanDirection::Before(None),
+            limit: 1,
+        },
+        held: None,
+    };
+    delivery
+        .current_cut()
+        .await?
+        .discard()
+        .await
+        .map_err(|_| denied())?;
+    Ok(Box::new(delivery))
+}
+
+async fn hosted_project_scan(
+    state: &AppState,
+    session: &coland_services::identity::SessionIdentityState,
+    account: &arkret_wire::AccountId,
+    governor: &arkret_wire::DidCoreId,
+    scan: &StreamScanRequestBody,
+    req: &Request,
+    res: &mut Response,
+) -> Result<(), crate::error::AppError> {
+    let denied = || crate::error::AppError::capability_denied("Agent history is unavailable");
+    let secret = coland_http::util::dpop_token(req)
+        .ok_or_else(denied)?
+        .to_owned();
+    let session_id = session
+        .session_grant
+        .as_ref()
+        .ok_or_else(denied)?
+        .id
+        .clone();
+    let actor = arkret_wire::ActorId::account(account.clone());
+    let mut input = coland_storage::AccountContentDeliveryInput::default();
+    crate::routing::events::sync::bind_agent_delivery_endpoint(
+        state, session, &actor, account, &mut input,
+    )
+    .await?;
+    crate::routing::identity::auth::revalidate_current_read_session(state, session, Some(&secret))
+        .await
+        .map_err(|cause| {
+            tracing::warn!(%cause, "hosted project history session revalidation failed");
+            denied()
+        })?;
+    // Check eligibility before accepting a streaming response. Release the cut
+    // while the response is waiting for a transport poll.
+    let (initial, mut preflight) = state
+        .authority_commits()
+        .prepare_hosted_agent_history(account, &state.service_core_id(), scan, &session_id, &input)
+        .await
+        .map_err(|cause| {
+            tracing::warn!(%cause, "hosted project history preparation failed");
+            denied()
+        })?;
+    // Resolve the governing floor before accepting the request. Business bytes
+    // are requested only after dispatch, under fresh cuts at both Stations.
+    crate::state::verify_foreign_project_history(
+        state,
+        governor,
+        session,
+        &secret,
+        &initial,
+        &mut *preflight,
+    )
+    .await?;
+    preflight.discard().await.map_err(|_| denied())?;
+    let state = state.clone();
+    let session = session.clone();
+    let account = account.clone();
+    let governor = governor.clone();
+    let scan = scan.clone();
+    no_store(res);
+    res.headers_mut().insert(
+        salvo::http::header::CONTENT_TYPE,
+        salvo::http::HeaderValue::from_static("application/json; charset=utf-8"),
+    );
+    res.stream(async_stream::stream! {
+        let refused = || std::io::Error::other("Agent history delivery is unavailable");
+        let delivery = async {
+            #[cfg(feature = "conformance-harness")]
+            observe_agent_history_handoff().await?;
+            crate::routing::identity::auth::revalidate_current_read_session(
+                &state, &session, Some(&secret),
+            )
+            .await
+            .map_err(|_| refused())?;
+            let (query, mut guard) = state.authority_commits()
+                .prepare_hosted_agent_history(
+                    &account, &state.service_core_id(), &scan, &session_id, &input,
+                )
+                .await
+                .map_err(|_| refused())?;
+            let page = crate::state::read_foreign_project_page(
+                &state, &governor, &session, &secret, &query, &mut *guard,
+            )
+            .await
+            .map_err(|_| refused())?;
+            let bytes = arkret_canonical::canonical_json_bytes(&page).map_err(|_| refused())?;
+            crate::routing::identity::auth::revalidate_current_read_session(
+                &state, &session, Some(&secret),
+            )
+            .await
+            .map_err(|_| refused())?;
+            if !guard.prepare_handoff().await {
+                return Err(refused());
+            }
+            Ok((bytes::Bytes::from(bytes), guard))
+        }.await;
+        match delivery {
+            Ok((bytes, guard)) => {
+                yield Ok::<_, std::io::Error>(bytes);
+                if guard.finish().await.is_err() {
+                    yield Err(refused());
+                }
+            }
+            Err(error) => yield Err(error),
+        }
+    });
+    Ok(())
 }
 
 async fn native_stream_scan(
@@ -1407,8 +1771,8 @@ fn render_peer_stream_scan(
 
 /// `POST /_arkret/peer/streams/scan`. The caller is the peer Station proved
 /// by the RFC 9421 service signature (with the inbound deny policy); the
-/// body never names it. The replication right is decided on the governing
-/// read cut, with the same closed request contract as the self scan.
+/// source identity is independent of the body. Replication and delivery to
+/// one hosted Agent have distinct governing authorization cuts.
 #[handler]
 async fn peer_scan_stream(req: &mut Request, depot: &mut Depot, res: &mut Response) {
     let app_state = match state(depot) {
@@ -1423,8 +1787,45 @@ async fn peer_scan_stream(req: &mut Request, depot: &mut Depot, res: &mut Respon
         Ok(peer) => peer,
         Err(error) => return error.write(req, depot, res).await,
     };
-    let Some(request) = parse_closed_body::<StreamScanRequestBody>(req, res).await else {
+    use arkret_models_collaboration::authority_commit::PeerStreamScanRequestBody;
+    let Some(body) = parse_closed_body::<PeerStreamScanRequestBody>(req, res).await else {
         return;
+    };
+    let request = match body {
+        PeerStreamScanRequestBody::Replication(scan)
+            if matches!(
+                scan.stream_ref,
+                arkret_wire::CommitStreamRef::Sidecar { .. }
+            ) =>
+        {
+            return crate::error::render_error_code(
+                ErrorCode::CapabilityDenied,
+                res,
+                "private stream unavailable",
+            );
+        }
+        PeerStreamScanRequestBody::Replication(scan) => scan,
+        PeerStreamScanRequestBody::OwnedAgent(agent) => {
+            no_store(res);
+            match app_state
+                .authority_commits()
+                .scan_for_remote_owned_agent(
+                    &agent,
+                    &peer.source_service_id,
+                    &app_state.service_core_id(),
+                )
+                .await
+            {
+                Ok((page, guard)) => {
+                    match coland_http::result::guarded_json_ok(page, Some(guard)) {
+                        Ok(output) => salvo::Scribe::render(output, res),
+                        Err(error) => error.write(req, depot, res).await,
+                    }
+                }
+                Err(error) => render_service_error(res, error),
+            }
+            return;
+        }
     };
     if let Err(error) = request.validate() {
         return crate::error::render_error_code(

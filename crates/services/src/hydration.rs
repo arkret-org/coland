@@ -183,6 +183,7 @@ pub async fn hydrate_sidecar_projections(
             SidecarProjection {
                 sidecar_id: record.sidecar_id,
                 realm_id: record.realm_id,
+                source_realm_id: record.source_realm_id,
                 controller_account_id: record.controller_account_id,
                 state: sidecar_projection_state(record.state),
                 state_changed_at: record.state_changed_at,

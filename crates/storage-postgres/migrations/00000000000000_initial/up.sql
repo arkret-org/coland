@@ -644,13 +644,14 @@ CREATE TABLE public.agent_sidecars (
     pk bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     id bytea NOT NULL CHECK (octet_length(id) = 33),
     realm_id text NOT NULL,
+    source_realm_id text NOT NULL,
     controller_account_id jsonb NOT NULL,
     state text DEFAULT 'active'::text NOT NULL,
     state_changed_at timestamp with time zone,
     created_at timestamp with time zone NOT NULL,
     updated_at timestamp with time zone,
     CONSTRAINT agent_sidecars_id_key UNIQUE (id),
-    CONSTRAINT agent_sidecars_realm_controller_key UNIQUE (realm_id, controller_account_id),
+    CONSTRAINT agent_sidecars_realm_controller_key UNIQUE (source_realm_id, controller_account_id),
     CONSTRAINT agent_sidecars_state_check CHECK ((state = ANY (ARRAY['active'::text, 'suspended'::text, 'tombstoned'::text])))
 );
 
@@ -4556,6 +4557,7 @@ $$;
 -- reserves one (Realm, complete controller AccountId) singleton.
 CREATE TABLE sidecar_current_states (
  realm_id TEXT NOT NULL,
+ source_realm_id TEXT NOT NULL,
  sidecar_id TEXT NOT NULL PRIMARY KEY,
  controller_account_id JSONB NOT NULL,
  create_event_id TEXT NOT NULL UNIQUE,
@@ -4564,11 +4566,12 @@ CREATE TABLE sidecar_current_states (
  source_stream_ref JSONB NOT NULL,
  value JSONB NOT NULL,
  updated_at TIMESTAMPTZ NOT NULL,
- UNIQUE(realm_id,controller_account_id),
+ UNIQUE(source_realm_id,controller_account_id),
  CHECK(jsonb_typeof(value)='object'),
  CHECK(source_stream_ref->>'kind'='realm'),
  CHECK(value->>'id'=sidecar_id),
  CHECK(value->>'realm_id'=realm_id),
+ CHECK(value->>'source_realm_id'=source_realm_id),
  CHECK(value->'controller_account_id'=controller_account_id)
 );
 -- Realm snapshots use a narrow Realm-leading index instead of scanning the

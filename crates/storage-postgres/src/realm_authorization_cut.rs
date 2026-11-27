@@ -508,7 +508,10 @@ pub(crate) async fn governed_content_intent(
         .bind::<Text,_>(realm.as_str()).bind::<Text,_>(governor.as_str())
         .get_result::<crate::query_rows::ExistsRow>(&mut *conn).await.map_err(PersistenceError::database)?;
     if !governed.present
-        || intent.backup_root_context.is_some()
+        || matches!(
+            intent.effective_scope,
+            arkret_wire::ScopeRef::Sidecar { .. }
+        )
         || crate::account_stream_scan::realm_purpose(conn, realm).await?
             != Some(
                 arkret_models_collaboration::events_payloads::realm::RealmPurpose::Collaboration,
@@ -2592,6 +2595,14 @@ impl RealmAuthorizationCut {
         &self,
         at: chrono::DateTime<chrono::Utc>,
     ) -> PersistenceResult<()> {
+        self.require_projection_read_for_source(at, None)
+    }
+
+    pub(crate) fn require_projection_read_for_source(
+        &self,
+        at: chrono::DateTime<chrono::Utc>,
+        source: Option<IssuerAuthorityRef>,
+    ) -> PersistenceResult<()> {
         // The caller proves accepted_realm_reader on the same held cut.
         let target = WireResourceSelector::realm(self.realm_id.clone());
         let facts = OperationFacts::default();
@@ -2603,7 +2614,7 @@ impl RealmAuthorizationCut {
             at,
         };
         if self
-            .evaluate_current_sources(&operation, &[], None)?
+            .evaluate_current_sources(&operation, &[], source)?
             .is_refusal()
         {
             return Err(capability_denied(

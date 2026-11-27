@@ -1,6 +1,6 @@
 use arkret_models_collaboration::agent_sidecar::AgentSidecarState;
 use arkret_models_collaboration::events_payloads::sidecar::{
-    AgentSidecarExchangeControlPayload, SidecarContextAttachPayload,
+    AgentSidecarExchangeControlPayload, SidecarContextAttachPayload, SidecarCreatePayload,
 };
 use arkret_models_collaboration::sidecar_operations::SidecarContextRef;
 
@@ -31,23 +31,14 @@ impl ProjectionState {
                 reason: "sidecar_create_invalid".to_owned(),
             };
         };
-        let wire_payload = operation.payload.clone();
-        let Some(payload) = wire_payload.as_object() else {
+        let Ok(payload) = serde_json::from_value::<SidecarCreatePayload>(operation.payload.clone())
+        else {
             return ProjectionEffect::Rejected {
                 reason: "sidecar_create_invalid".to_owned(),
             };
         };
-        // `sidecar_create_payload` is the empty closed object: the id comes
-        // from the Event id, the rest is reducer-derived, and the Sidecar scope
-        // activates standard RFC 9420 through its own accepted `ak.mls.genesis`
-        // rather than through a declared profile.
-        if !payload.is_empty() {
-            return ProjectionEffect::Rejected {
-                reason: "sidecar_create_invalid".to_owned(),
-            };
-        }
         if let Some(existing) = self.sidecars.values().find(|existing| {
-            existing.realm_id == operation.realm_id.as_str()
+            existing.source_realm_id == payload.source_realm_id.as_str()
                 && existing.controller_account_id == *controller_account_id
                 && existing.state != AgentSidecarState::Tombstoned
         }) {
@@ -64,6 +55,7 @@ impl ProjectionState {
             SidecarProjection {
                 sidecar_id: sidecar_id.clone(),
                 realm_id: operation.realm_id.to_string(),
+                source_realm_id: payload.source_realm_id.to_string(),
                 controller_account_id: controller_account_id.clone(),
                 state: AgentSidecarState::Active,
                 state_changed_at: None,
@@ -112,17 +104,19 @@ impl ProjectionState {
                 reason: "sidecar_context_attach_invalid".to_owned(),
             };
         }
-        let source_exists_in_realm = match &payload.source_context_ref {
+        // Durable admission at H checked the source binding. A remote project may be absent from
+        // this cache.
+        let source_matches_project = match &payload.source_context_ref {
             SidecarContextRef::Relation { relation_id } => self
                 .relations
                 .get(relation_id.as_str())
-                .is_some_and(|relation| relation.realm_id == sidecar.realm_id),
+                .is_none_or(|relation| relation.realm_id == sidecar.source_realm_id),
             SidecarContextRef::Strand { strand_id } => self
                 .strands
                 .get(strand_id.as_str())
-                .is_some_and(|strand| strand.realm_id == sidecar.realm_id),
+                .is_none_or(|strand| strand.realm_id == sidecar.source_realm_id),
         };
-        if !source_exists_in_realm {
+        if !source_matches_project {
             return ProjectionEffect::Rejected {
                 reason: "sidecar_context_attach_invalid".to_owned(),
             };
@@ -219,14 +213,10 @@ mod tests {
             )
             .unwrap(),
             arkret_wire::EventKind::SidecarCreate.as_str(),
-            // `sidecar_create_payload` is the empty closed object; `event_id`
-            // and `sender` are fixture envelope keys the raw-projection helper
-            // consumes, not payload fields. Nothing else may ride along — the
-            // scope activates RFC 9420 through its own `ak.mls.genesis`, so
-            // there is no `encryption_profile` to declare here.
             serde_json::json!({
                 "event_id": format!("ak:event:{event_suffix}"),
-                "sender": "ak:did_core:web:example.com:users:alice"
+                "sender": "ak:did_core:web:example.com:users:alice",
+                "source_realm_id": "ak:realm:AUbhLbszCE22Bm-rjOxxh9NLjudxjc1Jm38OX5PZttdw"
             }),
         )
     }

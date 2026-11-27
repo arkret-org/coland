@@ -1110,15 +1110,7 @@ pub(crate) async fn install_snapshot_at_heads_in_connection(
                 )
                 .await?;
             }
-            S::Sidecar { .. } | S::SidecarContext { .. } => {
-                crate::sidecar_replica_current::install_in_connection(
-                    conn,
-                    realm_id,
-                    entry,
-                    installed_at,
-                )
-                .await?;
-            }
+            S::Sidecar { .. } | S::SidecarContext { .. } => return Err(malformed("personal Sidecar current cannot be installed from a peer").into()),
             S::CallState { call_id } => {
                 upsert_call_genesis(conn, realm_id, call_id, source_stream_ref, &row, value)
                     .await?;

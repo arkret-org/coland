@@ -212,6 +212,11 @@ async fn read_with_authority(
     authority: ScopeReadAuthority,
 ) -> PersistenceResult<Read> {
     let caller = &request.caller_actor_id;
+    if matches!(request.effective_scope, ScopeRef::Sidecar { .. })
+        && (source_peer.is_some() || !caller.as_account_id().is_some_and(|account| &account.station_id == issuer))
+    {
+        return Ok(Read::NotFound);
+    }
     let target_ref = &request.target_commit_event_ref;
     let target_epoch = request.target_epoch;
     let (realm_id, expected_stream) = match &request.effective_scope {

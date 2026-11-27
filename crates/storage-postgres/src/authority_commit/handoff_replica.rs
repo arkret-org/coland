@@ -16,7 +16,6 @@ pub(super) fn retain_outgoing_cut<'a>(
     conn: &'a mut AsyncPgConnection,
     handoff: &'a arkret_wire::RealmAuthorityHandoff,
     snapshot: &'a arkret_wire::RealmStateSnapshot,
-    originals: &'a [arkret_wire::CommittedEventFullView],
 ) -> std::pin::Pin<Box<impl std::future::Future<Output = Result<(), PgTransactionError>> + Send + 'a>>
 {
     Box::pin(async move {
@@ -83,38 +82,10 @@ pub(super) fn retain_outgoing_cut<'a>(
                     .into_iter()
                     .min_by_key(|(_, join)| join.stream_position)
                 }
-                arkret_wire::CommitStreamRef::Sidecar {
-                    realm_id,
-                    sidecar_id,
-                } => {
-                    if !crate::sidecar_replica_authority::holds_source_in_connection(
-                        conn,
-                        realm_id,
-                        sidecar_id,
-                        &handoff.from_service_id,
-                    )
-                    .await?
-                    {
-                        continue;
-                    }
-                    let owner = crate::sidecar_replica_authority::controller_in_connection(
-                        conn,
-                        &head.stream_ref,
-                    )
-                    .await?
-                    .ok_or_else(|| invalid("outgoing Sidecar has no accepted controller"))?;
-                    let account: arkret_wire::AccountId =
-                        serde_json::from_value(owner).map_err(invalid)?;
-                    let origin = originals
-                        .iter()
-                        .find(|full| {
-                            full.commit.stream_ref == head.stream_ref
-                                && crate::sidecar_replica_authority::is_native_origin(&full.commit)
-                        })
-                        .ok_or_else(|| {
-                            invalid("outgoing Sidecar has no complete accepted origin")
-                        })?;
-                    Some((account, origin.commit.clone()))
+                arkret_wire::CommitStreamRef::Sidecar { .. } => {
+                    return Err(
+                        invalid("personal Sidecar is outside project handoff authority").into(),
+                    );
                 }
                 _ => return Err(invalid("handoff replica stream is unsupported").into()),
             };

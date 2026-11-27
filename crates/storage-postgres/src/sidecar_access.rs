@@ -48,8 +48,7 @@ pub(crate) async fn cut_in_connection(
     let Some(controller) = controller_account_in_connection(conn, realm, sidecar).await? else {
         return Ok(None);
     };
-    if !crate::sidecar_replica_authority::is_owning_station_in_connection(conn, &controller).await?
-    {
+    if !is_owning_station_in_connection(conn, &controller).await? {
         return Err(PersistenceError::Conflict(format!(
             "{}: Sidecar native participant inputs belong to the owning Station",
             coland_storage::ConflictCode::TemporarilyUnavailable,
@@ -103,28 +102,6 @@ pub(crate) async fn handshake_event_in_connection(
         }
         _ => return Ok(false),
     };
-    let Some(controller) = controller_account_in_connection(conn, realm_id, sidecar_id).await?
-    else {
-        return Ok(false);
-    };
-    if !crate::sidecar_replica_authority::is_owning_station_in_connection(conn, &controller).await?
-    {
-        let Some(floor) = crate::sidecar_authority_cut::public_material_floor_in_connection(
-            conn, realm_id, sidecar_id, actor,
-        )
-        .await?
-        else {
-            return Ok(false);
-        };
-        let source = sql_query("SELECT EXISTS(SELECT 1 FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk \
-            WHERE e.state='committed' AND e.envelope->>'event_id'=$1 AND c.realm_id=$2 \
-            AND c.stream_ref=$3 AND c.stream_position>=$4) AS present")
-            .bind::<Text,_>(event.event_id.as_str()).bind::<Text,_>(realm_id.as_str())
-            .bind::<Jsonb,_>(serde_json::to_value(&event.scope_ref).map_err(PersistenceError::database)?)
-            .bind::<diesel::sql_types::BigInt,_>(i64::try_from(floor.oldest_position).map_err(PersistenceError::database)?)
-            .get_result::<crate::ExistsRow>(&mut *conn).await.map_err(PersistenceError::database)?;
-        return Ok(source.present && binding.effective_scope() == &event.scope_ref);
-    }
     let Some(cut) = cut_in_connection(conn, realm_id, sidecar_id).await? else {
         return Ok(false);
     };
@@ -148,17 +125,6 @@ pub(crate) async fn participant_in_connection(
     let Some(account) = actor.as_account_id() else {
         return Ok(false);
     };
-    let Some(controller) = controller_account_in_connection(conn, realm, sidecar).await? else {
-        return Ok(false);
-    };
-    if !crate::sidecar_replica_authority::is_owning_station_in_connection(conn, &controller).await?
-    {
-        return Ok(crate::sidecar_authority_cut::caller_floor_in_connection(
-            conn, realm, sidecar, actor,
-        )
-        .await?
-        .is_some());
-    }
     let Some(cut) = cut_in_connection(conn, realm, sidecar).await? else {
         return Ok(false);
     };
@@ -178,51 +144,62 @@ pub(crate) async fn participant_in_connection(
     )
 }
 
-/// Every recipient comes from the exact native scope. Merely being joined to
-/// the parent Realm never opens a private inbox or a peer delivery target.
-pub(crate) async fn recipients_in_connection(
+/// Check the explicit reply grant and exact consumed runtime leaf in the writer's transaction.
+pub(crate) async fn can_reply_in_connection(
     conn: &mut AsyncPgConnection,
     realm: &RealmId,
     sidecar: &SidecarId,
-) -> PersistenceResult<Vec<AccountId>> {
-    let Some(controller) = controller_account_in_connection(conn, realm, sidecar).await? else {
-        return Ok(Vec::new());
+    agent: &AccountId,
+    method: &arkret_wire::DidUrl,
+    key: Option<&arkret_wire::EventId>,
+) -> PersistenceResult<bool> {
+    let Some(owner) = controller_account_in_connection(conn, realm, sidecar).await? else {
+        return Ok(false);
     };
-    if !crate::sidecar_replica_authority::is_owning_station_in_connection(conn, &controller).await?
+    if owner.station_id != agent.station_id
+        || !is_owning_station_in_connection(conn, &owner).await?
     {
-        // All recipients route to H. G creates one authority-bound H intent;
-        // H selects native/effective endpoint deliveries at its own cut.
-        let actor = ActorId::account(controller.clone());
-        return Ok(
-            if crate::sidecar_authority_cut::controller_floor_in_connection(
-                conn, realm, sidecar, &actor,
-            )
-            .await?
-            .is_some()
-            {
-                vec![controller]
-            } else {
-                Vec::new()
-            },
-        );
+        return Ok(false);
     }
-    let Some(cut) = cut_in_connection(conn, realm, sidecar).await? else {
-        return Ok(Vec::new());
+    let Some(cut) =
+        crate::sidecar_authority_cut::locked_in_connection(conn, realm, sidecar, &owner).await?
+    else {
+        return Ok(false);
     };
-    let agents =
-        crate::sidecar_effective_access::effective_agents_in_connection(conn, &cut).await?;
-    let mut recipients = vec![cut.controller_account_id.clone()];
-    recipients.extend(
-        agents
-            .into_iter()
-            .map(|agent| AccountId::new(agent, cut.controller_account_id.station_id.clone())),
-    );
-    recipients.sort_by(|left, right| {
-        left.principal_id
-            .as_str()
-            .as_bytes()
-            .cmp(right.principal_id.as_str().as_bytes())
-    });
-    recipients.dedup();
-    Ok(recipients)
+    if crate::sidecar_authority_cut::enrollment(conn, realm, sidecar, agent)
+        .await?
+        .is_none_or(|r| r.value["membership"] != "join" || r.value["private_reply_allowed"] != true)
+    {
+        return Ok(false);
+    }
+    Ok(
+        crate::sidecar_effective_access::effective_agents_for_endpoint_in_connection(
+            conn,
+            &cut,
+            Some((&agent.principal_id, method, key)),
+        )
+        .await?
+        .contains(&agent.principal_id),
+    )
+}
+
+/// Select the local native role from the configured Station identity, never
+/// from missing PCR rows or the success of a native-authority query.
+pub(crate) async fn is_owning_station_in_connection(
+    conn: &mut crate::AsyncPgConnection,
+    account: &arkret_wire::AccountId,
+) -> PersistenceResult<bool> {
+    Ok(account.station_id == local_station_in_connection(conn).await?)
+}
+
+async fn local_station_in_connection(
+    conn: &mut crate::AsyncPgConnection,
+) -> PersistenceResult<arkret_wire::DidCoreId> {
+    let row = diesel::sql_query(
+        "SELECT to_jsonb(station_id) AS payload FROM device_inventory_station WHERE singleton",
+    )
+    .get_result::<crate::JsonPayloadRow>(&mut *conn)
+    .await
+    .map_err(PersistenceError::database)?;
+    serde_json::from_value(row.payload).map_err(PersistenceError::database)
 }

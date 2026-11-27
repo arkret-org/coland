@@ -1,4 +1,4 @@
-//! G-owned membership generations confirmed by one accepted Sidecar MLS state.
+//! Home Station enrollment generations confirmed by one accepted Sidecar MLS state.
 //!
 //! These private originals do not reproduce H's native participant decision or
 //! its digest preimage. Each real transition confirms only its resulting tree.
@@ -24,7 +24,7 @@ use crate::{OptionalExtension, QueryableByName, sql_query};
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MembershipBasis {
-    controller_join_event_ref: EventId,
+    controller_create_event_ref: EventId,
     agent_join_event_refs: Vec<EventId>,
 }
 
@@ -33,7 +33,7 @@ impl MembershipBasis {
         if self
             .agent_join_event_refs
             .iter()
-            .any(|reference| reference == &self.controller_join_event_ref)
+            .any(|reference| reference == &self.controller_create_event_ref)
             || self
                 .agent_join_event_refs
                 .windows(2)
@@ -162,50 +162,57 @@ pub(crate) async fn controller_in_connection(
     Ok(Some(controller))
 }
 
-fn joined_actor(source: &CommittedEventFullView) -> PersistenceResult<ActorId> {
-    if source.commit.stream_ref
-        != (CommitStreamRef::Realm {
-            realm_id: source.event.realm_id.clone(),
-        })
-    {
-        return Err(invalid("membership is not on its parent Realm stream"));
-    }
-    let payload = serde_json::to_value(&source.event.payload).map_err(invalid)?;
-    match source.event.kind {
-        EventKind::MemberState if payload["membership"] == "join" => {
-            serde_json::from_value(payload["member_id"].clone()).map_err(invalid)
-        }
-        EventKind::InviteAccept | EventKind::RealmInviteLinkAccept => {
-            Ok(source.event.actor_id.clone())
-        }
-        _ => Err(invalid("original does not establish joined membership")),
-    }
-}
-
 fn agent_binding(
     source: &CommittedEventFullView,
     controller: &AccountId,
-    controller_join: &EventId,
+    sidecar: &SidecarId,
 ) -> PersistenceResult<ActorId> {
-    let actor = joined_actor(source)?;
-    let account = actor
-        .as_account_id()
-        .ok_or_else(|| invalid("Agent is not a full Account"))?;
-    let payload = serde_json::to_value(&source.event.payload).map_err(invalid)?;
-    let binding = &payload["agent_controller_binding"];
-    if source.event.kind != EventKind::MemberState
-        || account == controller
-        || account.station_id != controller.station_id
-        || binding.get("controller_terminal_event_ref").is_some()
-        || binding["controller_account_id"] != serde_json::to_value(controller).map_err(invalid)?
-        || binding["controller_membership_generation_ref"]
-            != serde_json::to_value(controller_join).map_err(invalid)?
+    use arkret_event_draft::EventPayloadExt as _;
+    use arkret_models_collaboration::events_payloads::sidecar::SidecarMembership;
+    let target = source.event.as_sidecar_member_state().map_err(invalid)?;
+    let stream = CommitStreamRef::Sidecar {
+        realm_id: source.event.realm_id.clone(),
+        sidecar_id: sidecar.clone(),
+    };
+    if source.commit.stream_ref != stream
+        || source.event.scope_ref != stream.scope_ref()
+        || source.event.actor_id.as_account_id() != Some(controller)
+        || target.agent_account_id == *controller
+        || target.agent_account_id.station_id != controller.station_id
+        || target.membership != SidecarMembership::Join
+    {
+        return Err(invalid("invalid original Sidecar enrollment"));
+    }
+    Ok(ActorId::account(target.agent_account_id))
+}
+
+async fn current_enrollment(
+    conn: &mut AsyncPgConnection,
+    realm: &RealmId,
+    sidecar: &SidecarId,
+    actor: &ActorId,
+    known: Option<&CommittedEventFullView>,
+) -> PersistenceResult<Option<CommittedEventFullView>> {
+    let Some(account) = actor.as_account_id() else {
+        return Ok(None);
+    };
+    let Some(row) = crate::sidecar_authority_cut::enrollment(conn, realm, sidecar, account).await?
+    else {
+        return Ok(None);
+    };
+    if row.value["membership"] != "join" {
+        return Ok(None);
+    }
+    let reference = EventId::new(row.event_id).map_err(invalid)?;
+    let source = membership_original(conn, realm, &reference, known).await?;
+    if source.commit.commit_id.as_str() != row.commit_id
+        || source.commit.stream_position != u64::try_from(row.stream_position).map_err(invalid)?
     {
         return Err(invalid(
-            "Agent join does not bind this controller incarnation",
+            "private enrollment differs from the retained original",
         ));
     }
-    Ok(actor)
+    Ok(Some(source))
 }
 
 async fn membership_original(
@@ -220,31 +227,31 @@ async fn membership_original(
     full(realm, &original(conn, realm, reference).await?)
 }
 
-async fn current_join(
+async fn controller_creation(
     conn: &mut AsyncPgConnection,
     realm: &RealmId,
+    sidecar: &SidecarId,
     actor: &ActorId,
     known: Option<&CommittedEventFullView>,
 ) -> PersistenceResult<Option<CommittedEventFullView>> {
-    let Some(fact) = crate::sidecar_authority_cut::member_fact(conn, realm, actor).await? else {
+    let reference = EventId::from_token_bytes(sidecar.token_bytes()).map_err(invalid)?;
+    let source = membership_original(conn, realm, &reference, known).await?;
+    let Some(account) = actor.as_account_id() else {
         return Ok(None);
     };
-    if fact.value["membership"] != "join" {
-        return Ok(None);
-    }
-    let reference = EventId::new(fact.event_id).map_err(invalid)?;
-    let source = membership_original(conn, realm, &reference, known).await?;
-    if joined_actor(&source)? != *actor
-        || source.commit.commit_id.as_str() != fact.commit_id
-        || source.commit.stream_position != u64::try_from(fact.stream_position).map_err(invalid)?
-        || serde_json::to_value(&source.commit.stream_ref).map_err(invalid)? != fact.stream_ref
+    if source.event.kind != EventKind::SidecarCreate
+        || source.event.actor_id != *actor
+        || source.event.scope_ref
+            != (ScopeRef::Realm {
+                realm_id: realm.clone(),
+            })
+        || crate::morph_projection_reads::human_realm_in_connection(conn, account).await? != *realm
     {
-        return Err(invalid("current membership differs from its original"));
+        return Ok(None);
     }
     Ok(Some(source))
 }
 
-/// G checks only its own current membership and the accepted controller binding.
 pub(crate) async fn actor_is_member_in_connection(
     conn: &mut AsyncPgConnection,
     realm: &RealmId,
@@ -255,17 +262,24 @@ pub(crate) async fn actor_is_member_in_connection(
     let Some(controller) = controller_in_connection(conn, realm, sidecar).await? else {
         return Ok(false);
     };
-    let Some(join) = current_join(conn, realm, &ActorId::account(controller.clone()), None).await?
+    let Some(_) = controller_creation(
+        conn,
+        realm,
+        sidecar,
+        &ActorId::account(controller.clone()),
+        None,
+    )
+    .await?
     else {
         return Ok(false);
     };
     if actor.as_account_id() == Some(&controller) {
         return Ok(true);
     }
-    let Some(agent) = current_join(conn, realm, actor, None).await? else {
+    let Some(agent) = current_enrollment(conn, realm, sidecar, actor, None).await? else {
         return Ok(false);
     };
-    Ok(agent_binding(&agent, &controller, &join.event.event_id).is_ok())
+    Ok(agent_binding(&agent, &controller, sidecar).is_ok())
 }
 
 fn tree_actors(scope: &ScopeRef, epoch: u64, state: &[u8]) -> PersistenceResult<BTreeSet<ActorId>> {
@@ -279,6 +293,7 @@ fn tree_actors(scope: &ScopeRef, epoch: u64, state: &[u8]) -> PersistenceResult<
 async fn resolve_basis(
     conn: &mut AsyncPgConnection,
     realm: &RealmId,
+    sidecar: &SidecarId,
     controller: &AccountId,
     basis: &MembershipBasis,
     known: &[&CommittedEventFullView],
@@ -290,14 +305,17 @@ async fn resolve_basis(
     let join = membership_original(
         conn,
         realm,
-        &basis.controller_join_event_ref,
+        &basis.controller_create_event_ref,
         known
             .iter()
             .copied()
-            .find(|source| source.event.event_id == basis.controller_join_event_ref),
+            .find(|source| source.event.event_id == basis.controller_create_event_ref),
     )
     .await?;
-    if joined_actor(&join)?.as_account_id() != Some(controller) {
+    if join.event.kind != EventKind::SidecarCreate
+        || SidecarId::from_event_id(&join.event.event_id) != *sidecar
+        || join.event.actor_id.as_account_id() != Some(controller)
+    {
         return Err(invalid("controller join belongs to another Actor"));
     }
     let mut agents = BTreeMap::new();
@@ -312,7 +330,7 @@ async fn resolve_basis(
                 .find(|source| &source.event.event_id == reference),
         )
         .await?;
-        let actor = agent_binding(&source, controller, &basis.controller_join_event_ref)?;
+        let actor = agent_binding(&source, controller, sidecar)?;
         if agents.insert(actor, source).is_some() {
             return Err(invalid("multiple generations of one Agent in a state"));
         }
@@ -358,9 +376,15 @@ pub(crate) async fn freeze_in_connection(
     let controller = controller_in_connection(conn, realm_id, sidecar_id)
         .await?
         .ok_or_else(|| invalid("Sidecar controller is unavailable"))?;
-    let join = current_join(conn, realm_id, &ActorId::account(controller.clone()), None)
-        .await?
-        .ok_or_else(|| invalid("controller is not currently joined"))?;
+    let join = controller_creation(
+        conn,
+        realm_id,
+        sidecar_id,
+        &ActorId::account(controller.clone()),
+        None,
+    )
+    .await?
+    .ok_or_else(|| invalid("personal Sidecar creation proof is unavailable"))?;
     // The serving owner derives this set from the verified RFC tracker once.
     let actors = &installation.member_principals;
     if installation.effective_scope != transaction.event.scope_ref
@@ -377,15 +401,15 @@ pub(crate) async fn freeze_in_connection(
         if actor.as_account_id() == Some(&controller) {
             continue;
         }
-        let agent = current_join(conn, realm_id, actor, None)
+        let agent = current_enrollment(conn, realm_id, sidecar_id, actor, None)
             .await?
             .ok_or_else(|| invalid("resulting Agent leaf is not currently joined"))?;
-        agent_binding(&agent, &controller, &join.event.event_id)?;
+        agent_binding(&agent, &controller, sidecar_id)?;
         refs.push(agent.event.event_id);
     }
     refs.sort_by(|a, b| a.as_str().as_bytes().cmp(b.as_str().as_bytes()));
     let basis = MembershipBasis {
-        controller_join_event_ref: join.event.event_id,
+        controller_create_event_ref: join.event.event_id,
         agent_join_event_refs: refs,
     };
     let row = original(conn, realm_id, &transaction.event.event_id).await?;
@@ -471,12 +495,13 @@ pub(crate) async fn current_state_is_confirmed(
         }
         // A recorded old controller cut is not an extra current send gate.
         return Ok(
-            current_join(conn, realm, &ActorId::account(controller), None)
+            controller_creation(conn, realm, sidecar, &ActorId::account(controller), None)
                 .await?
                 .is_some(),
         );
     }
-    let (controller_source, agents) = resolve_basis(conn, realm, &controller, &basis, &[]).await?;
+    let (controller_source, agents) =
+        resolve_basis(conn, realm, sidecar, &controller, &basis, &[]).await?;
     let actors = tree_actors(
         &current.value.effective_scope,
         current.value.epoch,
@@ -494,9 +519,10 @@ pub(crate) async fn current_state_is_confirmed(
             "current tree differs from its confirmed membership basis",
         ));
     }
-    let Some(join) = current_join(
+    let Some(join) = controller_creation(
         conn,
         realm,
+        sidecar,
         &ActorId::account(controller.clone()),
         Some(&controller_source),
     )
@@ -504,15 +530,16 @@ pub(crate) async fn current_state_is_confirmed(
     else {
         return Ok(false);
     };
-    if join.event.event_id != basis.controller_join_event_ref {
+    if join.event.event_id != basis.controller_create_event_ref {
         return Ok(false);
     }
     for (actor, original) in agents {
-        let Some(agent) = current_join(conn, realm, &actor, Some(&original)).await? else {
+        let Some(agent) = current_enrollment(conn, realm, sidecar, &actor, Some(&original)).await?
+        else {
             return Ok(false);
         };
         if agent.event.event_id != original.event.event_id
-            || agent_binding(&agent, &controller, &join.event.event_id).is_err()
+            || agent_binding(&agent, &controller, sidecar).is_err()
         {
             return Ok(false);
         }
@@ -534,15 +561,21 @@ pub(crate) async fn agent_floor_in_connection(
     if actor.as_account_id() == Some(&controller) {
         return Ok(None);
     }
-    let Some(controller_join) =
-        current_join(conn, realm, &ActorId::account(controller.clone()), None).await?
+    let Some(controller_join) = controller_creation(
+        conn,
+        realm,
+        sidecar,
+        &ActorId::account(controller.clone()),
+        None,
+    )
+    .await?
     else {
         return Ok(None);
     };
-    let Some(agent) = current_join(conn, realm, actor, None).await? else {
+    let Some(agent) = current_enrollment(conn, realm, sidecar, actor, None).await? else {
         return Ok(None);
     };
-    if agent_binding(&agent, &controller, &controller_join.event.event_id).is_err() {
+    if agent_binding(&agent, &controller, sidecar).is_err() {
         return Ok(None);
     }
     let scope = ScopeRef::Sidecar {
@@ -554,7 +587,7 @@ pub(crate) async fn agent_floor_in_connection(
         FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk \
         WHERE c.realm_id=$1 AND c.stream_ref=$2 AND e.state='committed' \
           AND e.kind IN ('ak.mls.genesis','ak.mls.commit') \
-          AND c.sidecar_membership_basis->>'controller_join_event_ref'=$3 \
+          AND c.sidecar_membership_basis->>'controller_create_event_ref'=$3 \
           AND c.sidecar_membership_basis->'agent_join_event_refs' @> $4 \
         ORDER BY c.stream_position LIMIT 1",
     )
@@ -578,12 +611,13 @@ pub(crate) async fn agent_floor_in_connection(
         let (_, agents) = resolve_basis(
             conn,
             realm,
+            sidecar,
             &controller,
             &basis,
             &[&controller_join, &agent],
         )
         .await?;
-        if basis.controller_join_event_ref == controller_join.event.event_id
+        if basis.controller_create_event_ref == controller_join.event.event_id
             && agents.get(actor).map(|source| &source.event.event_id) == Some(&agent.event.event_id)
         {
             return Ok(Some(ReadableFloor {
@@ -624,7 +658,7 @@ pub(crate) async fn validate_archive(
             .await?
             .ok_or_else(|| invalid("archived Sidecar lacks its Create"))?;
         let basis = state_basis(&source, row.basis.as_ref(), &source.event.scope_ref)?;
-        resolve_basis(conn, realm, &controller, &basis, &[]).await?;
+        resolve_basis(conn, realm, sidecar_id, &controller, &basis, &[]).await?;
     }
     Ok(())
 }
@@ -697,7 +731,7 @@ pub(crate) async fn import_basis(
     let controller = controller_in_connection(conn, realm, sidecar_id)
         .await?
         .ok_or_else(|| invalid("imported basis lacks its accepted Create"))?;
-    resolve_basis(conn, realm, &controller, &basis, &[]).await?;
+    resolve_basis(conn, realm, sidecar_id, &controller, &basis, &[]).await?;
     match installed.basis {
         None => attach(conn, &commit.commit_id, &row["sidecar_membership_basis"]).await,
         Some(existing) if existing == row["sidecar_membership_basis"] => Ok(()),
@@ -716,7 +750,7 @@ mod tests {
     #[test]
     fn membership_basis_has_no_agent_count_veto_and_rejects_ambiguous_references() {
         let mut basis = MembershipBasis {
-            controller_join_event_ref: event(0),
+            controller_create_event_ref: event(0),
             agent_join_event_refs: (1..=65).map(event).collect(),
         };
         basis
@@ -734,13 +768,13 @@ mod tests {
     #[test]
     fn membership_basis_is_closed_and_does_not_admit_an_old_head() {
         let basis = MembershipBasis {
-            controller_join_event_ref: event(0),
+            controller_create_event_ref: event(0),
             agent_join_event_refs: vec![],
         };
         let mut value = serde_json::to_value(&basis).unwrap();
         value["authority_stream_head"] = serde_json::json!([]);
         assert!(serde_json::from_value::<MembershipBasis>(value).is_err());
-        let value = serde_json::json!({"controller_join_event_ref": event(0), "agent_join_event_refs": null});
+        let value = serde_json::json!({"controller_create_event_ref": event(0), "agent_join_event_refs": null});
         assert!(serde_json::from_value::<MembershipBasis>(value).is_err());
     }
 }

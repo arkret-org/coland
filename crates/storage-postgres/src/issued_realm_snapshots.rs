@@ -544,7 +544,7 @@ fn indexed_cut_rows(
 /// A network read may overlap local replica advancement. All rows already
 /// covered by the signed heads must match, and every still-visible subject
 /// known before the request must remain present without revision regression.
-fn require_observed_cut(
+pub(crate) fn require_observed_cut(
     snapshot: &arkret_wire::RealmStateSnapshot,
     minimum: &coland_storage::RealmStateSnapshotMaterial,
     current: &coland_storage::RealmStateSnapshotMaterial,
@@ -1275,7 +1275,7 @@ fn basis_from_snapshot(
 /// Resolve cross-stream authorization sources from the exact issued cut, then
 /// apply the same current interval and per-Event disclosure as Account reads.
 /// A signed current row is not a promise that its original remains readable.
-async fn disclosed_basis_from_snapshot(
+pub(crate) async fn disclosed_basis_from_snapshot(
     conn: &mut AsyncPgConnection,
     account: &arkret_wire::AccountId,
     snapshot: &arkret_wire::RealmStateSnapshot,

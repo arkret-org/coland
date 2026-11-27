@@ -344,6 +344,7 @@ pub struct CircleProjection {
 pub struct SidecarProjection {
     pub sidecar_id: String,
     pub realm_id: String,
+    pub source_realm_id: String,
     pub controller_account_id: arkret_wire::AccountId,
     pub state: arkret_models_collaboration::agent_sidecar::AgentSidecarState,
     pub state_changed_at: Option<chrono::DateTime<chrono::Utc>>,

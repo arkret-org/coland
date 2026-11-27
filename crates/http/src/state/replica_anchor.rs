@@ -1080,13 +1080,10 @@ pub(crate) async fn verify_foreign_project_history(
             .await
             .map_err(|_| denied())?;
         let current = &outcome.snapshot;
+        let member = arkret_wire::ActorId::account(query.member_account_id.clone());
         let still_covered = original.history_basis.as_ref().is_some_and(|basis| {
             basis.account_id == query.member_account_id && basis.stream_ref == query.scan.stream_ref
-        }) && original.parent_membership_revision(
-            &arkret_wire::ActorId::account(query.member_account_id.clone()),
-        ) == current.parent_membership_revision(
-            &arkret_wire::ActorId::account(query.member_account_id.clone()),
-        ) && original.visible_stream_heads.iter().all(|old| {
+        }) && original.active_realm_member_revision(&member) == current.active_realm_member_revision(&member) && original.visible_stream_heads.iter().all(|old| {
             current.visible_stream_heads.iter().any(|new| {
                 new.stream_ref == old.stream_ref
                     && (new.stream_position > old.stream_position || new == old)

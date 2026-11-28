@@ -116,6 +116,18 @@ pub(crate) async fn require_current(
     let Some(agent) = event.actual_signer().as_account_id() else {
         return Ok(());
     };
+    if event.kind == EventKind::MessageCreate
+        && event.executed_by.is_none()
+        && matches!(&event.scope_ref, arkret_wire::ScopeRef::Sidecar { .. })
+    {
+        if &agent.station_id != target_station || forwarded.is_some() {
+            return Err(unresolved());
+        }
+        // Private message admission in this transaction checks the enrolled
+        // Agent's explicit reply permission, current runtime and MLS leaf.
+        // Public Realm and Strand participation applies only to shared writes.
+        return Ok(());
+    }
     let foreign_message = event.kind == EventKind::MessageCreate
         && event.executed_by.is_none()
         && &agent.station_id != target_station

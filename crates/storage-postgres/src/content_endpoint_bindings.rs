@@ -242,7 +242,7 @@ pub(crate) async fn current_producer_in_connection(
     {
         producer
     } else {
-        own_human_pcr_producer(conn, transaction).await?
+        home_human_device_producer(conn, transaction, Some(group)).await?
     };
     current_endpoint_in_connection(
         conn,
@@ -539,14 +539,16 @@ pub(crate) async fn current_history_recipient_in_connection(
             return Err(unavailable("history Agent request native instance differs"));
         }
         original_runtime_qualified = true;
-    } else if original.event.scope_ref
-        != (arkret_wire::ScopeRef::Realm {
-            realm_id: original.event.realm_id.clone(),
-        })
-    {
-        return Err(unavailable(
-            "history request has no independently qualified original producer",
-        ));
+    } else {
+        let (Some(account), MlsWelcomeRecipientEndpoint::Device { device_id }) =
+            (recipient.actor_id.as_account_id(), &recipient.endpoint)
+        else {
+            return Err(unavailable("history request has no native Device producer"));
+        };
+        if &account.station_id != native_station || original.event.actor_id != recipient.actor_id {
+            return Err(unavailable("private history request has another owner"));
+        }
+        require_home_device_scope(conn, &original.event, account, device_id, Some(group)).await?;
     }
     crate::content_recovery_fence::require_unfenced(conn, &recipient.actor_id).await?;
     if let Some(account) = recipient.actor_id.as_account_id() {
@@ -666,28 +668,21 @@ pub(crate) async fn current_history_recipient_in_connection(
     Ok(current)
 }
 
-/// Own-PCR originals use the separately registered self-admission contract,
-/// rather than an ordinary collaboration historical-signer fact. Independently
-/// verify the accepted Human inception and its current real Device proof; an
-/// absent ordinary fact never becomes an authority fallback for another scope.
-pub(crate) async fn own_human_pcr_producer(
+/// Qualify the controller's current Device at H for its PCR or its personal
+/// Sidecar. A private stream also requires its own accepted group and leaf.
+pub(crate) async fn home_human_device_producer(
     conn: &mut AsyncPgConnection,
     transaction: &AuthorityCommitTransaction,
+    group: Option<&MlsGroupValue>,
 ) -> PersistenceResult<(
     arkret_wire::ActorId,
     MlsWelcomeRecipientEndpoint,
     arkret_wire::EventId,
 )> {
     let event = &transaction.event;
-    if event.executed_by.is_some()
-        || event.authorization_ref.is_some()
-        || event.scope_ref
-            != (arkret_wire::ScopeRef::Realm {
-                realm_id: event.realm_id.clone(),
-            })
-    {
+    if event.executed_by.is_some() || event.authorization_ref.is_some() {
         return Err(unavailable(
-            "content producer has no qualified own-Human PCR role",
+            "private content requires its actual Human Device",
         ));
     }
     let origin = crate::pcr_private_authority::accepted_governance(conn, &event.realm_id).await?;
@@ -714,6 +709,7 @@ pub(crate) async fn own_human_pcr_producer(
     if producer.account_id != account {
         return Err(unavailable("own-PCR Device producer has another Account"));
     }
+    require_home_device_scope(conn, event, &account, &producer.device_id, group).await?;
     let (cut, _) = crate::actor_profiles::verify_device_signer_in_connection(
         conn,
         event,
@@ -737,4 +733,38 @@ pub(crate) async fn own_human_pcr_producer(
         },
         accepted.event_id,
     ))
+}
+
+async fn require_home_device_scope(
+    conn: &mut AsyncPgConnection,
+    event: &arkret_wire::Event,
+    account: &arkret_wire::AccountId,
+    device: &arkret_wire::DeviceId,
+    group: Option<&MlsGroupValue>,
+) -> PersistenceResult<()> {
+    match &event.scope_ref {
+        arkret_wire::ScopeRef::Realm { realm_id } if realm_id == &event.realm_id => Ok(()),
+        arkret_wire::ScopeRef::Sidecar {
+            realm_id,
+            sidecar_id,
+        } if realm_id == &event.realm_id => {
+            let group = group.ok_or_else(|| unavailable("private Sidecar group is unavailable"))?;
+            let cut = crate::sidecar_authority_cut::locked_in_connection(
+                conn, realm_id, sidecar_id, account,
+            )
+            .await?
+            .ok_or_else(|| unavailable("private Sidecar owner is unavailable"))?;
+            if !crate::sidecar_mls_readiness::controller_device_ready_in_connection(
+                conn, &cut, group, device,
+            )
+            .await?
+            {
+                return Err(unavailable("private Sidecar Device has no current leaf"));
+            }
+            Ok(())
+        }
+        _ => Err(unavailable(
+            "private content is outside the owner's PCR or Sidecar",
+        )),
+    }
 }

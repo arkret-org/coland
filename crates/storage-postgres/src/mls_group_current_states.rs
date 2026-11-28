@@ -571,7 +571,8 @@ async fn qualified_own_human_pcr_genesis(
         return Ok(false);
     }
     let (actor, endpoint, authorization) =
-        crate::content_endpoint_bindings::own_human_pcr_producer(conn, transaction).await?;
+        crate::content_endpoint_bindings::home_human_device_producer(conn, transaction, None)
+            .await?;
     let payload: MlsGenesisPayload = serde_json::from_value(
         serde_json::to_value(&event.payload).map_err(PersistenceError::database)?,
     )

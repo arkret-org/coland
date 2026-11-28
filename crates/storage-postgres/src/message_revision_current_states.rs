@@ -523,16 +523,8 @@ async fn admit_sidecar_message(
     if !attached.present {
         return Err(conflict("private Message source context is not attached"));
     }
-    require_active_strand_track(
-        conn,
-        &event.realm_id,
-        &payload.strand_id,
-        &arkret_wire::ScopeRef::Realm {
-            realm_id: event.realm_id.clone(),
-        },
-        &payload.track_name,
-    )
-    .await?;
+    // The private attachment identifies this conversation's context. Source
+    // Strand lifecycle and tracks govern publications to the project only.
     crate::message_interactions::require_reply_and_mentions_in_connection(
         conn, event, commit, &payload,
     )

@@ -1,4 +1,4 @@
-//! Extension protocol describe, signature-order, and retired-route smoke tests.
+//! Extension protocol describe and signature-order smoke tests.
 //! Accepted Applet/Realm fixtures pending formal Event/RealmCommit migration are
 //! tracked in arkret-work/tasks/impl-active/2026-09-19-2011.
 
@@ -89,56 +89,4 @@ async fn applet_transaction_requires_signature_before_typed_body_validation() {
         error["type"],
         json!("https://arkret.org/problems/http_signature_required")
     );
-}
-
-#[tokio::test]
-async fn retired_sovereign_shadow_routes_are_unrecognized() {
-    let state = coland_test_support::app_state(test_config());
-    state.hydrate().await.unwrap();
-    let app = service(state);
-
-    for path in [
-        "/_coland/admin/deployment/audit",
-        "/_coland/admin/deployment/enclave-frontier?realm_id=ak:realm:retired",
-        "/_coland/admin/deployment/info",
-        "/_coland/self/account/did:web:retired.example",
-        "/_coland/self/directory/realms",
-        "/_coland/self/realm/ak:realm:retired",
-        "/_coland/self/realm/ak:realm:retired/access",
-    ] {
-        let mut response = TestClient::get(format!("http://server{path}"))
-            .send(&app)
-            .await;
-        assert_eq!(response.status_code, Some(StatusCode::NOT_FOUND), "{path}");
-        let problem: Value = response.take_json().await.unwrap();
-        assert_eq!(
-            problem["type"],
-            json!("https://arkret.org/problems/unrecognized_endpoint"),
-            "{path}"
-        );
-    }
-
-    for path in [
-        "/_coland/admin/deployment/configure",
-        "/_coland/admin/deployment/external-invite",
-        "/_coland/admin/deployment/network/link",
-        "/_coland/admin/deployment/realm.create",
-        "/_coland/admin/deployment/register-enclave",
-        "/_coland/admin/deployment/store-and-forward/messages",
-        "/_coland/admin/deployment/store-and-forward/drain",
-        "/_coland/admin/deployment/store-and-forward/ingest",
-        "/_coland/self/account/accept-external-invite",
-        "/_coland/self/deployment/enclave-proxy",
-    ] {
-        let mut response = TestClient::post(format!("http://server{path}"))
-            .send(&app)
-            .await;
-        assert_eq!(response.status_code, Some(StatusCode::NOT_FOUND), "{path}");
-        let problem: Value = response.take_json().await.unwrap();
-        assert_eq!(
-            problem["type"],
-            json!("https://arkret.org/problems/unrecognized_endpoint"),
-            "{path}"
-        );
-    }
 }

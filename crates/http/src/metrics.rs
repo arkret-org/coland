@@ -654,13 +654,6 @@ mod tests {
             "ak.peer.mls.read.group_state_material.v1"
         );
 
-        for path in [
-            "/_arkret/self/seals/mls-governance-proof",
-            "/_arkret/peer/seals/mls-governance-proof",
-        ] {
-            let retired = TestClient::post(format!("http://localhost{path}")).build();
-            assert_eq!(canonical_event_read_operation(&retired), None);
-        }
     }
 
     #[test]

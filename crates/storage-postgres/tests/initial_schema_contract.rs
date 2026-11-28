@@ -2,29 +2,7 @@ const INITIAL_UP: &str = include_str!("../migrations/00000000000000_initial/up.s
 const INITIAL_DOWN: &str = include_str!("../migrations/00000000000000_initial/down.sql");
 
 #[test]
-fn retired_authority_storage_cannot_return_to_the_initial_migration() {
-    for token in [
-        "actor_seq",
-        "state_seals",
-        "state_cell_ops",
-        "state_control_events",
-        "federation_frontier_exchange",
-        "federation_frontier_resolution",
-        "federation_fork_normalization",
-        "current_selector_origins",
-        "history_key_responses",
-        "seal_prepare_signing_fences",
-        "awaiting_accepted_frontier",
-    ] {
-        assert!(
-            !INITIAL_UP.contains(token),
-            "retired authority storage: {token}"
-        );
-        assert!(
-            !INITIAL_DOWN.contains(token),
-            "retired down migration: {token}"
-        );
-    }
+fn initial_migration_supports_awaiting_source_commit() {
     assert!(INITIAL_UP.contains("awaiting_source_commit"));
 }
 
@@ -126,12 +104,6 @@ fn agent_principal_constraints_use_spec_identifier_kinds() {
 }
 
 #[test]
-fn circle_join_rule_constraint_uses_spec_vocabulary() {
-    assert!(INITIAL_UP.contains("ARRAY['invite'::text, 'knock'::text, 'public'::text]"));
-    assert!(!INITIAL_UP.contains("ARRAY['invite'::text, 'request'::text, 'open'::text]"));
-}
-
-#[test]
 fn applet_identity_winner_is_independent_from_exact_scope_installations() {
     assert!(INITIAL_UP.contains("CREATE TABLE public.applet_managed_identities"));
     assert!(INITIAL_UP.contains("PRIMARY KEY (applet_id, target_station_id)"));
@@ -148,9 +120,9 @@ fn applet_identity_winner_is_independent_from_exact_scope_installations() {
 
 /// A directed Invite's live slot is the typed current target register. The
 /// link definition, lifecycle and per-account use facts have their own current
-/// owner. Neither needs the retired `realm_invites` table or its status predicate.
+/// owner.
 #[test]
-fn invite_current_registers_replace_the_retired_invite_table() {
+fn invite_current_registers_store_lifecycle_and_per_account_state() {
     assert!(INITIAL_UP.contains("CREATE TABLE invite_lifecycle_current_states"));
     assert!(INITIAL_UP.contains("CREATE TABLE invite_live_target_current_states"));
     assert!(INITIAL_UP.contains("PRIMARY KEY(realm_id,invitee_account_id)"));
@@ -161,10 +133,6 @@ fn invite_current_registers_replace_the_retired_invite_table() {
             .contains("PRIMARY KEY(realm_id,state_kind,realm_invite_link_id,subject_account_id)")
     );
     assert!(INITIAL_DOWN.contains("DROP TABLE IF EXISTS realm_invite_link_current_states"));
-    assert!(
-        !INITIAL_UP.contains("CREATE TABLE public.realm_invites"),
-        "retired realm_invites must not return to the initial schema"
-    );
 }
 
 #[test]

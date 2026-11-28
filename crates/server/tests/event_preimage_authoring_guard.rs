@@ -56,8 +56,7 @@ fn no_coland_source_hand_rolls_the_event_digest_preimage() {
 
     let mut violations = Vec::new();
     for path in &sources {
-        // This file names the forbidden shapes in order to search for them, the
-        // same self-exclusion `scripts/stale-literal-scan.sh` takes.
+        // Exclude this guard, which contains its own search patterns.
         if path.file_name() == Path::new(file!()).file_name() {
             continue;
         }

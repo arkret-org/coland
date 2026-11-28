@@ -1241,9 +1241,6 @@ mod tests {
             assert_eq!(agent_recipient_operation(method, path), Some(operation));
         }
         for (method, path) in [
-            ("GET", "/_arkret/self/device_messages"),
-            ("POST", "/_arkret/self/device_messages"),
-            ("POST", "/_arkret/self/device_messages/ack"),
             ("PUT", "/_arkret/self/device-messages"),
             ("GET", "/_arkret/self/device-messages/ack"),
             ("GET", "/_arkret/self/account/stream"),

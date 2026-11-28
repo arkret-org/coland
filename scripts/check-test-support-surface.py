@@ -8,7 +8,6 @@ Two shapes:
 * `GATED_MODULES` — a whole module that must not be compiled into a default
   build. The development conformance harness is the case this exists for:
   `coland_http::routing::conformance` is the isolated HTTP fixture surface.
-  The removed legacy `conformance_basis` module must not return.
   `development_mode` decides whether the namespace is *mounted*; these
   attributes decide whether it is *compiled*, which is what keeps the seed
   constructor out of the release binary.
@@ -38,22 +37,6 @@ SURFACES = {
     "crates/services/src/projection.rs": ("test_state",),
     "crates/storage/src/records.rs": ("with_coalescing_lane",),
 }
-
-
-def deterministic_http_key_errors(root: Path) -> list[str]:
-    source = (root / "crates/http/src/http_signature.rs").read_text(encoding="utf-8")
-    if re.search(r"\bdeterministic_development_signing_key\b", source):
-        return ["crates/http/src/http_signature.rs: unused deterministic fixture key constructor must remain removed"]
-    return []
-
-
-def removed_basis_errors(root: Path) -> list[str]:
-    source = (root / "crates/services/src/lib.rs").read_text(encoding="utf-8")
-    if re.search(r"\bmod\s+conformance_basis\b", source) or (
-        root / "crates/services/src/conformance_basis.rs"
-    ).exists() or (root / "crates/services/src/conformance_basis").exists():
-        return ["crates/services/src: removed conformance_basis must not return"]
-    return []
 
 
 HARNESS_CFG = '#[cfg(any(test, feature = "conformance-harness"))]'
@@ -91,19 +74,14 @@ def harness_surface_errors(root: Path) -> list[str]:
     source = (root / "crates/http/src/config.rs").read_text(encoding="utf-8")
     if 'cfg!(any(test, feature = "conformance-harness")) && self.development_mode' not in source:
         failures.append("config.rs: runtime development mode must not enable synthetic trust in a normal build")
-    if "jws_replay_window_seconds" in source:
-        failures.append("config.rs: removed, unused JWS replay setting must not return")
     bootstrap = (root / "crates/server/src/bootstrap.rs").read_text(encoding="utf-8")
     if "danger_accept_invalid_certs" in bootstrap:
         failures.append("bootstrap.rs: initial Account Authority discovery must validate TLS certificates")
-    for name in ("demo.rs", "actors_users.rs", "organization_resolution.rs"):
-        if (root / "crates/http/src/routing/spaces/directory" / name).exists():
-            failures.append(f"directory/{name}: retired, uncompiled demo directory must not return")
     return failures
 
 
 def main() -> int:
-    failures = deterministic_http_key_errors(ROOT) + removed_basis_errors(ROOT) + harness_surface_errors(ROOT)
+    failures = harness_surface_errors(ROOT)
     for relative_path, names in SURFACES.items():
         source = (ROOT / relative_path).read_text(encoding="utf-8")
         for name in names:

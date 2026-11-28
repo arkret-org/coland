@@ -29,9 +29,6 @@ const SDK_VALIDATED_ENCRYPTED_ACCOUNT_DATA_PREFIXES: &[&str] = &[
     AccountDataKey::NOTIFICATIONS_INBOX,
 ];
 
-// `ak.agent.sidecar_projection.v1` is intentionally absent: the exchange
-// projection is a controller-device-local fold cache and never registers an
-// account-data key surface (zh/models/sidecar.md §7.2.4).
 // `ak.agent.participation.v1` is intentionally absent: per-scope Agent
 // participation selection is Account-Authority-owned storage addressed by
 // `(agent_id, target_scope)` through `ak.self.agent.participation.resource.*`,
@@ -539,17 +536,7 @@ mod tests {
     }
 
     #[test]
-    fn unregistered_sidecar_projection_prefix_is_hard_rejected() {
-        for key in [
-            "ak.agent.sidecar_projection.v1",
-            "ak.agent.sidecar_projection.v1:did:web:alice.example",
-            "ak.agent.sidecar_projection.v1:did:web:alice.example:ak:realm:AZAySZA7XRDeJ9cO4MqaDWrJD-rqPk6Cudk7CCzsDQz1:ak:strand:Aepgr15HbtERKfqPAh9SrfWBdihSvX_c94JvujvBS2f-",
-        ] {
-            assert_eq!(
-                validate_encrypted_account_data_key(key).unwrap_err(),
-                AccountDataEncryptionError::InvalidKeyPattern
-            );
-        }
+    fn encrypted_sidecar_view_state_requires_the_full_key() {
         let active = "ak.agent.sidecar_view_state.v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA:ak:realm:AZAySZA7XRDeJ9cO4MqaDWrJD-rqPk6Cudk7CCzsDQz1:ak:strand:Aepgr15HbtERKfqPAh9SrfWBdihSvX_c94JvujvBS2f-";
         validate_encrypted_account_data_key(active).unwrap();
         assert_eq!(

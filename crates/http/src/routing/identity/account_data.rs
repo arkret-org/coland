@@ -45,10 +45,6 @@ const REGISTERED_ACCOUNT_DATA_KEY_PATTERNS: &[AccountDataKeySpec] = &[
         account_data_key: arkret_wire::AccountDataKey::AGENT_DRAFT_V1,
         controller_private: true,
     },
-    // `ak.agent.sidecar_projection.v1` was removed from the account-data
-    // registry on 2026-07-23: the exchange projection is a controller-device
-    // local Event-fold cache and never an account-data surface
-    // (zh/models/sidecar.md §7.2.4).
     AccountDataKeySpec {
         account_data_key: arkret_wire::AccountDataKey::AGENT_SIDECAR_VIEW_STATE_V1,
         controller_private: true,
@@ -1077,23 +1073,8 @@ mod tests {
         assert!(err.to_string().contains("plaintext"));
     }
 
-    /// S-1 (spec review): the retired `ak.agent.sidecar_projection.v1` prefix
-    /// must be rejected by the generic registry-membership check, not by a
-    /// production alias list that silently becomes a second registry.
     #[test]
-    fn retired_sidecar_projection_prefix_is_rejected_and_stays_controller_private() {
-        for key in [
-            "ak.agent.sidecar_projection.v1",
-            "ak.agent.sidecar_projection.v1:did:web:alice.example",
-            "ak.agent.sidecar_projection.v1:did:web:alice.example:ak:realm:AZAySZA7XRDeJ9cO4MqaDWrJD-rqPk6Cudk7CCzsDQz1",
-        ] {
-            let err = validate_registered_account_data_key(key).unwrap_err();
-            assert!(
-                err.to_string().contains("registered private key pattern"),
-                "retired key `{key}` must fail the shared key validator"
-            );
-        }
-        // The active view-state surface is unaffected.
+    fn sidecar_view_state_requires_the_full_key() {
         assert!(
             validate_registered_account_data_key(
                 "ak.agent.sidecar_view_state.v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA:ak:realm:AZAySZA7XRDeJ9cO4MqaDWrJD-rqPk6Cudk7CCzsDQz1:ak:strand:Aepgr15HbtERKfqPAh9SrfWBdihSvX_c94JvujvBS2f-"

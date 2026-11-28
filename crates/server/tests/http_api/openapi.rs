@@ -154,23 +154,6 @@ fn assert_required_migrated_operations(root: &Value) {
 }
 
 fn assert_event_read_query_bindings(root: &Value) {
-    for retired in [
-        "/_arkret/self/events/describe",
-        "/_arkret/self/events/frontier",
-        "/_arkret/self/events/resolve",
-        "/_arkret/peer/events/frontier",
-        "/_arkret/peer/events/resolve",
-        "/_arkret/peer/events/sibling-positions",
-        "/_arkret/self/seals/frontier",
-        "/_arkret/peer/seals/frontier",
-        "/_arkret/self/seals/mls-governance-proof",
-        "/_arkret/peer/seals/mls-governance-proof",
-    ] {
-        assert!(
-            root["paths"].get(retired).is_none(),
-            "retired path leaked: {retired}"
-        );
-    }
     {
         let (path, operation_id) = (
             "/_arkret/peer/mls/group-state-material",

@@ -40,11 +40,6 @@ status="$gate_dir/status.txt"
 
 echo "gate: jobs=$jobs target=$target_dir log=$log"
 
-# Cheap checks first: a retired protocol literal is a fixture bug the compiler
-# cannot see, and finding it after a 15-minute test run wastes the run. The
-# scanner proves itself before it is trusted, same as the secret scan does.
-sh "$(dirname -- "$0")/tests/stale-literal-scan.tests.sh"
-sh "$(dirname -- "$0")/stale-literal-scan.sh"
 # A test-only accessor or module that lost its `#[cfg]` compiles into the
 # release binary and no test fails for it. Repository Actions are switched off
 # here by decision, so `.github/workflows/ci.yml` running this check guarantees

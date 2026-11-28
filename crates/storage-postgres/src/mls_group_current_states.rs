@@ -213,26 +213,28 @@ async fn qualify_mls_group<'a>(
     prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<&'a coland_storage::MlsStateInstallation> {
     let event = &transaction.event;
-    if event.kind == EventKind::MlsCommit
-        && event
-            .as_mls_commit()
-            .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?
-            .recovery_binding()
-            .is_some()
-    {
-        // Ordinary capability admission cannot establish a recovery episode.
-        // Keep both ExternalInit and recovery Member cleanup closed until the
-        // dedicated unit verifies the native source, frozen inventory and cut.
-        return Err(failed_precondition(
-            "native content recovery inventory admission is unavailable",
-        ));
-    }
     let commit = &transaction.commit;
     let installation = transaction.mls_state.as_ref().ok_or_else(|| {
         PersistenceError::SchemaViolation(
             "an MLS Event commits only with its verified public transition".to_owned(),
         )
     })?;
+    if event.kind == EventKind::MlsCommit
+        && event
+            .as_mls_commit()
+            .map_err(|e| failed_precondition(e.to_string()))?
+            .recovery_binding()
+            .is_some()
+    {
+        crate::boxed_future(|| {
+            crate::security_transactions::local_rekey::accept(conn, transaction, installation)
+        })
+        .await?;
+        return Ok(installation);
+    }
+    if installation.recovery_source.is_some() {
+        return Err(failed_precondition("unexpected recovery source"));
+    }
     if !matches!(&event.scope_ref, ScopeRef::Realm { realm_id } | ScopeRef::Sidecar { realm_id, .. } if realm_id == &event.realm_id)
     {
         return Err(PersistenceError::Internal(
@@ -1619,6 +1621,7 @@ pub(crate) async fn require_mls_send_gate_in_connection(
         }
     };
 
+    crate::security_transactions::local_rekey::require_sendable(conn, &event.scope_ref).await?;
     let current = sql_query(
         "SELECT realm_id,current_commit_id,current_stream_position,value,public_state \
          FROM mls_group_current_states WHERE scope_key=$1 FOR SHARE",

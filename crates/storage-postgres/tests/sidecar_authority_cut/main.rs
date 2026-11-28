@@ -473,6 +473,7 @@ async fn pending_agent_handshake_reads(
                 request
             };
             let state = |base, epoch, public_state| MlsStateInstallation {
+                recovery_source: None,
                 effective_scope: scope.clone(),
                 base,
                 epoch,
@@ -2171,6 +2172,7 @@ async fn consumed_sidecar_agent_scenario(
             signature_key: l.signature_key,
         };
         request.authority_commit.mls_state = Some(coland_storage::MlsStateInstallation {
+            recovery_source: None,
             effective_scope: scope.clone(),
             base: Some(coland_storage::MlsInstalledBase {
                 current_mls_commit_event_ref: base.current_mls_commit_event_ref.clone(),
@@ -3923,6 +3925,7 @@ async fn case_encrypted_agent_join_rechecks_claimability_and_writes_nothing_on_r
     // The storage boundary consumes an already verified installation, just
     // as the founding-unit storage matrix does. No RFC verification is claimed.
     group.authority_commit.mls_state = Some(coland_storage::MlsStateInstallation {
+        recovery_source: None,
         effective_scope: group.authority_commit.event.scope_ref.clone(),
         base: None,
         epoch: 0,
@@ -5054,6 +5057,7 @@ async fn sidecar_post_tree_preserves_historical_endpoint_and_rejects_paused_self
             })
             .collect();
         request.authority_commit.mls_state = Some(coland_storage::MlsStateInstallation {
+            recovery_source: None,
             effective_scope: scope.clone(),
             base: Some(coland_storage::MlsInstalledBase {
                 current_mls_commit_event_ref: base,
@@ -11936,6 +11940,7 @@ async fn owned_consumer_queue_later_welcome(
         signature_key: l.signature_key,
     };
     request.authority_commit.mls_state = Some(coland_storage::MlsStateInstallation {
+        recovery_source: None,
         effective_scope: scope.clone(),
         base: Some(coland_storage::MlsInstalledBase {
             current_mls_commit_event_ref: base.current_mls_commit_event_ref.clone(),

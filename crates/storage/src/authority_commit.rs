@@ -945,6 +945,9 @@ impl OrdinaryRealmBootstrapCommitUnit {
 /// turns this attempt into a zero-write refusal.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MlsStateInstallation {
+    /// Present only for a recovery submitted by the original local Human Device.
+    pub recovery_source:
+        Option<arkret_models_collaboration::content_history::ContentRecoverySource>,
     pub effective_scope: arkret_wire::ScopeRef,
     /// `None` for Genesis; otherwise the exact current group the Commit was
     /// verified against.
@@ -3864,6 +3867,7 @@ mod mls_installation_tests {
         let scope = ScopeRef::Realm { realm_id };
         let event = commit_event(&scope, &payload);
         let installed = MlsStateInstallation {
+            recovery_source: None,
             effective_scope: scope.clone(),
             base: Some(MlsInstalledBase {
                 current_mls_commit_event_ref: base,

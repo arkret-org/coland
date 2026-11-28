@@ -144,6 +144,7 @@ async fn controller_group() -> Box<ControllerGroup> {
         }
     };
     genesis.authority_commit.mls_state = Some(coland_storage::MlsStateInstallation {
+        recovery_source: None,
         effective_scope: scope,
         base: None,
         epoch: 0,
@@ -702,6 +703,7 @@ pub(super) async fn assert_agent_generation_after_consume(
             signature_key: leaf.signature_key,
         };
     update.authority_commit.mls_state = Some(coland_storage::MlsStateInstallation {
+        recovery_source: None,
         effective_scope: scope.clone(),
         base: Some(coland_storage::MlsInstalledBase {
             current_mls_commit_event_ref: before.value.current_mls_commit_event_ref.clone(),

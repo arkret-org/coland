@@ -489,7 +489,10 @@ async fn prepare_local_account_device_source_inner(
     // Role comes from accepted native control-Realm material, including an
     // Agent PCR declared by its original provision. The controller's Human
     // PCR is different from that target and cannot classify it as ordinary.
-    if native_control_target_in_connection(conn, &event.realm_id).await? {
+    let native_target = native_control_target_in_connection(conn, &event.realm_id).await?;
+    let private_recovery = native_target
+        && crate::security_transactions::local_rekey::prepared_pcr_signer(conn, event).await?;
+    if native_target && !private_recovery {
         return Ok(None);
     }
     let cut = crate::pcr_device_status_reader::confirmed_pcr_device_status_cut_in_connection(
@@ -502,7 +505,7 @@ async fn prepare_local_account_device_source_inner(
     .map_err(PgTransactionError::into_persistence)?
     .ok_or_else(|| PersistenceError::Conflict("Human source PCR cut is unavailable".into()))?;
     // Native PCR authoring keeps its separately registered historical contract.
-    if cut.authority.realm_id == event.realm_id {
+    if (cut.authority.realm_id == event.realm_id) != private_recovery {
         return Ok(None);
     }
     let accepted =
@@ -907,6 +910,11 @@ pub(crate) async fn retain_prepared_account_device_in_connection(
     fact: &arkret_models_collaboration::authority_commit::AccountDeviceHistoricalSignerFact,
 ) -> PersistenceResult<()> {
     validate_account_device_fact_binding(event, commit, Some(fact))?;
+    if crate::security_transactions::local_rekey::private_pcr_fact(event, fact) {
+        // The private recovery ledger retains this original in the same unit.
+        // Do not publish an ordinary collaboration signer-query projection.
+        return Ok(());
+    }
     if matches!(
         commit.stream_ref,
         arkret_wire::CommitStreamRef::RealmControl { .. }

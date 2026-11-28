@@ -298,7 +298,12 @@ pub(crate) async fn put_key_backup_in_connection(
             .optional()
             .map_err(PersistenceError::database)?;
         return match stored {
-            Some(stored) if stored.payload == *payload => Ok(()),
+            Some(stored) if stored.payload == *payload => {
+                crate::boxed_future(|| {
+                    crate::security_transactions::local_rekey::finish_root(conn, &typed)
+                })
+                .await
+            }
             _ => Err(PersistenceError::SchemaViolation(
                 "live backup differs from its immutable admission record".into(),
             )),
@@ -380,6 +385,8 @@ pub(crate) async fn put_key_backup_in_connection(
         .bind::<Nullable<Text>,_>(typed.device_id.as_ref().map(arkret_wire::DeviceId::as_str))
         .bind::<Text,_>(&typed.backup_version).bind::<Jsonb,_>(payload)
         .execute(&mut *conn).await.map_err(map_key_backup_put_error)?;
+    crate::boxed_future(|| crate::security_transactions::local_rekey::finish_root(conn, &typed))
+        .await?;
     Ok(())
 }
 

@@ -1827,6 +1827,7 @@ fn agent_message_send_gate_scenario() -> std::pin::Pin<Box<impl std::future::Fut
             at,
         );
         genesis.authority_commit.mls_state = Some(coland_storage::MlsStateInstallation {
+            recovery_source: None,
             effective_scope: scope.clone(),
             base: None,
             epoch: 0,

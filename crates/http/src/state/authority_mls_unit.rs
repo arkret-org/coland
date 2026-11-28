@@ -199,7 +199,37 @@ async fn admit_mls_event_inner(
             )
         }
         EventKind::MlsCommit => {
-            match prepare_commit(state, event, group_state_material).await? {
+            let payload: MlsCommitPayload = payload(event)?;
+            let recovery_source = if let Some(recovery) = payload.recovery_binding() {
+                let AdmittedProducer::Local(guard) = &producer else {
+                    return Err(failed_precondition("recovery requires its native origin"));
+                };
+                let selector = guard.human_device_selector().ok_or_else(|| {
+                    failed_precondition("local recovery requires its Human Device")
+                })?;
+                let account = event
+                    .actor_id
+                    .as_account_id()
+                    .ok_or_else(|| schema("missing Account"))?;
+                if recovery.replacement.actor_id != event.actor_id
+                    || event.actual_signer() != &event.actor_id
+                    || account.station_id != state.service_core_id()
+                    || account.principal_id != selector.principal_id
+                    || selector.station_id != account.station_id
+                    || selector.authorization_ref.event_id != recovery.authorization_event_ref
+                    || !matches!(&recovery.replacement.endpoint, MlsWelcomeRecipientEndpoint::Device {device_id} if device_id.as_str()==selector.device_id)
+                    || !welcomes.is_empty()
+                    || !matches!(event.scope_ref, ScopeRef::Realm { .. })
+                {
+                    return Err(failed_precondition(
+                        "recovery differs from the authenticated local replacement",
+                    ));
+                }
+                Some(local_recovery_source(state, event, recovery).await?)
+            } else {
+                None
+            };
+            match prepare_commit(state, event, group_state_material, recovery_source).await? {
                 PreparedCommit::Ready(installation, added_leaves) => (installation, added_leaves),
                 PreparedCommit::KeyAccessRefused(added_leaves) => {
                     // A malformed or unsealed Welcome is a request refusal,
@@ -726,6 +756,7 @@ async fn verify_genesis(
         None => Vec::new(),
     };
     Ok(MlsStateInstallation {
+        recovery_source: None,
         effective_scope: event.scope_ref.clone(),
         base: None,
         epoch: 0,
@@ -839,7 +870,7 @@ async fn verify_commit(
     state: &AppState,
     event: &Event,
 ) -> ServiceResult<(MlsStateInstallation, Vec<MlsPublicEndpointLeaf>)> {
-    match prepare_commit(state, event, None).await? {
+    match prepare_commit(state, event, None, None).await? {
         PreparedCommit::Ready(installation, leaves) => Ok((installation, leaves)),
         PreparedCommit::KeyAccessRefused(_) => Err(binding_mismatch(
             "the Commit does not cover the current key-access revision",
@@ -847,10 +878,55 @@ async fn verify_commit(
     }
 }
 
+async fn local_recovery_source(
+    state: &AppState,
+    event: &Event,
+    recovery: &arkret_models_crypto::ContentRecoveryBinding,
+) -> ServiceResult<arkret_models_collaboration::content_history::ContentRecoverySource> {
+    let method = format!("{}#notary-key", state.service_did());
+    let now = chrono::Utc::now();
+    let mut source = arkret_models_collaboration::content_history::ContentRecoverySource {
+        attestation: arkret_models_crypto::ContentRecoverySourceAttestation {
+            event_ref: event.event_id.clone(),
+            replacement: recovery.replacement.clone(),
+            effective_scope: event.scope_ref.clone(),
+            base_group_state_ref: recovery.base_group_state_ref.clone(),
+            previous_epoch: recovery.expected_epoch,
+            inventory_digest: recovery.inventory_digest.clone(),
+            verification_method: arkret_wire::DidUrl::new(method.clone()).map_err(schema)?,
+            attested_at: now,
+            expires_at: now + chrono::Duration::minutes(5),
+            signature: KeyOperationSignature {
+                kid: arkret_wire::NonEmptyString::new(method.clone()).map_err(schema)?,
+                signature_algorithm: Some(
+                    arkret_wire::NonEmptyString::new("Ed25519").map_err(schema)?,
+                ),
+                signature: Base64UrlString::new("AA").map_err(schema)?,
+            },
+        },
+        origin_resolution:
+            crate::routing::system::service_resolution::current_authenticated_service_resolution(
+                state,
+            )
+            .await
+            .map_err(|e| failed_precondition(format!("missing Station signer history: {e}")))?,
+    };
+    source.attestation.signature = arkret_signatures::keypackages::sign_keypackage_signing_input(
+        &state.notary_signing_key().to_bytes(),
+        &method,
+        &source.signing_payload_bytes().map_err(schema)?,
+    )
+    .map_err(schema)?;
+    source.validate_submission_binding(event).map_err(schema)?;
+    arkret_identity::content_scope_cleanup::verify_mls_recovery_source(&source).map_err(schema)?;
+    Ok(source)
+}
+
 async fn prepare_commit(
     state: &AppState,
     event: &Event,
     material: Option<&MlsGroupStateMaterial>,
+    recovery_source: Option<arkret_models_collaboration::content_history::ContentRecoverySource>,
 ) -> ServiceResult<PreparedCommit> {
     let payload: MlsCommitPayload = payload(event)?;
     let binding = payload.governance_binding();
@@ -873,18 +949,41 @@ async fn prepare_commit(
             })?;
     let commit_bytes =
         arkret_canonical::base64url_decode(payload.commit_base64url()).map_err(schema)?;
-    let transition = tracker
-        .process_public_handshake(&commit_bytes)
-        .map_err(|error| {
-            if matches!(error, arkret_mls::MlsError::UnsupportedFeature(_)) {
-                ServiceError::protocol(
-                    arkret_wire::ErrorCode::UnsupportedFeature,
-                    format!("MLS Commit public transition is unsupported: {error}"),
-                )
-            } else {
-                schema(format!("MLS Commit public transition is invalid: {error}"))
-            }
-        })?;
+    let recovery = payload.recovery_binding();
+    if recovery.is_some() != recovery_source.is_some() {
+        return Err(failed_precondition(
+            "recovery requires its native inventory admission",
+        ));
+    }
+    let public_cut = arkret_mls::MlsGovernanceBindingPublicState::new(
+        event.scope_ref.clone(),
+        Some(group.current_mls_commit_event_ref.clone()),
+        group.epoch,
+        group.current_key_access_revision,
+    );
+    let external = if let Some(replacement) = recovery {
+        let leaves = tracker.leaves().map_err(schema)?;
+        let present = leaves.iter().any(|leaf| {
+            leaf.signature_key.as_str() == replacement.replacement.signature_key_base64url
+        });
+        (!present).then_some(replacement)
+    } else {
+        None
+    };
+    let transition = match external {
+        Some(r) => tracker.process_recovery_external_commit(&commit_bytes, r, &public_cut, binding),
+        None => tracker.process_public_handshake(&commit_bytes),
+    }
+    .map_err(|error| {
+        if matches!(error, arkret_mls::MlsError::UnsupportedFeature(_)) {
+            ServiceError::protocol(
+                arkret_wire::ErrorCode::UnsupportedFeature,
+                format!("MLS Commit public transition is unsupported: {error}"),
+            )
+        } else {
+            schema(format!("MLS Commit public transition is invalid: {error}"))
+        }
+    })?;
     let MlsPublicHandshakeTransition::Commit {
         sender_class,
         sender_leaf,
@@ -899,8 +998,14 @@ async fn prepare_commit(
             "ak.mls.commit carries an MLS Commit, not a Proposal",
         ));
     };
-    if sender_class != MlsProposalSenderClass::Member
-        || sender_leaf.is_none_or(|leaf| leaf.actor_id != event.actor_id)
+    if external.is_none()
+        && (sender_class != MlsProposalSenderClass::Member
+            || sender_leaf.is_none_or(|leaf| {
+                leaf.actor_id != event.actor_id
+                    || recovery.is_some_and(|r| {
+                        leaf.signature_key.as_str() != r.replacement.signature_key_base64url
+                    })
+            }))
     {
         return Err(ServiceError::protocol(
             arkret_wire::ErrorCode::CapabilityDenied,
@@ -920,7 +1025,9 @@ async fn prepare_commit(
         ),
         binding,
     );
-    if let Err(rejection) = binding_check {
+    if external.is_none()
+        && let Err(rejection) = binding_check
+    {
         #[cfg(feature = "conformance-harness")]
         tracing::warn!(
             extension_matches_payload = &extension == binding,
@@ -939,7 +1046,8 @@ async fn prepare_commit(
         );
         // Only the current membership revision may differ. The real public
         // base, member-sent handshake and complete payload remain exact.
-        if extension.key_access_revision() != group.current_key_access_revision
+        if recovery.is_none()
+            && extension.key_access_revision() != group.current_key_access_revision
             && &extension == binding
             && extension.effective_scope() == &event.scope_ref
             && extension.base_group_state_ref() == Some(&group.current_mls_commit_event_ref)
@@ -1000,6 +1108,7 @@ async fn prepare_commit(
     ];
     Ok(PreparedCommit::Ready(
         MlsStateInstallation {
+            recovery_source,
             effective_scope: event.scope_ref.clone(),
             base: Some(MlsInstalledBase {
                 current_mls_commit_event_ref: group.current_mls_commit_event_ref.clone(),
@@ -1013,7 +1122,11 @@ async fn prepare_commit(
             consumed_proposals,
             public_blobs,
         },
-        added_leaves,
+        if external.is_some() {
+            Vec::new()
+        } else {
+            added_leaves
+        },
     ))
 }
 
@@ -1733,7 +1846,7 @@ mod tests {
         .unwrap();
         let payload = add_member(&state, &mut group, &genesis, &stale_revision).await;
         let event = commit_event(actor(CREATOR), &payload);
-        let prepared = prepare_commit(&state, &event, None).await.unwrap();
+        let prepared = prepare_commit(&state, &event, None, None).await.unwrap();
         let PreparedCommit::KeyAccessRefused(leaves) = prepared else {
             panic!("a revision mismatch must not produce an installable state");
         };
@@ -1753,7 +1866,7 @@ mod tests {
             .get_mut("governance_binding")
             .unwrap()["key_access_revision"] = serde_json::json!(4);
         assert!(
-            prepare_commit(&state, &inconsistent_payload, None)
+            prepare_commit(&state, &inconsistent_payload, None, None)
                 .await
                 .is_err()
         );

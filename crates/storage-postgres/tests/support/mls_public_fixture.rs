@@ -413,6 +413,7 @@ impl MlsFixture {
         request.realm_fanout_source =
             Some(arkret_wire::EventAdmissionSubmission::new(event.clone()));
         request.authority_commit.mls_state = Some(MlsStateInstallation {
+            recovery_source: None,
             effective_scope: event.scope_ref.clone(),
             base: base.map(|(reference, epoch)| MlsInstalledBase {
                 current_mls_commit_event_ref: reference.clone(),

@@ -17,6 +17,7 @@ use super::{
 
 mod content_recovery_preparation;
 mod content_recovery_source;
+pub(crate) mod local_rekey;
 mod recovery_census_cut;
 mod recovery_inventory;
 mod recovery_unit;

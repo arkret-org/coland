@@ -1057,6 +1057,7 @@ async fn mls_lifecycle_body() {
             "created_at": arkret_canonical::format_timestamp_canonical(chrono::Utc::now()),
         }),
         Some(MlsStateInstallation {
+            recovery_source: None,
             effective_scope: scope.clone(),
             base: None,
             epoch: 0,
@@ -1178,6 +1179,7 @@ async fn mls_lifecycle_body() {
             signature_key: leaf.signature_key,
         };
     commit_request.authority_commit.mls_state = Some(MlsStateInstallation {
+        recovery_source: None,
         effective_scope: scope.clone(),
         base: Some(MlsInstalledBase {
             current_mls_commit_event_ref: genesis_ref.clone(),

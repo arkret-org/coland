@@ -293,6 +293,7 @@ DROP TABLE IF EXISTS push_devices CASCADE;
 DROP TABLE IF EXISTS push_registration_handoff_intents CASCADE;
 DROP TABLE IF EXISTS push_hard_logout_journal CASCADE;
 DROP TABLE IF EXISTS content_recovery_census_sources;
+DROP TABLE IF EXISTS content_recovery_group_commits;
 DROP TABLE IF EXISTS content_recovery_episodes;
 DROP TABLE IF EXISTS recovery_policies CASCADE;
 DROP TABLE IF EXISTS security_transaction_step_attempts CASCADE;

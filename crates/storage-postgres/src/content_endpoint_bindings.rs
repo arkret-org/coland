@@ -113,7 +113,22 @@ pub(crate) async fn install_in_connection(
             .as_ref()
             .is_none_or(|previous| previous.leaf_signature_key != leaf.signature_key.as_str())
         {
-            crate::content_recovery_fence::require_unfenced(conn, &leaf.actor_id).await?;
+            let accepted_replacement = if let Some(r) = recovery.as_ref().filter(|r| {
+                r.replacement.actor_id == leaf.actor_id
+                    && r.replacement.signature_key_base64url == leaf.signature_key.as_str()
+            }) {
+                crate::security_transactions::local_rekey::is_accepted_replacement(
+                    conn,
+                    &event.event_id,
+                    &r.replacement,
+                )
+                .await?
+            } else {
+                false
+            };
+            if !accepted_replacement {
+                crate::content_recovery_fence::require_unfenced(conn, &leaf.actor_id).await?;
+            }
         }
         let (mut binding, origin_event, origin_key) = if let Some(creator) = &creator {
             if &leaf.actor_id != event.actual_signer()
@@ -133,7 +148,8 @@ pub(crate) async fn install_in_connection(
                 event.event_id.to_string(),
                 leaf.signature_key.as_str().to_owned(),
             )
-        } else if let Some(recovery) = &recovery
+        } else if previous.is_none()
+            && let Some(recovery) = &recovery
             && recovery.replacement.actor_id == leaf.actor_id
             && recovery.replacement.signature_key_base64url == leaf.signature_key.as_str()
         {

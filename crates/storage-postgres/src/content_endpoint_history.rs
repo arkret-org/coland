@@ -108,7 +108,14 @@ async fn retain(
         // episode cut. It must not create a previously undiscoverable source.
         return Ok(());
     }
-    if crate::content_recovery_fence::locked_active(conn, &endpoint.actor_id).await? {
+    if crate::content_recovery_fence::locked_active(conn, &endpoint.actor_id).await?
+        && !crate::security_transactions::local_rekey::is_accepted_replacement(
+            conn,
+            source_event,
+            endpoint,
+        )
+        .await?
+    {
         let Some((kind, origin)) = frozen_origin else {
             return Err(invalid("recovery fence blocks new endpoint admission"));
         };

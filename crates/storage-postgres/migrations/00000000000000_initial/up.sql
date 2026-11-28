@@ -3211,6 +3211,19 @@ CREATE TABLE content_recovery_inventory_blobs (
     canonical_bytes BYTEA NOT NULL CHECK(octet_length(canonical_bytes)>0),
     UNIQUE(authorization_event_ref,blob_ref)
 );
+-- Each winning step retains the owning Station's original recovery source.
+CREATE TABLE content_recovery_group_commits (
+    authorization_event_ref TEXT NOT NULL REFERENCES content_recovery_episodes(authorization_event_ref),
+    scope_key TEXT NOT NULL,
+    step TEXT NOT NULL CHECK(step IN ('external','remove')),
+    event_ref TEXT NOT NULL UNIQUE,
+    commit_id TEXT NOT NULL UNIQUE REFERENCES realm_commits(commit_id),
+    recovery_source BYTEA NOT NULL,
+    producer_signer_fact BYTEA NOT NULL,
+    scope_cleanup JSONB CHECK(scope_cleanup IS NULL OR
+        (step='remove' AND scope_cleanup->>'state'='rekeyed')),
+    PRIMARY KEY (authorization_event_ref, scope_key, step)
+);
 ALTER TABLE content_recovery_episodes ADD CONSTRAINT recovery_inventory_same_episode
     FOREIGN KEY(authorization_event_ref,inventory_blob_ref)
     REFERENCES content_recovery_inventory_blobs(authorization_event_ref,blob_ref);
@@ -3260,6 +3273,9 @@ CREATE TABLE content_recovery_census_sources (
  CHECK((source_kind='predecessor' AND effective_scope IS NULL)
     OR (source_kind<>'predecessor' AND effective_scope IS NOT NULL AND jsonb_typeof(effective_scope)='object'))
 );
+CREATE INDEX content_recovery_census_scope_obligations
+ ON content_recovery_census_sources(effective_scope,authorization_event_ref)
+ WHERE effective_scope IS NOT NULL;
 
 CREATE UNIQUE INDEX security_transactions_revoke_proposal_event_unique
  ON public.security_transactions ((revoke_proposal->>'proposal_event_id'))

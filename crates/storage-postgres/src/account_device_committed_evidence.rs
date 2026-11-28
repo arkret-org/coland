@@ -235,6 +235,9 @@ pub(crate) async fn retain_from_guard(
     fact: &AccountDeviceHistoricalSignerFact,
     guard: Option<&coland_storage::SelfProducerCommitGuard>,
 ) -> PersistenceResult<()> {
+    if crate::security_transactions::local_rekey::private_pcr_fact(event, fact) {
+        return Ok(());
+    }
     if let Some(coland_storage::SelfProducerCommitGuard::HumanDeviceEvidence {
         selector,
         evidence,

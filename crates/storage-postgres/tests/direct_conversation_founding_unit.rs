@@ -3211,6 +3211,7 @@ fn with_group(
     principals: &[&ActorId],
 ) -> coland_storage::EventCommitRequest {
     request.authority_commit.mls_state = Some(coland_storage::MlsStateInstallation {
+        recovery_source: None,
         effective_scope: request.authority_commit.event.scope_ref.clone(),
         base: base.map(|(reference, epoch)| coland_storage::MlsInstalledBase {
             current_mls_commit_event_ref: reference.clone(),

@@ -412,6 +412,7 @@ async fn native_history_root_requires_a_real_closed_epoch_and_full_authorized_in
             arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now()),
         );
         closure.authority_commit.mls_state = Some(MlsStateInstallation {
+            recovery_source: None,
             effective_scope: context.effective_scope.clone(),
             base: Some(MlsInstalledBase {
                 current_mls_commit_event_ref: base,

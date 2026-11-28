@@ -129,6 +129,7 @@ async fn prepared_group_from_discussion(
         at,
     );
     request.authority_commit.mls_state = Some(MlsStateInstallation {
+        recovery_source: None,
         effective_scope: scope,
         base: None,
         epoch: 0,
@@ -436,6 +437,7 @@ async fn independent_mls_leaf_key_binds_to_native_device_and_survives_member_upd
         prepared.request.authority_commit.commit.committed_at,
     );
     update.authority_commit.mls_state = Some(MlsStateInstallation {
+        recovery_source: None,
         effective_scope: prepared.request.authority_commit.event.scope_ref.clone(),
         base: Some(MlsInstalledBase {
             current_mls_commit_event_ref: base,
@@ -761,6 +763,7 @@ async fn prepared_own_pcr_group(
         },
     ));
     request.authority_commit.mls_state = Some(MlsStateInstallation {
+        recovery_source: None,
         effective_scope: scope,
         base: None,
         epoch: 0,

@@ -35,6 +35,11 @@ and the project tracks Arkret v1 spec revisions.
 
 ## [Unreleased]
 
+Space placement now follows the Realm MLS state. Boards and Lists accept
+otherwise valid placements before MLS activation. Space snapshots carry
+only metadata and parent state. The Circle rollout below records the
+earlier, retired design.
+
 ### AKP-0007 — Circle primitive rollout (P2A; arkret-spec floor `2b0d70d`)
 
 Aggressive mode; no compatibility shim. Tracks the SDK's P1 baseline

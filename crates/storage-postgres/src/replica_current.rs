@@ -11,7 +11,7 @@
 //!
 //! The member Station keeps the families its recipient re-verification and
 //! local reads consume: the Realm singletons (history access, plaintext
-//! services, profile), the policy bundle, `member_state`, `strand`, the three
+//! services, profile), the policy bundle, `member_state`, `strand`, the two
 //! Space families, the default Strand pointer, `message_revision`,
 //! `object_redaction` and `message_reactions`. The
 //! authority root, capability grants, Invite registers and MLS group state
@@ -2945,7 +2945,7 @@ mod tests {
             revision: revision.clone(),
             value,
         };
-        // Deliberately put the sibling families before Space metadata. The
+        // Deliberately install the parent register before Space metadata. The
         // deferred FK must be satisfied by the complete snapshot transaction.
         let entries = vec![
             entry(

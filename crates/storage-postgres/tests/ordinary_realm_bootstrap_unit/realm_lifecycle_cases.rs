@@ -250,47 +250,43 @@ async fn terminal_child_consumer_case() {
     );
     let placement = lifecycle_future(|| source_if_human(&pool, placement)).await;
     let before_placement = terminal_persistent_rows(&pool).await;
-    for table in [
-        "space_parent_current_states",
-    ] {
-        let original = before_placement[table]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|row| row["space_id"] == spaces[1].as_str())
-            .unwrap()["current_commit_id"]
-            .as_str()
-            .unwrap();
-        let mut conn = pool.get().await.unwrap();
-        let query = format!("UPDATE {table} SET current_commit_id=$1 WHERE space_id=$2");
-        diesel::sql_query(&query)
-            .bind::<Text, _>(unit.transactions[0].commit.commit_id.as_str())
-            .bind::<Text, _>(spaces[1].as_str())
-            .execute(&mut conn)
-            .await
-            .unwrap();
-        drop(conn);
-        let corrupted = terminal_persistent_rows(&pool).await;
-        let error = lifecycle_future(|| uow.commit_event(placement.clone()))
-            .await
-            .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("placement List is absent or incomplete"),
-            "{error}"
-        );
-        assert_eq!(terminal_persistent_rows(&pool).await, corrupted);
-        let mut conn = pool.get().await.unwrap();
-        diesel::sql_query(&query)
-            .bind::<Text, _>(original)
-            .bind::<Text, _>(spaces[1].as_str())
-            .execute(&mut conn)
-            .await
-            .unwrap();
-        drop(conn);
-        assert_eq!(terminal_persistent_rows(&pool).await, before_placement);
-    }
+    let original = before_placement["space_parent_current_states"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["space_id"] == spaces[1].as_str())
+        .unwrap()["current_commit_id"]
+        .as_str()
+        .unwrap();
+    let mut conn = pool.get().await.unwrap();
+    let query = "UPDATE space_parent_current_states SET current_commit_id=$1 WHERE space_id=$2";
+    diesel::sql_query(query)
+        .bind::<Text, _>(unit.transactions[0].commit.commit_id.as_str())
+        .bind::<Text, _>(spaces[1].as_str())
+        .execute(&mut conn)
+        .await
+        .unwrap();
+    drop(conn);
+    let corrupted = terminal_persistent_rows(&pool).await;
+    let error = lifecycle_future(|| uow.commit_event(placement.clone()))
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("placement List is absent or incomplete"),
+        "{error}"
+    );
+    assert_eq!(terminal_persistent_rows(&pool).await, corrupted);
+    let mut conn = pool.get().await.unwrap();
+    diesel::sql_query(query)
+        .bind::<Text, _>(original)
+        .bind::<Text, _>(spaces[1].as_str())
+        .execute(&mut conn)
+        .await
+        .unwrap();
+    drop(conn);
+    assert_eq!(terminal_persistent_rows(&pool).await, before_placement);
     lifecycle_future(|| uow.commit_event(placement.clone()))
         .await
         .unwrap();
@@ -427,6 +423,7 @@ async fn terminal_child_consumer_case() {
     )));
     let families = message_families(&pool, &realm).await;
     let terminal_counts = lifecycle_write_counts(&pool, &realm).await;
+    let fresh_at = terminal.authority_commit.commit.committed_at + chrono::TimeDelta::seconds(1);
     for (kind, payload) in [
         (
             arkret_wire::EventKind::RealmProfile,
@@ -463,7 +460,7 @@ async fn terminal_child_consumer_case() {
         ),
         (
             arkret_wire::EventKind::SpaceUpdate,
-            serde_json::json!({"space_id":spaces[0],"patch":{"title":"terminal update"}}),
+            serde_json::json!({"space_id":spaces[0],"patch":{"title":{"$op":"set","value":"terminal update"}}}),
         ),
         (
             arkret_wire::EventKind::SpaceArchive,
@@ -483,13 +480,21 @@ async fn terminal_child_consumer_case() {
         ),
         (arkret_wire::EventKind::StrandCreate, serde_json::to_value(&strand_create_request(&unit).authority_commit.event.payload).unwrap()),
     ] {
-        let request = realm_event_request_as(&terminal, &actor, kind, payload);
+        let fresh = event(
+            kind,
+            arkret_wire::ScopeRef::Realm { realm_id: realm.clone() },
+            &actor.principal_id,
+            &actor.station_id,
+            payload,
+            fresh_at,
+        );
+        let request = ordinary_realm::request_for_event(&terminal.authority_commit, fresh, fresh_at);
         let request = lifecycle_future(|| source_if_human(&pool, request)).await;
         arkret_schema::validate_event_for_submit(&request.authority_commit.event).unwrap();
         let error = lifecycle_future(|| uow.commit_event(request.clone()))
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("failed_precondition"), "{error}");
+        assert!(error.to_string().contains("failed_precondition"), "{:?}: {error}", request.authority_commit.event.kind);
         assert!(
             error.to_string().contains("the Realm is terminal"),
             "{error}"

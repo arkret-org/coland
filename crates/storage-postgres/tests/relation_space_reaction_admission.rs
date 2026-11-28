@@ -782,7 +782,7 @@ async fn reactions_keep_only_active_sources_and_empty_rows_at_the_accepting_revi
 }
 
 #[tokio::test]
-async fn space_update_preserves_scope_and_rolls_back_both_branches_on_rejection() {
+async fn space_update_preserves_scope_and_leaves_the_accepted_cut_intact_on_rejection() {
     let database = TestDatabase::lease().await;
     let pool = database.pool();
     Box::pin(ordinary_realm::human_profile::admit(
@@ -868,7 +868,7 @@ async fn space_update_preserves_scope_and_rolls_back_both_branches_on_rejection(
         ),
         (
             founder(),
-            json!({"space_id":id,"child_scope_policy":{"kind":"allow_any"},"patch":{"realm_id":{"$op":"set","value":realm}}}),
+            json!({"space_id":id,"patch":{"realm_id":{"$op":"set","value":realm}}}),
             "schema violation",
         ),
     ] {

@@ -326,20 +326,14 @@ impl ProjectionState {
             return self.queue_pending_replay(strand_id, operation, "strand_unknown");
         };
         if let Some((board_space_id, ..)) = position.as_ref()
-            && let Err(reason) = self.check_space_placement_target(
-                board_space_id,
-                &strand.realm_id,
-            )
+            && let Err(reason) = self.validate_placement_target(board_space_id, &strand.realm_id)
         {
             return ProjectionEffect::Rejected {
                 reason: reason.to_owned(),
             };
         }
         if let Some((_, list_space_id, _)) = position.as_ref()
-            && let Err(reason) = self.check_space_placement_target(
-                list_space_id,
-                &strand.realm_id,
-            )
+            && let Err(reason) = self.validate_placement_target(list_space_id, &strand.realm_id)
         {
             return ProjectionEffect::Rejected {
                 reason: reason.to_owned(),

@@ -4543,10 +4543,8 @@ CREATE INDEX strand_position_current_states_realm
 CREATE INDEX strand_position_current_states_list
  ON strand_position_current_states(realm_id,board_space_id,(value->>'list_space_id'));
 
--- Event-derived Space metadata and its two sibling registered current
--- families. The parent and policy must exist from genesis, including explicit
--- JSON null values for an undeclared parent/policy. They advance with the
--- covering RealmCommit in one authority transaction.
+-- Space metadata and its parent register are created in one authority transaction.
+-- A root Space has an explicit null parent.
 CREATE TABLE space_current_states (
  realm_id TEXT NOT NULL,
  space_id TEXT NOT NULL PRIMARY KEY,

@@ -347,6 +347,26 @@ fn space_wip_policy_is_projected_and_removed_scope_fields_fail_closed() {
         5
     );
 
+    for path in ["child_scope_policy", "child_scope_policy.kind"] {
+        let update = make_operation(
+            arkret_wire::EventKind::SpaceUpdate,
+            realm_id,
+            serde_json::json!({
+                "space_id": space_id,
+                "patch": {
+                    (path): {"$op": "set", "value": true},
+                    "rank": {"$op": "set", "value": "new"}
+                }
+            }),
+        );
+        assert!(matches!(
+            state.apply(&update, &hlc),
+            ProjectionEffect::Rejected { ref reason }
+                if reason == arkret_wire::ErrorCode::SCHEMA_VIOLATION
+        ));
+        assert_eq!(state.space_containers[space_id].rank, None);
+    }
+
     for object in [
         serde_json::json!({
             "id": "ak:space:ASujtfVbzOJUKUPQGM2haq2Xp3OW3TLYL_OsrGxS14ho",
@@ -742,6 +762,130 @@ fn board_archive_and_restore_preserve_child_lists_and_cards() {
         .find(|relation| relation.to_object_ref() == Some(strand_id))
         .expect("strand position relation");
     assert_eq!(relation.rank.as_deref(), Some("r007"));
+}
+
+#[test]
+fn strand_placement_before_realm_mls_activation() {
+    let mut state = ProjectionState::new();
+    let hlc = ServerHlc::new("test");
+    let realm_id = "ak:realm:AZpEa1TBWdyQensfzl-MJg8_sdcSNKSeAKHbyCN5ZXjb";
+    let list_id = "ak:space:AYqEzQ3jW02EHkMjxFQTlyeowxPQXJE4fI6JGOnzi23t";
+    let public_strand_id = "ak:strand:AUAf2-oZl31wupPqnQLO-zloaqgMoX5xk2tpVSbi8zjD";
+
+    seed_realm_member(&mut state, realm_id, "ak:did_core:web:alice.example");
+    let board_id = "ak:space:AdF-OpLT-7la09L28Pgl41aEHXK3MEZNnwMNhc02Uz19";
+    for (id, kind, parent) in [(board_id, "board", None), (list_id, "list", Some(board_id))] {
+        let mut object =
+            serde_json::json!({"id": id, "realm_id": realm_id, "kind": kind, "title": kind});
+        if let Some(parent) = parent {
+            object["parent_space_id"] = serde_json::json!(parent);
+        }
+        let effect = state.apply(
+            &make_operation(
+                arkret_wire::EventKind::SpaceCreate,
+                realm_id,
+                serde_json::json!({"object": object}),
+            ),
+            &hlc,
+        );
+        assert!(state.space_containers.contains_key(id), "{effect:?}");
+    }
+
+    let public_create = make_operation(
+        arkret_wire::EventKind::StrandCreate,
+        realm_id,
+        serde_json::json!({
+            "event_id": public_strand_id.replacen("ak:strand:", "ak:event:", 1),
+            "object": {
+                "schema": "ak.schema.strand.v1",
+                "realm_id": realm_id,
+                "metadata": {
+                    "title": "Public task"
+                },
+                "stage": "draft",
+                "tracks": {
+                    "discussion": {
+                        "is_primary": true,
+                        "profile": "discussion"
+                    }
+                },
+                "created_by": account_actor("ak:did_core:web:alice.example"),
+                "created_at": "2026-06-19T00:00:00.000Z"
+            }
+        }),
+    );
+    let public_effect = state.apply(&public_create, &hlc);
+    assert!(
+        matches!(public_effect, ProjectionEffect::StrandLifecycle { .. }),
+        "public Strand creation failed before placement: {public_effect:?}"
+    );
+    let public_move = make_operation(
+        arkret_wire::EventKind::StrandMove,
+        realm_id,
+        serde_json::json!({
+            "strand_id": public_strand_id,
+            "board_space_id": board_id,
+            "target_space_id": list_id,
+            "rank": "r001"
+        }),
+    );
+    assert!(matches!(
+        state.apply(&public_move, &hlc),
+        ProjectionEffect::StrandLifecycle { .. }
+    ));
+}
+
+#[test]
+fn space_reparent_before_realm_mls_activation() {
+    let mut state = ProjectionState::new();
+    let hlc = ServerHlc::new("test");
+    let realm_id = "ak:realm:AZpEa1TBWdyQensfzl-MJg8_sdcSNKSeAKHbyCN5ZXjb";
+    let parent_id = "ak:space:AZaaHAEvC1DejakImwHCcJHb0F1pgE-Jd-3_9BGirbuW";
+    let child_id = "ak:space:AUZVSPb9v-NuEN6dQgTA44vXJnQ1d-pxAvvfplV4zgOc";
+
+    seed_realm_member(&mut state, realm_id, "ak:did_core:web:alice.example");
+    state.apply(
+        &make_operation(
+            arkret_wire::EventKind::SpaceCreate,
+            realm_id,
+            serde_json::json!({
+                "object": {
+                    "id": parent_id,
+                    "realm_id": realm_id,
+                    "kind": "folder",
+                    "title": "Parent",
+                    "created_by": "ak:did_core:web:alice.example"
+                }
+            }),
+        ),
+        &hlc,
+    );
+    {
+        let object = serde_json::json!({"id":child_id,"realm_id":realm_id,"kind":"folder","title":"Child","created_by":"ak:did_core:web:alice.example"});
+        state.apply(
+            &make_operation(
+                arkret_wire::EventKind::SpaceCreate,
+                realm_id,
+                serde_json::json!({ "object": object }),
+            ),
+            &hlc,
+        );
+    }
+
+    let public_parent = make_operation(
+        arkret_wire::EventKind::SpaceParent,
+        realm_id,
+        serde_json::json!({
+            "space_id": child_id,
+            "parent_space_id": parent_id,
+            "expected_parent_space_id": null
+        }),
+    );
+    assert!(!matches!(
+        state.apply(&public_parent, &hlc),
+        ProjectionEffect::Rejected { .. }
+    ));
+    assert_eq!(state.space_containers[child_id].parent_ref.as_deref(), Some(parent_id));
 }
 
 #[test]

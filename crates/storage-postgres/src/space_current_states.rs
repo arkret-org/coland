@@ -431,30 +431,6 @@ pub(crate) async fn commit_space_update_in_connection(
         }
     }
     let patch = &payload.patch;
-    for (path, _) in patch.iter() {
-        let root = path.split('.').next().unwrap_or(path);
-        if !matches!(
-            root,
-            "kind"
-                | "rank"
-                | "schema_refs"
-                | "title"
-                | "summary"
-                | "labels"
-                | "fields"
-                | "avatar_blob_ref"
-                | "encrypted_metadata"
-        ) || arkret_wire::patch::reducer_managed_patch_reason("space", path).is_some()
-            || arkret_wire::forbidden_wire::forbidden_wire_path_hard_reject(
-                "space_patch_payload",
-                path,
-            )
-        {
-            return Err(PersistenceError::SchemaViolation(format!(
-                "Space update patch path is forbidden: {path}"
-            )));
-        }
-    }
     let mut post = patch
         .apply_for_typed_target(&row.value, payload.space_id.as_str())
         .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;

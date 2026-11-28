@@ -164,6 +164,21 @@ async fn snapshot_only_parent_cases() {
         &origin_state.service_did(),
     );
     let source_unit = Box::pin(ordinary_realm::source_bootstrap(&source_pool, source_unit)).await;
+    // The origin attests forwarded device evidence for its hosted Account.
+    use coland_storage::{AccountPk, AccountRecord, AccountStore};
+    coland_storage_postgres::PgAccountStore { pool: source_pool.clone() }
+        .put(&AccountRecord {
+            pk: AccountPk(0),
+            principal_id: caller.principal_id.clone(),
+            station_id: caller.station_id.clone(),
+            localpart: String::new(),
+            display_name: None,
+            biography: None,
+            avatar_blob_ref: None,
+            created_at: source_unit.transactions[0].commit.committed_at,
+        })
+        .await
+        .unwrap();
     let source = PgAuthorityCommitStore {
         pool: source_pool.clone(),
     };

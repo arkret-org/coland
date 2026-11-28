@@ -73,14 +73,14 @@ impl ProjectionState {
                 reason: "space_create_missing_event_id".to_owned(),
             };
         };
-        if object.contains_key("default_scope_circle_id") || object.contains_key("default_realm_id")
+        if object.contains_key("default_scope_circle_id")
+            || object.contains_key("default_realm_id")
+            || object.contains_key("scope_circle_id")
+            || object.contains_key("child_scope_policy")
         {
             return ProjectionEffect::Rejected {
                 reason: arkret_wire::ErrorCode::SCHEMA_VIOLATION.to_owned(),
             };
-        }
-        if object.contains_key("scope_circle_id") || object.contains_key("child_scope_policy") {
-            return ProjectionEffect::Rejected { reason: arkret_wire::ErrorCode::SCHEMA_VIOLATION.to_owned() };
         }
         let kind = object
             .get("kind")
@@ -125,16 +125,6 @@ impl ProjectionState {
                 reason: reason.to_owned(),
             };
         }
-        if let Some(parent) = parent_ref.as_deref()
-            && let Err(reason) = self.check_space_placement_target(
-                parent,
-                &realm_id,
-            )
-        {
-            return ProjectionEffect::Rejected {
-                reason: reason.to_owned(),
-            };
-        }
         let created_by = object
             .get("created_by")
             .and_then(|v| v.as_str())
@@ -147,7 +137,6 @@ impl ProjectionState {
             kind,
             title,
             fields,
-
             parent_ref,
             rank,
             state: SpaceContainerLifecycleState::Active,
@@ -194,41 +183,48 @@ impl ProjectionState {
                 reason: "space_not_active".to_owned(),
             };
         }
-        if operation.payload.get("child_scope_policy").is_some() || !operation.payload.get("patch").is_some_and(Value::is_object) {
-            return ProjectionEffect::Rejected { reason: arkret_wire::ErrorCode::SCHEMA_VIOLATION.to_owned() };
+        if operation.payload.get("child_scope_policy").is_some() {
+            return ProjectionEffect::Rejected {
+                reason: arkret_wire::ErrorCode::SCHEMA_VIOLATION.to_owned(),
+            };
         }
-        let patch = operation.payload.get("patch").and_then(|v| v.as_object());
-        if let Some(patch) = patch {
-            if patch.contains_key("default_scope_circle_id")
-                || patch.contains_key("default_realm_id")
-            {
-                return ProjectionEffect::Rejected {
-                    reason: arkret_wire::ErrorCode::SCHEMA_VIOLATION.to_owned(),
-                };
-            }
-            let candidate_kind = patch
-                .get("kind")
-                .and_then(Value::as_str)
-                .unwrap_or(&space_container.kind);
-            let candidate_fields = patch
-                .get("fields")
-                .and_then(Value::as_object)
-                .map(|fields| fields.clone().into_iter().collect())
-                .unwrap_or_else(|| space_container.fields.clone());
-            if let Err(reason) = validate_space_wip_policy(candidate_kind, &candidate_fields) {
-                return ProjectionEffect::Rejected {
-                    reason: reason.to_owned(),
-                };
-            }
-            if let Some(title) = patch.get("title").and_then(|v| v.as_str()) {
-                space_container.title = title.to_owned();
-            }
-            if let Some(rank) = patch_string_value(patch, "rank") {
-                space_container.rank = rank;
-            }
-            space_container.kind = candidate_kind.to_owned();
-            space_container.fields = candidate_fields;
+        let Some(patch) = operation.payload.get("patch").and_then(Value::as_object) else {
+            return ProjectionEffect::Rejected {
+                reason: arkret_wire::ErrorCode::SCHEMA_VIOLATION.to_owned(),
+            };
+        };
+        if patch.keys().any(|path| {
+            matches!(
+                path.split('.').next(),
+                Some("default_scope_circle_id" | "default_realm_id" | "child_scope_policy")
+            )
+        }) {
+            return ProjectionEffect::Rejected {
+                reason: arkret_wire::ErrorCode::SCHEMA_VIOLATION.to_owned(),
+            };
         }
+        let candidate_kind = patch
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or(&space_container.kind);
+        let candidate_fields = patch
+            .get("fields")
+            .and_then(Value::as_object)
+            .map(|fields| fields.clone().into_iter().collect())
+            .unwrap_or_else(|| space_container.fields.clone());
+        if let Err(reason) = validate_space_wip_policy(candidate_kind, &candidate_fields) {
+            return ProjectionEffect::Rejected {
+                reason: reason.to_owned(),
+            };
+        }
+        if let Some(title) = patch.get("title").and_then(|v| v.as_str()) {
+            space_container.title = title.to_owned();
+        }
+        if let Some(rank) = patch_string_value(patch, "rank") {
+            space_container.rank = rank;
+        }
+        space_container.kind = candidate_kind.to_owned();
+        space_container.fields = candidate_fields;
         space_container.updated_by = Some(operation.context.sender.to_string());
         space_container.updated_at = Some(now);
         ProjectionEffect::SpaceContainerLifecycle {
@@ -265,30 +261,6 @@ impl ProjectionState {
             return ProjectionEffect::Rejected {
                 reason: reason.to_owned(),
             };
-        }
-        if let Some(parent_space_id) = parent_ref.as_deref() {
-            let Some(space_container) = self.space_containers.get(&container_space_id) else {
-                return self.queue_pending_replay(
-                    container_space_id.to_owned(),
-                    operation,
-                    "space_container_unknown",
-                );
-            };
-            if !self.space_containers.contains_key(parent_space_id) {
-                return self.queue_pending_replay(
-                    parent_space_id.to_owned(),
-                    operation,
-                    "space_parent_unknown",
-                );
-            }
-            if let Err(reason) = self.check_space_placement_target(
-                parent_space_id,
-                &space_container.realm_id,
-            ) {
-                return ProjectionEffect::Rejected {
-                    reason: reason.to_owned(),
-                };
-            }
         }
         let Some(space_container) = self.space_containers.get_mut(&container_space_id) else {
             return self.queue_pending_replay(
@@ -406,7 +378,7 @@ impl ProjectionState {
         strand_position_from_create_payload(object).map(|_| ())
     }
 
-    pub(crate) fn check_space_placement_target(
+    pub(crate) fn validate_placement_target(
         &self,
         parent_space_id: &str,
         child_realm_id: &str,

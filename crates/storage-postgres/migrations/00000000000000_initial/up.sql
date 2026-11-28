@@ -4557,8 +4557,7 @@ CREATE TABLE space_current_states (
  CHECK(jsonb_typeof(value)='object'),
  CHECK(value->>'id'=space_id),
  CHECK(value->>'realm_id'=realm_id),
- CHECK(NOT value ? 'parent_space_id'),
- CHECK(NOT value ? 'child_scope_policy')
+ CHECK(NOT value ? 'parent_space_id')
 );
 CREATE INDEX space_current_states_realm ON space_current_states(realm_id,space_id);
 
@@ -4575,17 +4574,6 @@ CREATE TABLE space_parent_current_states (
  CHECK(jsonb_typeof(value->'parent_space_id') IN ('null','string'))
 );
 CREATE INDEX space_parent_current_states_realm ON space_parent_current_states(realm_id,space_id);
-
-CREATE TABLE space_child_scope_policy_current_states (
- realm_id TEXT NOT NULL,
- space_id TEXT NOT NULL PRIMARY KEY REFERENCES space_current_states(space_id) DEFERRABLE INITIALLY DEFERRED,
- current_commit_id TEXT NOT NULL,
- current_stream_position BIGINT NOT NULL CHECK(current_stream_position BETWEEN 0 AND 9007199254740991),
- value JSONB NOT NULL,
- updated_at TIMESTAMPTZ NOT NULL,
- CHECK(jsonb_typeof(value) IN ('null','boolean'))
-);
-CREATE INDEX space_child_scope_policy_current_states_realm ON space_child_scope_policy_current_states(realm_id,space_id);
 
 -- The whole accepted RSVP entry per exact Calendar Strand, occurrence and
 -- accountable Actor. JSONB scalars preserve an explicit null series key and

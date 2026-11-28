@@ -5,7 +5,7 @@
 //! mod file for navigability; the mod file re-exports them so the
 //! `crate::reducer::Xxx` paths stay unchanged.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use arkret_event_draft::ProjectedEventOperation as Operation;
 use arkret_models_collaboration::events_payloads::ContentBlock;
@@ -180,7 +180,6 @@ pub struct SpaceContainerProjection {
     pub kind: String,
     pub title: String,
     pub fields: BTreeMap<String, Value>,
-    pub child_scope_policy: Option<bool>,
     pub parent_ref: Option<String>,
     pub rank: Option<String>,
     pub state: SpaceContainerLifecycleState,

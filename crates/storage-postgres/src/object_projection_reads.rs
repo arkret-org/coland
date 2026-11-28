@@ -115,14 +115,12 @@ fn hydration_source_sql(row: &str, selector: &str) -> String {
 impl ObjectCurrentSnapshotStore for PgObjectCurrentSnapshotStore {
     async fn snapshot(&self) -> PersistenceResult<ObjectCurrentSnapshot> {
         let mut conn = self.pool.get().await.map_err(PersistenceError::database)?;
-        let (space_rows, strand_rows, encrypted_realms) = conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+        let (space_rows, strand_rows) = conn.transaction::<_, PgTransactionError, _>(async move |conn| {
             diesel::sql_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
                 .execute(&mut *conn).await?;
             let orphan_sibling: crate::ExistsRow = diesel::sql_query(
                 "SELECT EXISTS(SELECT 1 FROM space_parent_current_states p \
                  LEFT JOIN space_current_states s ON s.realm_id=p.realm_id AND s.space_id=p.space_id \
-                 WHERE s.space_id IS NULL UNION ALL SELECT 1 FROM space_child_scope_policy_current_states c \
-                 LEFT JOIN space_current_states s ON s.realm_id=c.realm_id AND s.space_id=c.space_id \
                  WHERE s.space_id IS NULL) AS present",
             ).get_result(&mut *conn).await?;
             if orphan_sibling.present {
@@ -131,20 +129,16 @@ impl ObjectCurrentSnapshotStore for PgObjectCurrentSnapshotStore {
             let realm_source = "jsonb_build_object('kind','realm','realm_id',s.realm_id)";
             let space_source = hydration_source_sql("s", "jsonb_build_object('kind','space','space_id',s.space_id)");
             let parent_source = hydration_source_sql("p", "jsonb_build_object('kind','space_parent','space_id',p.space_id)");
-            let policy_source = hydration_source_sql("c", "jsonb_build_object('kind','space_child_scope_policy','space_id',c.space_id)");
             let spaces = diesel::sql_query(format!(
                 "SELECT s.space_id AS id,s.realm_id, \
-                 s.value || jsonb_build_object('parent_space_id',p.value->'parent_space_id', \
-                 'child_scope_policy',c.value) AS value, \
+                 s.value || p.value AS value, \
                  (COALESCE({space_source}={realm_source},false) \
                    AND COALESCE({parent_source}={realm_source},false) \
-                   AND COALESCE({policy_source}={realm_source},false) \
-                   AND NOT (s.value ? 'parent_space_id') AND NOT (s.value ? 'child_scope_policy') \
+                   AND NOT (s.value ? 'parent_space_id') \
                    AND jsonb_typeof(p.value)='object' AND p.value ? 'parent_space_id' \
                    AND p.value - 'parent_space_id'='{{}}'::jsonb) AS proved \
                  FROM space_current_states s \
                  LEFT JOIN space_parent_current_states p ON p.realm_id=s.realm_id AND p.space_id=s.space_id \
-                 LEFT JOIN space_child_scope_policy_current_states c ON c.realm_id=s.realm_id AND c.space_id=s.space_id \
                  ORDER BY s.realm_id,s.space_id",
             )).load::<CurrentObjectRow>(&mut *conn).await?;
             let strand_source = hydration_source_sql("s", "jsonb_build_object('kind','strand','strand_id',s.strand_id)");
@@ -153,22 +147,7 @@ impl ObjectCurrentSnapshotStore for PgObjectCurrentSnapshotStore {
                  {strand_source} AS source_stream_ref FROM strand_current_states s \
                  ORDER BY s.realm_id,s.strand_id",
             )).load::<StrandSnapshotRow>(&mut *conn).await?;
-            let groups = diesel::sql_query(
-                "SELECT g.value->'effective_scope' AS value FROM mls_group_current_states g
-                 JOIN realm_commits c ON c.realm_id=g.realm_id AND c.commit_id=g.current_commit_id
-                    AND c.stream_position=g.current_stream_position
-                 JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed'
-                 WHERE c.stream_ref=jsonb_build_object('kind','realm','realm_id',g.realm_id)
-                   AND g.value->'effective_scope'=c.stream_ref"
-            ).load::<ValueRow>(&mut *conn).await?;
-            let mut encrypted_realms = BTreeSet::new();
-            for group in groups {
-                let scope: ScopeRef = serde_json::from_value(group.value).map_err(PersistenceError::database)?;
-                if let ScopeRef::Realm { realm_id } = scope {
-                    encrypted_realms.insert(realm_id.to_string());
-                }
-            }
-            Ok((spaces,strands,encrypted_realms))
+            Ok((spaces,strands))
         }).await.map_err(PgTransactionError::into_persistence)?;
         let spaces = space_rows
             .into_iter()
@@ -208,7 +187,7 @@ impl ObjectCurrentSnapshotStore for PgObjectCurrentSnapshotStore {
                 Ok(strand)
             })
             .collect::<PersistenceResult<Vec<_>>>()?;
-        Ok(ObjectCurrentSnapshot { spaces, strands, encrypted_realms })
+        Ok(ObjectCurrentSnapshot { spaces, strands })
     }
 }
 
@@ -273,17 +252,13 @@ pub(crate) async fn lists_for_actor_in_connection(
     let incomplete_space = diesel::sql_query(
             "SELECT EXISTS(SELECT 1 FROM space_current_states s \
              LEFT JOIN space_parent_current_states p ON p.realm_id=s.realm_id AND p.space_id=s.space_id \
-             LEFT JOIN space_child_scope_policy_current_states c ON c.realm_id=s.realm_id AND c.space_id=s.space_id \
-             WHERE s.realm_id=$1 AND (p.space_id IS NULL OR c.space_id IS NULL \
-               OR s.value ? 'parent_space_id' OR s.value ? 'child_scope_policy' \
+             WHERE s.realm_id=$1 AND (p.space_id IS NULL \
+               OR s.value ? 'parent_space_id' \
                OR jsonb_typeof(p.value)<>'object' OR NOT p.value ? 'parent_space_id' \
                OR p.value - 'parent_space_id' <> '{}'::jsonb)) \
              OR EXISTS(SELECT 1 FROM space_parent_current_states p \
                LEFT JOIN space_current_states s ON s.realm_id=p.realm_id AND s.space_id=p.space_id \
-               WHERE p.realm_id=$1 AND s.space_id IS NULL) \
-             OR EXISTS(SELECT 1 FROM space_child_scope_policy_current_states c \
-               LEFT JOIN space_current_states s ON s.realm_id=c.realm_id AND s.space_id=c.space_id \
-               WHERE c.realm_id=$1 AND s.space_id IS NULL) AS present",
+               WHERE p.realm_id=$1 AND s.space_id IS NULL) AS present",
         ).bind::<Text,_>(realm_id.as_str()).get_result::<crate::ExistsRow>(&mut *conn).await?;
     if incomplete_space.present {
         return Err(
@@ -291,10 +266,8 @@ pub(crate) async fn lists_for_actor_in_connection(
         );
     }
     let space_rows = diesel::sql_query(
-            "SELECT s.value || jsonb_build_object('parent_space_id',p.value->'parent_space_id', \
-             'child_scope_policy',c.value) AS value FROM space_current_states s \
+            "SELECT s.value || p.value AS value FROM space_current_states s \
              JOIN space_parent_current_states p ON p.realm_id=s.realm_id AND p.space_id=s.space_id \
-             JOIN space_child_scope_policy_current_states c ON c.realm_id=s.realm_id AND c.space_id=s.space_id \
              WHERE s.realm_id=$1 ORDER BY s.space_id",
         ).bind::<Text,_>(realm_id.as_str()).load::<ValueRow>(&mut *conn).await?;
     let mut spaces = Vec::new();
@@ -766,7 +739,6 @@ fn list_dependencies(
                 if space.id.as_ref() != Some(space_id)
                     || space.realm_id != spaces.realm_id
                     || space.parent_space_id.is_some()
-                    || space.child_scope_policy.is_some()
                 {
                     return Err(corrupt(
                         "projection Space dependency identity or family differs",
@@ -777,12 +749,6 @@ fn list_dependencies(
             }
             Selector::SpaceParent { space_id } if space_ids.contains(space_id) => {
                 *space_families.entry(space_id.clone()).or_default() |= 2;
-                true
-            }
-            Selector::SpaceChildScopePolicy { space_id } if space_ids.contains(space_id) => {
-                let _: Option<bool> =
-                    serde_json::from_value(value.clone()).map_err(PersistenceError::database)?;
-                *space_families.entry(space_id.clone()).or_default() |= 4;
                 true
             }
             Selector::Strand { strand_id } if strand_ids.contains(strand_id) => {
@@ -821,7 +787,7 @@ fn list_dependencies(
     }
     if space_ids
         .iter()
-        .any(|id| space_families.get(id) != Some(&7))
+        .any(|id| space_families.get(id) != Some(&3))
         || proved_strands != strand_ids
         || proved_relations != relation_ids
     {
@@ -963,20 +929,14 @@ mod tests {
                 },
                 serde_json::json!({"parent_space_id":null}),
             ),
-            make(
-                CurrentSelector::SpaceChildScopePolicy {
-                    space_id: space_id.clone(),
-                },
-                Value::Null,
-            ),
         ];
         assert_eq!(
             list_dependencies(&output, &strands, &rows).unwrap().len(),
-            3
+            2
         );
         assert!(
-            list_dependencies(&output, &strands, &rows[..2]).is_err(),
-            "metadata and parent alone cannot replace a missing policy family"
+            list_dependencies(&output, &strands, &rows[..1]).is_err(),
+            "metadata alone cannot replace the parent family"
         );
         let CurrentState::Value { value, .. } = &mut rows[1];
         *value = serde_json::json!({"parent_space_id":parent_id});
@@ -986,7 +946,7 @@ mod tests {
             list_dependencies(&parent_output, &strands, &rows)
                 .unwrap()
                 .len(),
-            3,
+            2,
             "a disclosed parent locator never requires an ancestor metadata read"
         );
     }
@@ -1064,9 +1024,6 @@ mod tests {
         diesel::sql_query("INSERT INTO space_parent_current_states(realm_id,space_id,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,$3,0,$4,$5)")
             .bind::<Text,_>(realm.as_str()).bind::<Text,_>(space_id.as_str()).bind::<Text,_>(commit.as_str())
             .bind::<Jsonb,_>(serde_json::json!({"parent_space_id":null})).bind::<Timestamptz,_>(now).execute(&mut *conn).await.unwrap();
-        diesel::sql_query("INSERT INTO space_child_scope_policy_current_states(realm_id,space_id,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,$3,0,'null'::jsonb,$4)")
-            .bind::<Text,_>(realm.as_str()).bind::<Text,_>(space_id.as_str()).bind::<Text,_>(commit.as_str())
-            .bind::<Timestamptz,_>(now).execute(&mut *conn).await.unwrap();
         assert!(
             !projection_lists_match_in_connection(
                 &mut conn,

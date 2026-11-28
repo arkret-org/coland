@@ -47,7 +47,6 @@ DROP TABLE IF EXISTS public.applet_managed_device_nonces;
 DROP TABLE IF EXISTS agent_approval_publications;
 DROP TABLE IF EXISTS key_backup_list_revisions;
 DROP TABLE IF EXISTS mimi_room_binding_current_states;
-DROP TABLE IF EXISTS space_child_scope_policy_current_states;
 DROP TABLE IF EXISTS space_parent_current_states;
 DROP TABLE IF EXISTS space_current_states;
 DROP TABLE IF EXISTS account_device_committed_evidence;

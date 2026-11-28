@@ -3932,12 +3932,8 @@ impl RealmAuthorizationCut {
                 .bind::<Text, _>(payload.space_id.as_str())
                 .get_result::<PolicyBundleRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
                 .ok_or_else(|| PersistenceError::Conflict("failed_precondition: Space update target is absent".to_owned()))?;
-            let post = match &payload.patch {
-                Some(patch) => patch
-                    .apply_for_typed_target(&row.value, payload.space_id.as_str())
-                    .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?,
-                None => row.value,
-            };
+            let post = payload.patch.apply_for_typed_target(&row.value, payload.space_id.as_str())
+                .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
             facts.space_kind = post
                 .get("kind")
                 .and_then(serde_json::Value::as_str)

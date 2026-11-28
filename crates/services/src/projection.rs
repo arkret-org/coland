@@ -472,14 +472,6 @@ impl ProjectionService {
         self.apply_projected(operation, hlc)
     }
 
-    pub fn observe_ordinary_mls_group(&self, group: &coland_storage::MlsGroupCurrentRecord) {
-        if let arkret_wire::ScopeRef::Realm { realm_id } = &group.value.effective_scope
-            && realm_id == &group.realm_id
-        {
-            self.write_state().encrypted_realms.insert(realm_id.to_string());
-        }
-    }
-
     pub fn apply_projected(&self, operation: &Operation, hlc: &ServerHlc) -> ProjectionEffectView {
         self.write_state().apply_projected(operation, hlc).into()
     }

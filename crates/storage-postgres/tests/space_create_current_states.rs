@@ -1,4 +1,4 @@
-//! `ak.space.create` writes all three registered current families atomically.
+//! `ak.space.create` writes both registered current families atomically.
 //! The HTTP guarded-unit tests separately prove capability denial before
 //! entering this UoW; this suite exercises its PG cut, parent basis and CAS.
 
@@ -76,14 +76,13 @@ async fn count(pool: &PgPool, table: &str, realm_id: &arkret_wire::RealmId) -> i
     row.count
 }
 
-async fn cut_counts(pool: &PgPool, realm_id: &arkret_wire::RealmId) -> [i64; 5] {
-    let mut counts = [0; 5];
+async fn cut_counts(pool: &PgPool, realm_id: &arkret_wire::RealmId) -> [i64; 4] {
+    let mut counts = [0; 4];
     for (index, table) in [
         "canonical_events",
         "realm_commits",
         "space_current_states",
         "space_parent_current_states",
-        "space_child_scope_policy_current_states",
     ]
     .iter()
     .enumerate()
@@ -100,7 +99,6 @@ fn payload(
     kind: &str,
     title: &str,
     parent_id: Option<&arkret_wire::SpaceId>,
-    policy: Option<Value>,
 ) -> Value {
     let mut object = json!({
         "schema": "ak.schema.space.v1",
@@ -112,9 +110,6 @@ fn payload(
     });
     if let Some(parent_id) = parent_id {
         object["parent_space_id"] = json!(parent_id);
-    }
-    if let Some(policy) = policy {
-        object["child_scope_policy"] = policy;
     }
     json!({"object": object})
 }
@@ -167,7 +162,7 @@ async fn space_lifecycle_narrow_allow_and_space_deny_override_realm_allow_at_the
             &head,
             arkret_wire::EventKind::SpaceCreate,
             owner.clone(),
-            payload(&realm, &owner, at, "list", "Lifecycle list", None, None),
+            payload(&realm, &owner, at, "list", "Lifecycle list", None),
             at,
         );
         let create = ordinary_realm::source_request(&pool, create).await;
@@ -294,7 +289,7 @@ async fn space_write_footprint(pool: &PgPool, realm: &arkret_wire::RealmId) -> V
         value: Value,
     }
     let mut conn = pool.get().await.unwrap();
-    diesel::sql_query("SELECT jsonb_build_object('events',(SELECT count(*) FROM canonical_events WHERE realm_id=$1),'commits',(SELECT count(*) FROM realm_commits WHERE realm_id=$1),'space',(SELECT coalesce(jsonb_agg(to_jsonb(s) ORDER BY space_id),'[]'::jsonb) FROM space_current_states s WHERE realm_id=$1),'parent',(SELECT coalesce(jsonb_agg(to_jsonb(s) ORDER BY space_id),'[]'::jsonb) FROM space_parent_current_states s WHERE realm_id=$1),'policy',(SELECT coalesce(jsonb_agg(to_jsonb(s) ORDER BY space_id),'[]'::jsonb) FROM space_child_scope_policy_current_states s WHERE realm_id=$1),'outbox',(SELECT count(*) FROM event_federation_outbox o JOIN canonical_events e ON e.pk=o.event_pk WHERE e.realm_id=$1)) AS value")
+    diesel::sql_query("SELECT jsonb_build_object('events',(SELECT count(*) FROM canonical_events WHERE realm_id=$1),'commits',(SELECT count(*) FROM realm_commits WHERE realm_id=$1),'space',(SELECT coalesce(jsonb_agg(to_jsonb(s) ORDER BY space_id),'[]'::jsonb) FROM space_current_states s WHERE realm_id=$1),'parent',(SELECT coalesce(jsonb_agg(to_jsonb(s) ORDER BY space_id),'[]'::jsonb) FROM space_parent_current_states s WHERE realm_id=$1),'outbox',(SELECT count(*) FROM event_federation_outbox o JOIN canonical_events e ON e.pk=o.event_pk WHERE e.realm_id=$1)) AS value")
         .bind::<Text,_>(realm.as_str()).get_result::<Row>(&mut conn).await.unwrap().value
 }
 
@@ -339,7 +334,7 @@ async fn space_parent_narrow_resource_cases() {
             &head,
             arkret_wire::EventKind::SpaceCreate,
             owner.clone(),
-            payload(&realm, &owner, at, kind, kind, None, None),
+            payload(&realm, &owner, at, kind, kind, None),
             at,
         );
         let create = Box::pin(ordinary_realm::source_request(&pool, create)).await;
@@ -453,7 +448,6 @@ async fn space_parent_narrow_resource_cases() {
     let denied = Box::pin(ordinary_realm::source_request(&pool, denied)).await;
     let before = cut_counts(&pool, &realm).await;
     let metadata = current(&pool, "space_current_states", child).await;
-    let policy = current(&pool, "space_child_scope_policy_current_states", child).await;
     assert_eq!(
         Box::pin(uow.commit_event(denied))
             .await
@@ -469,10 +463,6 @@ async fn space_parent_narrow_resource_cases() {
     assert_eq!(
         current(&pool, "space_current_states", child).await,
         metadata
-    );
-    assert_eq!(
-        current(&pool, "space_child_scope_policy_current_states", child).await,
-        policy
     );
 }
 
@@ -505,9 +495,7 @@ async fn space_parent_attach_detach_cases() {
             at,
             "board",
             "Board",
-            None,
-            None,
-        ),
+            None),
         at,
     );
     let root = ordinary_realm::case_future(|| ordinary_realm::source_request(&pool, root)).await;
@@ -517,14 +505,13 @@ async fn space_parent_attach_detach_cases() {
         &root.authority_commit,
         arkret_wire::EventKind::SpaceCreate,
         &founder(),
-        payload(&realm, &last.event.actor_id, at, "list", "List", None, None),
+        payload(&realm, &last.event.actor_id, at, "list", "List", None),
         at,
     );
     let child = ordinary_realm::case_future(|| ordinary_realm::source_request(&pool, child)).await;
     let child_id = arkret_wire::SpaceId::from_event_id(&child.authority_commit.event.event_id);
     uow.commit_event(child.clone()).await.unwrap();
     let metadata = current(&pool, "space_current_states", &child_id).await;
-    let policy = current(&pool, "space_child_scope_policy_current_states", &child_id).await;
     let attached = next_request(
         &child.authority_commit,
         arkret_wire::EventKind::SpaceParent,
@@ -553,10 +540,6 @@ async fn space_parent_attach_detach_cases() {
     assert_eq!(
         current(&pool, "space_current_states", &child_id).await,
         metadata
-    );
-    assert_eq!(
-        current(&pool, "space_child_scope_policy_current_states", &child_id).await,
-        policy
     );
     let counts = cut_counts(&pool, &realm).await;
     assert!(
@@ -591,9 +574,7 @@ async fn space_parent_attach_detach_cases() {
             foreign_last.commit.committed_at,
             "board",
             "Other",
-            None,
-            None,
-        ),
+            None),
         foreign_last.commit.committed_at,
     );
     let foreign =
@@ -644,9 +625,7 @@ async fn space_parent_attach_detach_cases() {
             hidden_last.commit.committed_at,
             "board",
             "Hidden",
-            None,
-            None,
-        ),
+            None),
         hidden_last.commit.committed_at,
     );
     let hidden =
@@ -739,10 +718,6 @@ async fn space_parent_attach_detach_cases() {
             current(&pool, "space_current_states", &child_id).await,
             metadata
         );
-        assert_eq!(
-            current(&pool, "space_child_scope_policy_current_states", &child_id).await,
-            policy
-        );
     }
     let detached = next_request(
         &attached.authority_commit,
@@ -771,7 +746,7 @@ async fn space_parent_attach_detach_cases() {
 }
 
 #[tokio::test]
-async fn space_create_root_and_child_have_three_sibling_results_and_exact_replay() {
+async fn space_create_root_and_child_have_metadata_and_parent_and_exact_replay() {
     let database = TestDatabase::lease().await;
     let pool = database.pool();
     let unit = human_bootstrap(&pool, "space-create-root-child").await;
@@ -796,7 +771,6 @@ async fn space_create_root_and_child_have_three_sibling_results_and_exact_replay
             "board",
             "Board",
             None,
-            Some(json!(false)),
         ),
         at,
     );
@@ -805,14 +779,12 @@ async fn space_create_root_and_child_have_three_sibling_results_and_exact_replay
     assert!(uow.commit_event(root.clone()).await.unwrap().event_inserted);
     let root_space = current(&pool, "space_current_states", &root_id).await;
     let root_parent = current(&pool, "space_parent_current_states", &root_id).await;
-    let root_policy = current(&pool, "space_child_scope_policy_current_states", &root_id).await;
     assert_eq!(root_space.value["id"], json!(root_id));
     assert_eq!(root_space.value["state"], "active");
     assert!(root_space.value.get("parent_space_id").is_none());
     assert!(root_space.value.get("child_scope_policy").is_none());
     assert_eq!(root_parent.value, json!({"parent_space_id": null}));
-    assert_eq!(root_policy.value, json!(false));
-    for row in [&root_space, &root_parent, &root_policy] {
+    for row in [&root_space, &root_parent] {
         assert_eq!(
             row.current_commit_id,
             root.authority_commit.commit.commit_id.as_str()
@@ -834,7 +806,6 @@ async fn space_create_root_and_child_have_three_sibling_results_and_exact_replay
             "list",
             "List",
             Some(&root_id),
-            None,
         ),
         at,
     );
@@ -848,10 +819,8 @@ async fn space_create_root_and_child_have_three_sibling_results_and_exact_replay
     );
     let child_space = current(&pool, "space_current_states", &child_id).await;
     let child_parent = current(&pool, "space_parent_current_states", &child_id).await;
-    let child_policy = current(&pool, "space_child_scope_policy_current_states", &child_id).await;
     assert_eq!(child_space.value["id"], json!(child_id));
     assert_eq!(child_parent.value, json!({"parent_space_id": root_id}));
-    assert_eq!(child_policy.value, Value::Null);
     let current_snapshot = coland_storage_postgres::PgPersistenceStore::new(pool.clone())
         .object_current_snapshot()
         .snapshot()
@@ -872,7 +841,7 @@ async fn space_create_root_and_child_have_three_sibling_results_and_exact_replay
     assert_eq!(child_current.parent_space_id.as_ref(), Some(&root_id));
     assert_eq!(
         cut_counts(&pool, &realm_id).await,
-        [baseline[0] + 2, baseline[1] + 2, 2, 2, 2]
+        [baseline[0] + 2, baseline[1] + 2, 2, 2]
     );
     let before_retry = cut_counts(&pool, &realm_id).await;
     assert!(
@@ -895,9 +864,9 @@ async fn space_create_root_and_child_have_three_sibling_results_and_exact_replay
     .await
     .unwrap()
     .unwrap();
-    for (space_id, metadata, parent, policy) in [
-        (&root_id, &root_space, &root_parent, &root_policy),
-        (&child_id, &child_space, &child_parent, &child_policy),
+    for (space_id, metadata, parent) in [
+        (&root_id, &root_space, &root_parent),
+        (&child_id, &child_space, &child_parent),
     ] {
         for (selector, expected) in [
             (
@@ -911,12 +880,6 @@ async fn space_create_root_and_child_have_three_sibling_results_and_exact_replay
                     space_id: space_id.clone(),
                 },
                 parent,
-            ),
-            (
-                arkret_wire::CurrentSelector::SpaceChildScopePolicy {
-                    space_id: space_id.clone(),
-                },
-                policy,
             ),
         ] {
             assert!(snapshot.current_state_entries.iter().any(|entry| matches!(
@@ -986,9 +949,7 @@ async fn assert_space_create_capability_denied(
             previous.commit.committed_at,
             "board",
             "Nonmember board",
-            None,
-            None,
-        ),
+            None),
         previous.commit.committed_at,
     );
     let request = Box::pin(ordinary_realm::source_request(pool, request)).await;
@@ -1039,9 +1000,7 @@ async fn space_create_unknown_parent_and_stale_stream_leave_no_pg_writes() {
             at,
             "board",
             "Intruder board",
-            None,
-            None,
-        ),
+            None),
         at,
     );
     let denied = ordinary_realm::source_request(&pool, denied).await;
@@ -1061,7 +1020,6 @@ async fn space_create_unknown_parent_and_stale_stream_leave_no_pg_writes() {
             "list",
             "Orphan",
             Some(&missing_id),
-            None,
         ),
         at,
     );
@@ -1084,9 +1042,7 @@ async fn space_create_unknown_parent_and_stale_stream_leave_no_pg_writes() {
             at,
             "board",
             "Board",
-            None,
-            None,
-        ),
+            None),
         at,
     );
     let root = ordinary_realm::source_request(&pool, root).await;
@@ -1102,9 +1058,7 @@ async fn space_create_unknown_parent_and_stale_stream_leave_no_pg_writes() {
             at,
             "board",
             "Stale",
-            None,
-            None,
-        ),
+            None),
         at,
     );
     let stale = ordinary_realm::source_request(&pool, stale).await;
@@ -1113,7 +1067,7 @@ async fn space_create_unknown_parent_and_stale_stream_leave_no_pg_writes() {
 }
 
 #[tokio::test]
-async fn space_create_child_policy_denial_leaves_event_commit_and_all_results_untouched() {
+async fn space_create_rejects_obsolete_policy_atomically() {
     let database = TestDatabase::lease().await;
     let pool = database.pool();
     let unit = human_bootstrap(&pool, "space-create-policy-denial").await;
@@ -1129,44 +1083,15 @@ async fn space_create_child_policy_denial_leaves_event_commit_and_all_results_un
         last,
         arkret_wire::EventKind::SpaceCreate,
         &founder(),
-        payload(
-            &realm_id,
-            &last.event.actor_id,
-            at,
-            "board",
-            "Encrypted-only board",
-            None,
-            Some(json!(true)),
-        ),
+        {
+            let mut legacy = payload(&realm_id, &last.event.actor_id, at, "board", "Legacy board", None);
+            legacy["object"]["child_scope_policy"] = json!(true);
+            legacy
+        },
         at,
     );
     let root = ordinary_realm::source_request(&pool, root).await;
-    let root_id = arkret_wire::SpaceId::from_event_id(&root.authority_commit.event.event_id);
-    uow.commit_event(root.clone()).await.unwrap();
     let before = cut_counts(&pool, &realm_id).await;
-    let child = next_request(
-        &root.authority_commit,
-        arkret_wire::EventKind::SpaceCreate,
-        &founder(),
-        payload(
-            &realm_id,
-            &last.event.actor_id,
-            at,
-            "list",
-            "Plaintext list",
-            Some(&root_id),
-            None,
-        ),
-        at,
-    );
-    let child = ordinary_realm::source_request(&pool, child).await;
-    let error = uow.commit_event(child).await.unwrap_err().to_string();
-    assert!(error.contains("policy_violation"), "{error}");
+    assert!(uow.commit_event(root).await.is_err());
     assert_eq!(cut_counts(&pool, &realm_id).await, before);
-    assert_eq!(
-        current(&pool, "space_child_scope_policy_current_states", &root_id)
-            .await
-            .value,
-        json!(true)
-    );
 }

@@ -1031,7 +1031,6 @@ async fn peer_recipient_basis_digest(
         "strand_current_states",
         "sidecar_current_states",
         "space_parent_current_states",
-        "space_child_scope_policy_current_states",
         "space_current_states",
         "sidecar_exchange_controls_current_states",
         "agent_interaction_current_states",

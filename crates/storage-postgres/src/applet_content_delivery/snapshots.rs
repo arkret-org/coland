@@ -95,9 +95,7 @@ fn current_resources(
             board_space_id,
             strand_id,
         } => vec![board_space_id.to_string(), strand_id.to_string()],
-        S::Space { space_id }
-        | S::SpaceParent { space_id }
-        | S::SpaceChildScopePolicy { space_id } => vec![space_id.to_string()],
+        S::Space { space_id } | S::SpaceParent { space_id } => vec![space_id.to_string()],
         S::MessageRevision { message_id } => vec![message_id.to_string()],
         S::MessageReactions { target_ref }
         | S::ModerationState { target_ref }

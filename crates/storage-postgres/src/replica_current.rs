@@ -29,7 +29,6 @@ use serde_json::Value;
 /// Every table a member Station projects a replica Realm into.
 const MEMBER_STATION_FAMILIES: &[&str] = &[
     "space_parent_current_states",
-    "space_child_scope_policy_current_states",
     "space_current_states",
     "realm_bootstrap_current_states",
     "scope_read_receipt_policy_current_states",
@@ -534,9 +533,7 @@ async fn upsert_keyed(
                    AND {table}.value=EXCLUDED.value))",
             conflict = match table {
                 "strand_current_states" => "strand_id",
-                "space_current_states"
-                | "space_parent_current_states"
-                | "space_child_scope_policy_current_states" => "space_id",
+                "space_current_states" | "space_parent_current_states" => "space_id",
                 "message_revision_current_states" => "message_id",
                 _ => "realm_id,target_ref",
             },
@@ -1161,13 +1158,10 @@ pub(crate) async fn install_snapshot_at_heads_in_connection(
                 )
                 .await?;
             }
-            S::Space { space_id }
-            | S::SpaceParent { space_id }
-            | S::SpaceChildScopePolicy { space_id } => {
+            S::Space { space_id } | S::SpaceParent { space_id } => {
                 let table = match selector {
                     S::Space { .. } => "space_current_states",
                     S::SpaceParent { .. } => "space_parent_current_states",
-                    S::SpaceChildScopePolicy { .. } => "space_child_scope_policy_current_states",
                     _ => unreachable!(),
                 };
                 upsert_keyed(
@@ -1756,10 +1750,6 @@ pub(crate) async fn advance_in_connection(
             for (table, value) in [
                 ("space_current_states", &values.space),
                 ("space_parent_current_states", &values.parent),
-                (
-                    "space_child_scope_policy_current_states",
-                    &values.child_scope_policy,
-                ),
             ] {
                 upsert_keyed(
                     conn,
@@ -2688,15 +2678,6 @@ mod tests {
                 json!({"parent_space_id":"parent"}),
             ),
             (
-                keyed(
-                    "space_child_scope_policy_current_states",
-                    "space_id",
-                    "space",
-                ),
-                Value::Null,
-                json!({"changed":true}),
-            ),
-            (
                 keyed("message_revision_current_states", "message_id", "message"),
                 json!({"strand_id":"strand","track_name":"discussion","text":"original"}),
                 json!({"strand_id":"strand","track_name":"discussion","text":"changed"}),
@@ -2734,7 +2715,6 @@ mod tests {
                     "strand_current_states"
                         | "space_current_states"
                         | "space_parent_current_states"
-                        | "space_child_scope_policy_current_states"
                         | "message_revision_current_states",
                     Some(_)
                 )
@@ -2959,7 +2939,6 @@ mod tests {
             "state":"active"
         });
         let parent = json!({"parent_space_id":null});
-        let policy = Value::Null;
         let entry = |selector, value| arkret_wire::CurrentState::Value {
             selector,
             source_stream_ref: stream.clone(),
@@ -2974,12 +2953,6 @@ mod tests {
                     space_id: space_id.clone(),
                 },
                 parent.clone(),
-            ),
-            entry(
-                arkret_wire::CurrentSelector::SpaceChildScopePolicy {
-                    space_id: space_id.clone(),
-                },
-                policy.clone(),
             ),
             entry(
                 arkret_wire::CurrentSelector::Space {
@@ -3009,7 +2982,6 @@ mod tests {
         for (table, expected) in [
             ("space_current_states", metadata),
             ("space_parent_current_states", parent),
-            ("space_child_scope_policy_current_states", policy),
         ] {
             let row: ValueRow = diesel::sql_query(format!(
                 "SELECT value FROM {table} WHERE realm_id=$1 AND space_id=$2"
@@ -3105,14 +3077,6 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(next_parent.value, json!({"parent_space_id":space_id}));
-        let next_policy: ValueRow = diesel::sql_query(
-            "SELECT value FROM space_child_scope_policy_current_states WHERE space_id=$1",
-        )
-        .bind::<Text, _>(next_id.as_str())
-        .get_result(&mut conn)
-        .await
-        .unwrap();
-        assert_eq!(next_policy.value, Value::Null);
     }
 
     #[tokio::test]

@@ -79,17 +79,9 @@ impl ProjectionState {
                 reason: arkret_wire::ErrorCode::SCHEMA_VIOLATION.to_owned(),
             };
         }
-        if object.contains_key("scope_circle_id") {
+        if object.contains_key("scope_circle_id") || object.contains_key("child_scope_policy") {
             return ProjectionEffect::Rejected { reason: arkret_wire::ErrorCode::SCHEMA_VIOLATION.to_owned() };
         }
-        let child_scope_policy = match child_scope_policy_from_object(object) {
-            Ok(policy) => policy,
-            Err(reason) => {
-                return ProjectionEffect::Rejected {
-                    reason: reason.to_owned(),
-                };
-            }
-        };
         let kind = object
             .get("kind")
             .and_then(|v| v.as_str())
@@ -134,7 +126,7 @@ impl ProjectionState {
             };
         }
         if let Some(parent) = parent_ref.as_deref()
-            && let Err(reason) = self.check_space_child_scope_policy(
+            && let Err(reason) = self.check_space_placement_target(
                 parent,
                 &realm_id,
             )
@@ -156,7 +148,6 @@ impl ProjectionState {
             title,
             fields,
 
-            child_scope_policy,
             parent_ref,
             rank,
             state: SpaceContainerLifecycleState::Active,
@@ -203,11 +194,9 @@ impl ProjectionState {
                 reason: "space_not_active".to_owned(),
             };
         }
-        let encryption_requirement = match operation.payload.get("child_scope_policy") {
-            Some(Value::Bool(required)) => Some(*required),
-            Some(_) => return ProjectionEffect::Rejected { reason: arkret_wire::ErrorCode::SCHEMA_VIOLATION.to_owned() },
-            None => None,
-        };
+        if operation.payload.get("child_scope_policy").is_some() || !operation.payload.get("patch").is_some_and(Value::is_object) {
+            return ProjectionEffect::Rejected { reason: arkret_wire::ErrorCode::SCHEMA_VIOLATION.to_owned() };
+        }
         let patch = operation.payload.get("patch").and_then(|v| v.as_object());
         if let Some(patch) = patch {
             if patch.contains_key("default_scope_circle_id")
@@ -239,9 +228,6 @@ impl ProjectionState {
             }
             space_container.kind = candidate_kind.to_owned();
             space_container.fields = candidate_fields;
-        }
-        if let Some(required) = encryption_requirement {
-            space_container.child_scope_policy = Some(required);
         }
         space_container.updated_by = Some(operation.context.sender.to_string());
         space_container.updated_at = Some(now);
@@ -295,7 +281,7 @@ impl ProjectionState {
                     "space_parent_unknown",
                 );
             }
-            if let Err(reason) = self.check_space_child_scope_policy(
+            if let Err(reason) = self.check_space_placement_target(
                 parent_space_id,
                 &space_container.realm_id,
             ) {
@@ -420,88 +406,7 @@ impl ProjectionState {
         strand_position_from_create_payload(object).map(|_| ())
     }
 
-    pub fn check_child_scope_policy_transition(
-        &self,
-        operation: &Operation,
-    ) -> Result<(), &'static str> {
-        let kind = match crate::kinds::canonical_kind_for_operation(operation) {
-            Some(kind) => kind,
-            None => return Ok(()),
-        };
-        match kind {
-            arkret_wire::EventKind::SpaceCreate => {
-                let Some(object) = operation.payload.get("object").and_then(Value::as_object)
-                else {
-                    return Ok(());
-                };
-                let realm_id = projection_object_realm_id(object, operation);
-                if realm_id != operation.realm_id.as_ref() {
-                    return Err("space_realm_mismatch");
-                }
-                let parent = object.get("parent_space_id").and_then(Value::as_str);
-                let child_id = event_derived_object_id(operation, "ak:space:").unwrap_or_default();
-                self.validate_space_parent_chain(&child_id, &realm_id, parent)?;
-                if let Some(parent) = parent {
-                    self.check_space_child_scope_policy(
-                        parent,
-                        &realm_id,
-                    )?;
-                }
-                Ok(())
-            }
-            arkret_wire::EventKind::StrandCreate => Ok(()),
-            arkret_wire::EventKind::StrandMove | arkret_wire::EventKind::StrandReorder => {
-                let Some((board_space_id, list_space_id, _)) =
-                    strand_position_from_lifecycle_payload(&operation.payload)
-                else {
-                    return Ok(());
-                };
-                let Some(strand_id) = operation
-                    .payload
-                    .get("strand_id")
-                    .and_then(Value::as_str)
-                    .or_else(|| operation.payload.get("target_ref").and_then(Value::as_str))
-                else {
-                    return Ok(());
-                };
-                let Some(strand) = self.strands.get(strand_id) else {
-                    return Ok(());
-                };
-                self.check_space_child_scope_policy(
-                    &board_space_id,
-                    &strand.realm_id,
-                )?;
-                self.check_space_child_scope_policy(
-                    &list_space_id,
-                    &strand.realm_id,
-                )
-            }
-            arkret_wire::EventKind::SpaceParent => {
-                let Some(container_space_id) = space_container_id_from_payload(&operation.payload)
-                else {
-                    return Ok(());
-                };
-                let Some(parent_space_id) = operation
-                    .payload
-                    .get("parent_space_id")
-                    .and_then(Value::as_str)
-                    .filter(|value| !value.trim().is_empty())
-                else {
-                    return Ok(());
-                };
-                let Some(space_container) = self.space_containers.get(&container_space_id) else {
-                    return Ok(());
-                };
-                self.check_space_child_scope_policy(
-                    parent_space_id,
-                    &space_container.realm_id,
-                )
-            }
-            _ => Ok(()),
-        }
-    }
-
-    pub(crate) fn check_space_child_scope_policy(
+    pub(crate) fn check_space_placement_target(
         &self,
         parent_space_id: &str,
         child_realm_id: &str,
@@ -513,23 +418,8 @@ impl ProjectionState {
             child_realm_id,
             &parent.realm_id,
             parent.state == SpaceContainerLifecycleState::Active,
-        )?;
-        if parent.child_scope_policy == Some(true) && !self.encrypted_realms.contains(child_realm_id) {
-            return Err(arkret_wire::ErrorCode::POLICY_VIOLATION);
-        }
-        Ok(())
+        )
     }
-}
-
-fn child_scope_policy_from_object(
-    object: &serde_json::Map<String, Value>,
-) -> Result<Option<bool>, &'static str> {
-    let Some(policy) = object.get("child_scope_policy") else {
-        return Ok(None);
-    };
-    serde_json::from_value(policy.clone())
-        .map(Some)
-        .map_err(|_| arkret_wire::ErrorCode::SCHEMA_VIOLATION)
 }
 
 fn validate_space_wip_policy(

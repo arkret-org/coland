@@ -892,10 +892,6 @@ pub(crate) const SNAPSHOT_CURRENT_SQL: &str = "SELECT result.*, \
                 current_commit_id, current_stream_position, value \
            FROM space_parent_current_states WHERE realm_id = $1 \
          UNION ALL \
-         SELECT 'space_child_scope_policy'::text AS selector_kind, to_jsonb(space_id) AS selector_subject, \
-                current_commit_id, current_stream_position, value \
-           FROM space_child_scope_policy_current_states WHERE realm_id = $1 \
-         UNION ALL \
          SELECT 'realm_set_default_strand'::text AS selector_kind, NULL::jsonb AS selector_subject, \
                 current_commit_id, current_stream_position, value \
            FROM realm_set_default_strand_current_states WHERE realm_id = $1 \
@@ -1124,15 +1120,6 @@ pub(crate) async fn realm_state_snapshot_material_in_connection(
                         ))
                     })?,
                 },
-                ("space_child_scope_policy", Some(space_id)) => {
-                    arkret_wire::CurrentSelector::SpaceChildScopePolicy {
-                        space_id: serde_json::from_value(space_id).map_err(|error| {
-                            PersistenceError::Internal(format!(
-                                "stored Space policy selector identity is invalid: {error}"
-                            ))
-                        })?,
-                    }
-                }
                 ("strand_watch", Some(subject)) => serde_json::from_value(subject).map_err(PersistenceError::database)?,
                 ("message_revision", Some(message_id)) => {
                     arkret_wire::CurrentSelector::MessageRevision {

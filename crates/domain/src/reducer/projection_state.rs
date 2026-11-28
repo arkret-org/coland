@@ -119,8 +119,6 @@ pub struct ProjectionState {
     /// `ak.space.create` / update / parent / archive / restore / tombstone;
     /// mirror table is the `projection_space_containers` durable table.
     pub space_containers: BTreeMap<String, SpaceContainerProjection>,
-    /// Realms whose ordinary MLS group has an accepted Genesis.
-    pub encrypted_realms: BTreeSet<String>,
     /// Server-side Strand projection. Mirrors the canonical state-machine
     /// for ak.strand.create / update / archive / restore. Unlike Space
     /// there is no dedicated `ak.strand.tombstone` event; terminal state

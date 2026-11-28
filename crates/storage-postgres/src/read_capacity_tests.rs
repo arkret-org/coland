@@ -404,7 +404,6 @@ async fn seed_snapshot_families(
         ("strand_position_current_states", "board_space_id,strand_id", format!("'board-' || {key},'strand-' || {key}"), "jsonb_build_object('list_space_id','list','rank','a')".to_owned()),
         ("space_current_states", "space_id", format!("'space-' || {key}"), format!("jsonb_build_object('id','space-' || {key},'realm_id',{realm})")),
         ("space_parent_current_states", "space_id", format!("'space-' || {key}"), "jsonb_build_object('parent_space_id',NULL)".to_owned()),
-        ("space_child_scope_policy_current_states", "space_id", format!("'space-' || {key}"), "'null'::jsonb".to_owned()),
         ("mls_group_current_states", "scope_key,mls_group_id,public_state", format!("'scope-' || {key},'group-' || {key},'\\x00'::bytea"), format!("jsonb_build_object('effective_scope',jsonb_build_object('kind','realm','realm_id',{realm}),'covered_key_access_revision',0,'current_key_access_revision',0)")),
         ("object_redaction_current_states", "target_ref", "'target-' || m".to_owned(), "jsonb_build_object('assertions',jsonb_build_array(jsonb_build_object('tag_id','dot')))".to_owned()),
         ("message_reactions_current_states", "target_ref,source_stream_ref", format!("'target-' || m,jsonb_build_object('kind','realm','realm_id',{realm})"), "jsonb_build_object('entries','[]'::jsonb)".to_owned()),

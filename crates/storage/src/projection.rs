@@ -23,7 +23,6 @@ pub trait RealmMetaStore: Send + Sync {
 /// never the older reducer mirror tables.
 #[derive(Clone, Debug)]
 pub struct ObjectCurrentSnapshot {
-    pub encrypted_realms: std::collections::BTreeSet<String>,
     pub spaces: Vec<arkret_models_collaboration::objects::space::Space>,
     pub strands: Vec<arkret_models_collaboration::objects::strand::Strand>,
 }

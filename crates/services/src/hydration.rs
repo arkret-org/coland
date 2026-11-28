@@ -1044,7 +1044,6 @@ pub async fn hydrate_projections_from_persistence(
     // Rebuild the process-local Space/Strand cache from the RealmCommit-backed
     // typed current rows used by canonical list reads.
     let current_objects = persistence.object_current_snapshot().snapshot().await?;
-    proj.encrypted_realms = current_objects.encrypted_realms;
     for space in current_objects.spaces {
         let id = space.id.ok_or_else(|| {
             coland_storage::PersistenceError::Internal(
@@ -1069,7 +1068,6 @@ pub async fn hydrate_projections_from_persistence(
                 title: space.title.unwrap_or_default(),
                 fields: space.fields,
 
-                child_scope_policy: space.child_scope_policy,
                 parent_ref: space.parent_space_id.map(|id| id.to_string()),
                 rank: space.rank,
                 state,

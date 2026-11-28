@@ -33,27 +33,19 @@ struct SpacePlacementRow {
     parent_position: i64,
     #[diesel(sql_type = Jsonb)]
     parent: Value,
-    #[diesel(sql_type = BigInt)]
-    policy_position: i64,
-    #[diesel(sql_type = Jsonb)]
-    policy: Value,
 }
 
 const SPACE_PLACEMENT_SQL: &str = "SELECT s.realm_id,s.current_commit_id AS space_commit_id, \
     s.current_stream_position AS space_position,s.value AS space, \
-    p.current_stream_position AS parent_position,p.value AS parent, \
-    c.current_stream_position AS policy_position,c.value AS policy \
+    p.current_stream_position AS parent_position,p.value AS parent \
     FROM space_current_states s \
     JOIN space_parent_current_states p ON p.space_id=s.space_id AND p.realm_id=s.realm_id \
-    JOIN space_child_scope_policy_current_states c ON c.space_id=s.space_id AND c.realm_id=s.realm_id \
     JOIN realm_commits rc ON rc.commit_id=s.current_commit_id AND rc.realm_id=s.realm_id \
         AND rc.stream_position=s.current_stream_position \
     JOIN realm_commits pc ON pc.commit_id=p.current_commit_id AND pc.realm_id=p.realm_id \
         AND pc.stream_position=p.current_stream_position AND pc.stream_ref=rc.stream_ref \
-    JOIN realm_commits qc ON qc.commit_id=c.current_commit_id AND qc.realm_id=c.realm_id \
-        AND qc.stream_position=c.current_stream_position AND qc.stream_ref=rc.stream_ref \
     WHERE s.space_id=$1 AND rc.stream_ref->>'kind'='realm' \
-        AND rc.stream_ref->>'realm_id'=s.realm_id FOR SHARE OF s,p,c";
+        AND rc.stream_ref->>'realm_id'=s.realm_id FOR SHARE OF s,p";
 
 #[derive(diesel::QueryableByName)]
 struct PositionRow {
@@ -168,7 +160,6 @@ pub(crate) async fn commit_authority_position_in_connection(
         return Err(refused("space_realm_mismatch"));
     }
     if board_row.space_position >= position
-        || board_row.policy_position >= position
         || board_row.space.get("kind") != Some(&json!("board"))
         || board_row.space.get("state") != Some(&json!("active"))
         || board_row
@@ -178,9 +169,9 @@ pub(crate) async fn commit_authority_position_in_connection(
     {
         return Err(refused("space_not_active"));
     }
-    // Metadata, parent and child policy have independent registered writers.
+    // Metadata and parent have independent registered writers.
     // Read them at this locked cut and prove each family's own source Commit;
-    // a legal reparent need not rewrite metadata or policy at its new revision.
+    // a legal reparent need not rewrite metadata at its new revision.
     let list = diesel::sql_query(SPACE_PLACEMENT_SQL)
         .bind::<Text, _>(destination.as_str())
         .get_result::<SpacePlacementRow>(&mut *conn)
@@ -193,7 +184,6 @@ pub(crate) async fn commit_authority_position_in_connection(
     }
     if list.space_position >= position
         || list.parent_position >= position
-        || list.policy_position >= position
         || list.space.get("kind") != Some(&json!("list"))
         || list.space.get("state") != Some(&json!("active"))
         || list
@@ -204,8 +194,6 @@ pub(crate) async fn commit_authority_position_in_connection(
     {
         return Err(refused("space_not_active"));
     }
-    crate::space_current_states::require_encrypted_placement(conn, &event.realm_id, &board_row.policy).await?;
-    crate::space_current_states::require_encrypted_placement(conn, &event.realm_id, &list.policy).await?;
     let previous = diesel::sql_query("SELECT p.realm_id,p.current_stream_position,p.value,(c.commit_id IS NOT NULL) AS covered FROM strand_position_current_states p LEFT JOIN realm_commits c ON c.commit_id=p.current_commit_id AND c.realm_id=p.realm_id AND c.stream_position=p.current_stream_position AND c.stream_ref->>'kind'='realm' AND c.stream_ref->>'realm_id'=p.realm_id WHERE p.board_space_id=$1 AND p.strand_id=$2 FOR UPDATE OF p")
         .bind::<Text,_>(board.as_str()).bind::<Text,_>(strand.as_str())
         .get_result::<PositionRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
@@ -257,7 +245,6 @@ pub(crate) async fn commit_authority_position_in_connection(
         if source_row.realm_id != event.realm_id.as_str()
             || source_row.space_position >= position
             || source_row.parent_position >= position
-            || source_row.policy_position >= position
             || source_row.space.get("kind") != Some(&json!("list"))
             || source_row.parent != json!({"parent_space_id":board})
             || source_row

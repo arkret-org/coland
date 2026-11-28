@@ -468,7 +468,7 @@ async fn snapshot_parent_footprint(
         value: serde_json::Value,
     }
     let mut conn = pool.get().await.unwrap();
-    diesel::sql_query("SELECT jsonb_build_object('events',(SELECT jsonb_agg(to_jsonb(e) ORDER BY e.pk) FROM canonical_events e WHERE e.realm_id=$1),'commits',(SELECT jsonb_agg(to_jsonb(c) ORDER BY c.stream_position,c.commit_id) FROM realm_commits c WHERE c.realm_id=$1),'event_outbox',(SELECT jsonb_agg(to_jsonb(o) ORDER BY o.event_pk,o.outbox_id) FROM event_federation_outbox o),'federation_outbox',(SELECT jsonb_agg(to_jsonb(o) ORDER BY o.id) FROM federation_outbox o),'space',(SELECT jsonb_agg(to_jsonb(s) ORDER BY space_id) FROM space_current_states s WHERE realm_id=$1),'parent',(SELECT jsonb_agg(to_jsonb(p) ORDER BY space_id) FROM space_parent_current_states p WHERE realm_id=$1),'policy',(SELECT jsonb_agg(to_jsonb(c) ORDER BY space_id) FROM space_child_scope_policy_current_states c WHERE realm_id=$1)) AS value")
+    diesel::sql_query("SELECT jsonb_build_object('events',(SELECT jsonb_agg(to_jsonb(e) ORDER BY e.pk) FROM canonical_events e WHERE e.realm_id=$1),'commits',(SELECT jsonb_agg(to_jsonb(c) ORDER BY c.stream_position,c.commit_id) FROM realm_commits c WHERE c.realm_id=$1),'event_outbox',(SELECT jsonb_agg(to_jsonb(o) ORDER BY o.event_pk,o.outbox_id) FROM event_federation_outbox o),'federation_outbox',(SELECT jsonb_agg(to_jsonb(o) ORDER BY o.id) FROM federation_outbox o),'space',(SELECT jsonb_agg(to_jsonb(s) ORDER BY space_id) FROM space_current_states s WHERE realm_id=$1),'parent',(SELECT jsonb_agg(to_jsonb(p) ORDER BY space_id) FROM space_parent_current_states p WHERE realm_id=$1)) AS value")
         .bind::<Text,_>(realm.as_str()).get_result::<Row>(&mut conn).await.unwrap().value
 }
 

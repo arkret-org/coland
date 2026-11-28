@@ -1,12 +1,5 @@
-//! The three registered `ak.space.create` results at one RealmCommit cut,
-//! and the `ak.space.archive` / `ak.space.restore` lifecycle successor of the
-//! `space` family.
-//!
-//! `space` is metadata only. The structural parent and child scope policy have
-//! their own current families; an absent signed member becomes an explicit
-//! genesis `null` in those families. These writers run inside the
-//! Event/Commit transaction, while the caller holds the Realm authority row
-//! lock.
+//! Space metadata and its structural parent are independent current families.
+//! Creation writes both inside the Event/Commit transaction under the Realm authority lock.
 
 use coland_storage::{PersistenceError, PersistenceResult};
 use diesel::sql_types::{BigInt, Jsonb, Text, Timestamptz};
@@ -24,10 +17,6 @@ struct ParentCurrentRow {
     parent_position: i64,
     #[diesel(sql_type = Jsonb)]
     parent: Value,
-    #[diesel(sql_type = BigInt)]
-    policy_position: i64,
-    #[diesel(sql_type = Jsonb)]
-    policy: Value,
 }
 
 #[derive(diesel::QueryableByName)]
@@ -50,7 +39,6 @@ pub(crate) struct SpaceCreateValues {
     pub(crate) space_id: arkret_wire::SpaceId,
     pub(crate) space: Value,
     pub(crate) parent: Value,
-    pub(crate) child_scope_policy: Value,
 }
 
 fn reject(detail: impl Into<String>) -> PersistenceError {
@@ -71,8 +59,8 @@ fn reject_lifecycle(code: coland_storage::ConflictCode, detail: &str) -> Persist
     PersistenceError::Conflict(format!("{}: {detail}", code.as_str()))
 }
 
-/// Derive the three registry results from the signed Event, without trusting
-/// a payload-provided object id, parent in metadata, or synthesized policy.
+/// Derive the metadata and parent results from the signed Event, without trusting
+/// a payload-provided object id or parent in metadata.
 pub(crate) fn space_create_current_values(
     event: &arkret_wire::Event,
 ) -> PersistenceResult<SpaceCreateValues> {
@@ -114,25 +102,21 @@ pub(crate) fn space_create_current_values(
         return Err(reject("space_parent_cycle"));
     }
     let parent = json!({"parent_space_id": object.parent_space_id.as_ref()});
-    let child_scope_policy =
-        serde_json::to_value(&object.child_scope_policy).map_err(PersistenceError::database)?;
     let mut space = serde_json::to_value(&object).map_err(PersistenceError::database)?;
     let members = space.as_object_mut().ok_or_else(|| {
         PersistenceError::SchemaViolation("Space create object is not an object".to_owned())
     })?;
     members.remove("parent_space_id");
-    members.remove("child_scope_policy");
     members.insert("id".to_owned(), json!(space_id));
     members.insert("state".to_owned(), json!("active"));
     Ok(SpaceCreateValues {
         space_id,
         space,
         parent,
-        child_scope_policy,
     })
 }
 
-/// Verify the target's lifecycle, hierarchy and policy at one locked Realm cut.
+/// Verify the target's lifecycle and hierarchy at one locked Realm cut.
 pub(crate) async fn require_parent_in_connection(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
@@ -142,21 +126,17 @@ pub(crate) async fn require_parent_in_connection(
     let parent = diesel::sql_query(
         "SELECT s.realm_id,s.value AS space,\
                 p.current_commit_id AS parent_commit_id,\
-                p.current_stream_position AS parent_position,p.value AS parent,\
-                c.current_commit_id AS policy_commit_id,\
-                c.current_stream_position AS policy_position,c.value AS policy \
+                p.current_stream_position AS parent_position,p.value AS parent \
          FROM space_current_states s \
          JOIN space_parent_current_states p ON p.space_id=s.space_id AND p.realm_id=s.realm_id \
-         JOIN space_child_scope_policy_current_states c ON c.space_id=s.space_id AND c.realm_id=s.realm_id \
          JOIN realm_commits rc ON rc.commit_id=s.current_commit_id \
            AND rc.realm_id=s.realm_id \
            AND rc.stream_position=s.current_stream_position \
            AND rc.stream_ref->>'kind'='realm' \
            AND rc.stream_ref->>'realm_id'=s.realm_id \
          JOIN realm_commits pc ON pc.commit_id=p.current_commit_id AND pc.realm_id=p.realm_id AND pc.stream_position=p.current_stream_position AND pc.stream_ref=rc.stream_ref \
-         JOIN realm_commits qc ON qc.commit_id=c.current_commit_id AND qc.realm_id=c.realm_id AND qc.stream_position=c.current_stream_position AND qc.stream_ref=rc.stream_ref \
          WHERE s.space_id=$1 AND s.realm_id=$2 AND s.current_stream_position<$3 \
-         FOR SHARE OF s,p,c",
+         FOR SHARE OF s,p",
     )
     .bind::<Text, _>(parent_id)
     .bind::<Text, _>(event.realm_id.as_str())
@@ -167,7 +147,7 @@ pub(crate) async fn require_parent_in_connection(
     .map_err(PersistenceError::database)?
     .ok_or_else(|| reject("space_parent_unreadable"))?;
     debug_assert_eq!(parent.realm_id, event.realm_id.as_str());
-    if parent.parent_position >= position || parent.policy_position >= position {
+    if parent.parent_position >= position {
         return Err(reject("space_parent_unreadable"));
     }
     if parent.space.get("state") != Some(&json!("active")) {
@@ -183,28 +163,7 @@ pub(crate) async fn require_parent_in_connection(
     {
         return Err(reject("space_parent_unreadable"));
     }
-    require_encrypted_placement(conn, &event.realm_id, &parent.policy).await
-}
-
-pub(crate) async fn require_encrypted_placement(
-    conn: &mut AsyncPgConnection,
-    realm: &arkret_wire::RealmId,
-    requirement: &Value,
-) -> PersistenceResult<()> {
-    match requirement {
-        Value::Null | Value::Bool(false) => Ok(()),
-        Value::Bool(true) => {
-            let scope = arkret_wire::ScopeRef::Realm { realm_id: realm.clone() };
-            let key = crate::mls_group_current_states::scope_key(&scope)?;
-            let group = crate::mls_group_current_states::locked_group(conn, &key).await?;
-            if group.is_some_and(|group| group.value.effective_scope == scope) {
-                Ok(())
-            } else {
-                Err(reject(arkret_wire::ErrorCode::POLICY_VIOLATION))
-            }
-        }
-        _ => Err(reject(arkret_wire::ErrorCode::SCHEMA_VIOLATION)),
-    }
+    Ok(())
 }
 
 pub(crate) async fn commit_space_create_current_states_in_connection(
@@ -239,10 +198,6 @@ pub(crate) async fn commit_space_create_current_states_in_connection(
     let rows = [
         ("space_current_states", &values.space),
         ("space_parent_current_states", &values.parent),
-        (
-            "space_child_scope_policy_current_states",
-            &values.child_scope_policy,
-        ),
     ];
     for (table, value) in rows {
         let query = format!(
@@ -407,7 +362,7 @@ pub(crate) async fn commit_space_transition_in_connection(
     }
     Ok(())
 }
-/// Update metadata and its independent child-policy cell atomically.
+/// Apply the metadata patch against its accepted predecessor.
 pub(crate) async fn commit_space_update_in_connection(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
@@ -475,62 +430,50 @@ pub(crate) async fn commit_space_update_in_connection(
             return Err(reject("Space expected_state_digest differs from current"));
         }
     }
-    if let Some(policy) = &payload.child_scope_policy {
-        let value = serde_json::to_value(policy).map_err(PersistenceError::database)?;
-        let changed = diesel::sql_query("UPDATE space_child_scope_policy_current_states SET current_commit_id=$3,current_stream_position=$4,value=$5,updated_at=$6 WHERE realm_id=$1 AND space_id=$2 AND current_stream_position<$4")
-            .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(payload.space_id.as_str())
-            .bind::<Text,_>(commit.commit_id.as_str()).bind::<BigInt,_>(position)
-            .bind::<Jsonb,_>(&value).bind::<Timestamptz,_>(commit.committed_at)
-            .execute(&mut *conn).await.map_err(PersistenceError::database)?;
-        if changed != 1 {
-            return Err(reject("Space policy current is missing or not earlier"));
+    let patch = &payload.patch;
+    for (path, _) in patch.iter() {
+        let root = path.split('.').next().unwrap_or(path);
+        if !matches!(
+            root,
+            "kind"
+                | "rank"
+                | "schema_refs"
+                | "title"
+                | "summary"
+                | "labels"
+                | "fields"
+                | "avatar_blob_ref"
+                | "encrypted_metadata"
+        ) || arkret_wire::patch::reducer_managed_patch_reason("space", path).is_some()
+            || arkret_wire::forbidden_wire::forbidden_wire_path_hard_reject(
+                "space_patch_payload",
+                path,
+            )
+        {
+            return Err(PersistenceError::SchemaViolation(format!(
+                "Space update patch path is forbidden: {path}"
+            )));
         }
     }
-    if let Some(patch) = &payload.patch {
-        for (path, _) in patch.iter() {
-            let root = path.split('.').next().unwrap_or(path);
-            if !matches!(
-                root,
-                "kind"
-                    | "rank"
-                    | "schema_refs"
-                    | "title"
-                    | "summary"
-                    | "labels"
-                    | "fields"
-                    | "avatar_blob_ref"
-                    | "encrypted_metadata"
-            ) || arkret_wire::patch::reducer_managed_patch_reason("space", path).is_some()
-                || arkret_wire::forbidden_wire::forbidden_wire_path_hard_reject(
-                    "space_patch_payload",
-                    path,
-                )
-            {
-                return Err(PersistenceError::SchemaViolation(format!(
-                    "Space update patch path is forbidden: {path}"
-                )));
-            }
-        }
-        let mut post = patch
-            .apply_for_typed_target(&row.value, payload.space_id.as_str())
-            .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
-        post["updated_by"] =
-            serde_json::to_value(&event.actor_id).map_err(PersistenceError::database)?;
-        post["updated_at"] = json!(arkret_canonical::format_timestamp_canonical(
-            event.created_at.max(commit.committed_at)
-        ));
-        let next: Space = serde_json::from_value(post.clone())
-            .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
-        next.validate()
-            .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
-        let changed = diesel::sql_query("UPDATE space_current_states SET current_commit_id=$3,current_stream_position=$4,value=$5,updated_at=$6 WHERE realm_id=$1 AND space_id=$2 AND current_commit_id=$7")
-            .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(payload.space_id.as_str())
-            .bind::<Text,_>(commit.commit_id.as_str()).bind::<BigInt,_>(position)
-            .bind::<Jsonb,_>(&post).bind::<Timestamptz,_>(commit.committed_at)
-            .bind::<Text,_>(&row.current_commit_id).execute(&mut *conn).await.map_err(PersistenceError::database)?;
-        if changed != 1 {
-            return Err(reject("Space current changed before update"));
-        }
+    let mut post = patch
+        .apply_for_typed_target(&row.value, payload.space_id.as_str())
+        .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
+    post["updated_by"] =
+        serde_json::to_value(&event.actor_id).map_err(PersistenceError::database)?;
+    post["updated_at"] = json!(arkret_canonical::format_timestamp_canonical(
+        event.created_at.max(commit.committed_at)
+    ));
+    let next: Space = serde_json::from_value(post.clone())
+        .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
+    next.validate()
+        .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
+    let changed = diesel::sql_query("UPDATE space_current_states SET current_commit_id=$3,current_stream_position=$4,value=$5,updated_at=$6 WHERE realm_id=$1 AND space_id=$2 AND current_commit_id=$7")
+        .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(payload.space_id.as_str())
+        .bind::<Text,_>(commit.commit_id.as_str()).bind::<BigInt,_>(position)
+        .bind::<Jsonb,_>(&post).bind::<Timestamptz,_>(commit.committed_at)
+        .bind::<Text,_>(&row.current_commit_id).execute(&mut *conn).await.map_err(PersistenceError::database)?;
+    if changed != 1 {
+        return Err(reject("Space current changed before update"));
     }
     Ok(())
 }
@@ -553,17 +496,13 @@ async fn foreign_parent_is_readable(
         #[diesel(sql_type = Jsonb)]
         parent: Value,
         #[diesel(sql_type = Jsonb)]
-        policy: Value,
-        #[diesel(sql_type = Jsonb)]
         space_revision: Value,
         #[diesel(sql_type = Jsonb)]
         parent_revision: Value,
-        #[diesel(sql_type = Jsonb)]
-        policy_revision: Value,
         #[diesel(sql_type = diesel::sql_types::Bool)]
         covered: bool,
     }
-    let candidate = diesel::sql_query("SELECT s.realm_id,s.value AS space,p.value AS parent,c.value AS policy,jsonb_build_object('commit_id',s.current_commit_id,'stream_position',s.current_stream_position) AS space_revision,jsonb_build_object('commit_id',p.current_commit_id,'stream_position',p.current_stream_position) AS parent_revision,jsonb_build_object('commit_id',c.current_commit_id,'stream_position',c.current_stream_position) AS policy_revision,(se.pk IS NOT NULL AND pe.pk IS NOT NULL AND ce.pk IS NOT NULL) AS covered FROM space_current_states s JOIN realm_authorities a ON a.realm_id=s.realm_id AND a.generation=0 JOIN space_parent_current_states p ON p.realm_id=s.realm_id AND p.space_id=s.space_id JOIN space_child_scope_policy_current_states c ON c.realm_id=s.realm_id AND c.space_id=s.space_id LEFT JOIN realm_commits sc ON sc.realm_id=s.realm_id AND sc.commit_id=s.current_commit_id AND sc.stream_position=s.current_stream_position AND sc.stream_ref->>'kind'='realm' AND sc.stream_ref->>'realm_id'=s.realm_id LEFT JOIN canonical_events se ON se.pk=sc.event_pk AND se.state='committed' LEFT JOIN realm_commits pc ON pc.realm_id=p.realm_id AND pc.commit_id=p.current_commit_id AND pc.stream_position=p.current_stream_position AND pc.stream_ref=jsonb_build_object('kind','realm','realm_id',s.realm_id) LEFT JOIN canonical_events pe ON pe.pk=pc.event_pk AND pe.state='committed' LEFT JOIN realm_commits cc ON cc.realm_id=c.realm_id AND cc.commit_id=c.current_commit_id AND cc.stream_position=c.current_stream_position AND cc.stream_ref=jsonb_build_object('kind','realm','realm_id',s.realm_id) LEFT JOIN canonical_events ce ON ce.pk=cc.event_pk AND ce.state='committed' WHERE s.space_id=$1 AND s.realm_id<>$2")
+    let candidate = diesel::sql_query("SELECT s.realm_id,s.value AS space,p.value AS parent,jsonb_build_object('commit_id',s.current_commit_id,'stream_position',s.current_stream_position) AS space_revision,jsonb_build_object('commit_id',p.current_commit_id,'stream_position',p.current_stream_position) AS parent_revision,(se.pk IS NOT NULL AND pe.pk IS NOT NULL) AS covered FROM space_current_states s JOIN realm_authorities a ON a.realm_id=s.realm_id AND a.generation=0 JOIN space_parent_current_states p ON p.realm_id=s.realm_id AND p.space_id=s.space_id LEFT JOIN realm_commits sc ON sc.realm_id=s.realm_id AND sc.commit_id=s.current_commit_id AND sc.stream_position=s.current_stream_position AND sc.stream_ref->>'kind'='realm' AND sc.stream_ref->>'realm_id'=s.realm_id LEFT JOIN canonical_events se ON se.pk=sc.event_pk AND se.state='committed' LEFT JOIN realm_commits pc ON pc.realm_id=p.realm_id AND pc.commit_id=p.current_commit_id AND pc.stream_position=p.current_stream_position AND pc.stream_ref=jsonb_build_object('kind','realm','realm_id',s.realm_id) LEFT JOIN canonical_events pe ON pe.pk=pc.event_pk AND pe.state='committed' WHERE s.space_id=$1 AND s.realm_id<>$2")
         .bind::<Text,_>(parent_id.as_str()).bind::<Text,_>(event.realm_id.as_str())
         .get_result::<Candidate>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
     let Some(candidate) = candidate else {
@@ -576,7 +515,6 @@ async fn foreign_parent_is_readable(
         || space.id.as_ref() != Some(parent_id)
         || space.realm_id.as_str() != candidate.realm_id
         || space.parent_space_id.is_some()
-        || space.child_scope_policy.is_some()
         || candidate
             .parent
             .as_object()
@@ -585,7 +523,6 @@ async fn foreign_parent_is_readable(
             candidate.parent["parent_space_id"].clone(),
         )
         .is_err()
-        || serde_json::from_value::<Option<bool>>(candidate.policy.clone()).is_err()
     {
         return Ok(false);
     }
@@ -600,9 +537,6 @@ async fn foreign_parent_is_readable(
             arkret_wire::CurrentSelector::SpaceParent {
                 space_id: parent_id.clone(),
             },
-            arkret_wire::CurrentSelector::SpaceChildScopePolicy {
-                space_id: parent_id.clone(),
-            },
         ];
         let Some((_, entries)) =
             crate::replica_authorization::exact_current_evidence(conn, &stream, &selectors).await?
@@ -612,7 +546,6 @@ async fn foreign_parent_is_readable(
         for (entry, (stored_revision, stored_value)) in entries.iter().zip([
             (&candidate.space_revision, &candidate.space),
             (&candidate.parent_revision, &candidate.parent),
-            (&candidate.policy_revision, &candidate.policy),
         ]) {
             let arkret_wire::CurrentState::Value {
                 revision, value, ..
@@ -713,7 +646,6 @@ pub(crate) async fn commit_space_parent_in_connection(
         space_id: payload.space_id.clone(),
         space: metadata.value,
         parent: json!({"parent_space_id":payload.parent_space_id}),
-        child_scope_policy: Value::Null,
     };
     if payload.parent_space_id.as_ref() == Some(&payload.space_id) {
         return Err(reject("space_parent_cycle"));
@@ -732,7 +664,7 @@ pub(crate) async fn commit_space_parent_in_connection(
         if id == payload.space_id || !seen.insert(id.clone()) {
             return Err(reject("space_parent_cycle"));
         }
-        let ancestor = diesel::sql_query("SELECT s.realm_id,s.value AS space,p.current_stream_position AS parent_position,p.value AS parent,c.current_stream_position AS policy_position,c.value AS policy FROM space_current_states s JOIN space_parent_current_states p ON p.realm_id=s.realm_id AND p.space_id=s.space_id JOIN space_child_scope_policy_current_states c ON c.realm_id=s.realm_id AND c.space_id=s.space_id JOIN realm_commits sc ON sc.realm_id=s.realm_id AND sc.commit_id=s.current_commit_id AND sc.stream_position=s.current_stream_position AND sc.stream_ref->>'kind'='realm' AND sc.stream_ref->>'realm_id'=s.realm_id JOIN realm_commits pc ON pc.realm_id=p.realm_id AND pc.commit_id=p.current_commit_id AND pc.stream_position=p.current_stream_position AND pc.stream_ref=sc.stream_ref JOIN realm_commits cc ON cc.realm_id=c.realm_id AND cc.commit_id=c.current_commit_id AND cc.stream_position=c.current_stream_position AND cc.stream_ref=sc.stream_ref WHERE s.space_id=$1 AND s.current_stream_position<$2 FOR SHARE OF s,p,c")
+        let ancestor = diesel::sql_query("SELECT s.realm_id,s.value AS space,p.current_stream_position AS parent_position,p.value AS parent FROM space_current_states s JOIN space_parent_current_states p ON p.realm_id=s.realm_id AND p.space_id=s.space_id JOIN realm_commits sc ON sc.realm_id=s.realm_id AND sc.commit_id=s.current_commit_id AND sc.stream_position=s.current_stream_position AND sc.stream_ref->>'kind'='realm' AND sc.stream_ref->>'realm_id'=s.realm_id JOIN realm_commits pc ON pc.realm_id=p.realm_id AND pc.commit_id=p.current_commit_id AND pc.stream_position=p.current_stream_position AND pc.stream_ref=sc.stream_ref WHERE s.space_id=$1 AND s.current_stream_position<$2 FOR SHARE OF s,p")
             .bind::<Text,_>(id.as_str()).bind::<BigInt,_>(position)
             .get_result::<ParentCurrentRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
             .ok_or_else(|| reject("space_parent_unreadable"))?;
@@ -740,7 +672,6 @@ pub(crate) async fn commit_space_parent_in_connection(
             serde_json::from_value(ancestor.space).map_err(PersistenceError::database)?;
         if ancestor_space.id.as_ref() != Some(&id) || ancestor_space.realm_id != event.realm_id
             || ancestor.parent_position >= position
-            || ancestor.policy_position >= position
         {
             return Err(reject("space_parent_unreadable"));
         }

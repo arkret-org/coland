@@ -141,7 +141,6 @@ const AUDITED_FAMILIES: &[&str] = &[
     "rsvp_current_states",
     "space_current_states",
     "space_parent_current_states",
-    "space_child_scope_policy_current_states",
     "realm_set_default_strand_current_states",
     "message_revision_current_states",
     "mls_group_current_states",
@@ -2048,7 +2047,6 @@ pub(crate) fn disclose_to_actor(
                 if space.id.as_ref() != Some(space_id)
                     || space.realm_id != material.realm_id
                     || space.parent_space_id.is_some()
-                    || space.child_scope_policy.is_some()
                 {
                     return Err(rejected(
                         "Space metadata is not a Realm-scoped registered value",
@@ -2068,13 +2066,6 @@ pub(crate) fn disclose_to_actor(
                     .map_err(PersistenceError::database)?;
                 }
                 *space_families.entry(space_id.clone()).or_insert(0_u8) |= 2;
-            }
-            CurrentSelector::SpaceChildScopePolicy { space_id } => {
-                serde_json::from_value::<
-                    Option<bool>,
-                >(value.clone())
-                .map_err(PersistenceError::database)?;
-                *space_families.entry(space_id.clone()).or_insert(0_u8) |= 4;
             }
             CurrentSelector::MessageRevision { message_id } => {
                 let source_floor = match source_stream_ref {
@@ -2174,7 +2165,7 @@ pub(crate) fn disclose_to_actor(
             }
         }
     }
-    if space_families.values().any(|families| *families != 7) {
+    if space_families.values().any(|families| *families != 3) {
         return Err(rejected(
             "a Space omits one of its registered sibling families",
         ));
@@ -2938,13 +2929,6 @@ mod tests {
                     7,
                     json!({"parent_space_id":null}),
                 ),
-                row(
-                    CurrentSelector::SpaceChildScopePolicy {
-                        space_id: id.clone(),
-                    },
-                    7,
-                    Value::Null,
-                ),
             ]);
         }
         material.current_state_entries.push(row(
@@ -3015,13 +2999,6 @@ mod tests {
                 7,
                 json!({"parent_space_id":null}),
             ),
-            row(
-                CurrentSelector::SpaceChildScopePolicy {
-                    space_id: space_id.clone(),
-                },
-                7,
-                Value::Null,
-            ),
         ]);
         assert_eq!(
             disclose_to_account(material.clone(), &founder, &facts)
@@ -3034,7 +3011,9 @@ mod tests {
         assert!(disclose_to_account(incomplete, &founder, &facts).is_err());
         let mut space = serde_json::to_value(space).unwrap();
         space["scope_circle_id"] = json!("retired-private-scope");
-        let index = material.current_state_entries.len() - 3;
+        let index = material.current_state_entries.iter().position(|row| matches!(
+            row, CurrentState::Value { selector: CurrentSelector::Space { space_id: id }, .. } if id == &space_id
+        )).unwrap();
         material.current_state_entries[index] = row(
             CurrentSelector::Space { space_id },
             7,

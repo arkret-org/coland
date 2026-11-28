@@ -443,14 +443,6 @@ async fn prepare_self_event_unit(
         coland_storage::DirectConversationAdmissionCut::Passed => true,
         coland_storage::DirectConversationAdmissionCut::NotDirectConversation => false,
     };
-    if matches!(event.kind, arkret_wire::EventKind::SpaceCreate | arkret_wire::EventKind::SpaceParent
-        | arkret_wire::EventKind::StrandCreate | arkret_wire::EventKind::StrandMove | arkret_wire::EventKind::StrandReorder)
-        && let arkret_wire::ScopeRef::Realm { realm_id } = &event.scope_ref
-        && realm_id == &event.realm_id
-        && let Some(group) = state.mls_groups().current(&event.scope_ref).await?
-    {
-        state.projections().observe_ordinary_mls_group(&group);
-    }
     if !private_governance
         && !direct_conversation
         && event.kind != arkret_wire::EventKind::CallState

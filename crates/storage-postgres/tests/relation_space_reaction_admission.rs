@@ -67,7 +67,7 @@ async fn value(pool: &PgPool, query: &str, key: &str) -> Value {
 
 async fn space_write_footprint(pool: &PgPool, realm: &arkret_wire::RealmId) -> Value {
     let mut conn = pool.get().await.unwrap();
-    diesel::sql_query("SELECT jsonb_build_object('events',(SELECT coalesce(jsonb_agg(to_jsonb(e) ORDER BY to_jsonb(e)::text),'[]'::jsonb) FROM canonical_events e WHERE realm_id=$1),'commits',(SELECT coalesce(jsonb_agg(to_jsonb(c) ORDER BY to_jsonb(c)::text),'[]'::jsonb) FROM realm_commits c WHERE realm_id=$1),'space',(SELECT coalesce(jsonb_agg(to_jsonb(s) ORDER BY space_id),'[]'::jsonb) FROM space_current_states s WHERE realm_id=$1),'parent',(SELECT coalesce(jsonb_agg(to_jsonb(p) ORDER BY space_id),'[]'::jsonb) FROM space_parent_current_states p WHERE realm_id=$1),'policy',(SELECT coalesce(jsonb_agg(to_jsonb(p) ORDER BY space_id),'[]'::jsonb) FROM space_child_scope_policy_current_states p WHERE realm_id=$1),'outbox',(SELECT coalesce(jsonb_agg(to_jsonb(o) ORDER BY to_jsonb(o)::text),'[]'::jsonb) FROM federation_outbox o),'event_outbox',(SELECT coalesce(jsonb_agg(to_jsonb(o) ORDER BY to_jsonb(o)::text),'[]'::jsonb) FROM event_federation_outbox o)) AS value")
+    diesel::sql_query("SELECT jsonb_build_object('events',(SELECT coalesce(jsonb_agg(to_jsonb(e) ORDER BY to_jsonb(e)::text),'[]'::jsonb) FROM canonical_events e WHERE realm_id=$1),'commits',(SELECT coalesce(jsonb_agg(to_jsonb(c) ORDER BY to_jsonb(c)::text),'[]'::jsonb) FROM realm_commits c WHERE realm_id=$1),'space',(SELECT coalesce(jsonb_agg(to_jsonb(s) ORDER BY space_id),'[]'::jsonb) FROM space_current_states s WHERE realm_id=$1),'parent',(SELECT coalesce(jsonb_agg(to_jsonb(p) ORDER BY space_id),'[]'::jsonb) FROM space_parent_current_states p WHERE realm_id=$1),'outbox',(SELECT coalesce(jsonb_agg(to_jsonb(o) ORDER BY to_jsonb(o)::text),'[]'::jsonb) FROM federation_outbox o),'event_outbox',(SELECT coalesce(jsonb_agg(to_jsonb(o) ORDER BY to_jsonb(o)::text),'[]'::jsonb) FROM event_federation_outbox o)) AS value")
         .bind::<Text,_>(realm.as_str()).get_result::<ValueRow>(&mut conn).await.unwrap().value
 }
 
@@ -853,9 +853,6 @@ async fn space_update_preserves_scope_and_rolls_back_both_branches_on_rejection(
     ] {
         assert_eq!(after[retained], before[retained]);
     }
-    let policy_query =
-        "SELECT value FROM space_child_scope_policy_current_states WHERE space_id=$1";
-    let policy = value(&pool, policy_query, id.as_str()).await;
     let count_before = count(&pool, "realm_commits", &realm).await;
     let footprint_before = space_write_footprint(&pool, &realm).await;
     for (actor, payload, reason) in [
@@ -889,7 +886,6 @@ async fn space_update_preserves_scope_and_rolls_back_both_branches_on_rejection(
         let error = uow.commit_event(request).await.unwrap_err().to_string();
         assert!(error.contains(reason), "{error}");
         assert_eq!(value(&pool, query, id.as_str()).await, after);
-        assert_eq!(value(&pool, policy_query, id.as_str()).await, policy);
         assert_eq!(count(&pool, "realm_commits", &realm).await, count_before);
         assert_eq!(space_write_footprint(&pool, &realm).await, footprint_before);
     }

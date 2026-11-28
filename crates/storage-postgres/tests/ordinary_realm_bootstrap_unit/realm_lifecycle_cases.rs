@@ -252,7 +252,6 @@ async fn terminal_child_consumer_case() {
     let before_placement = terminal_persistent_rows(&pool).await;
     for table in [
         "space_parent_current_states",
-        "space_child_scope_policy_current_states",
     ] {
         let original = before_placement[table]
             .as_array()

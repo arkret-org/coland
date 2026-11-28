@@ -838,6 +838,15 @@ async fn own_pcr_mls_genesis_refuses_mismatched_current_creator_without_membersh
 
 #[tokio::test]
 async fn own_pcr_private_profile_requires_native_root_before_accepting_exact_encrypted_original() {
+    Box::pin(recover_encrypted_profile(true)).await;
+}
+
+#[tokio::test]
+async fn prepared_inventory_binds_original_pcr_leaf_and_recoverable_root() {
+    Box::pin(recover_encrypted_profile(false)).await;
+}
+
+async fn recover_encrypted_profile(unresolved_claim: bool) {
     use arkret_crypto::content_history::*;
     use arkret_models_crypto::*;
     use coland_storage::{ActorProfileAdmissionOutcome, ActorProfileAdmissionWrite};
@@ -976,7 +985,7 @@ async fn own_pcr_private_profile_requires_native_root_before_accepting_exact_enc
         .await
         .unwrap_err();
     assert!(
-        missing.to_string().contains("missing durable root package"),
+        matches!(&missing,coland_storage::PersistenceError::Conflict(message) if message == "failed_precondition: original root admission unavailable"),
         "{missing}"
     );
     assert!(
@@ -1038,6 +1047,7 @@ async fn own_pcr_private_profile_requires_native_root_before_accepting_exact_enc
         &package,
         &transaction,
         &genesis,
+        unresolved_claim,
     ))
     .await;
     assert_eq!(restored.root_context, context);

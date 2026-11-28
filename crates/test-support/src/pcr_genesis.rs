@@ -231,6 +231,28 @@ impl PcrGenesisFixture {
             .await
     }
 
+    /// Model the separately registered Account that owns private recovery rows.
+    pub async fn register_private_owner(
+        &self,
+        persistence: &dyn coland_storage::PersistenceStore,
+    ) -> coland_storage::PersistenceResult<()> {
+        let account = &self.history.account;
+        persistence
+            .accounts()
+            .put(&coland_storage::AccountRecord {
+                pk: coland_storage::AccountPk(0),
+                principal_id: account.principal_id.clone(),
+                station_id: account.station_id.clone(),
+                localpart: format!("recovery-{}", uuid::Uuid::now_v7().simple()),
+                display_name: None,
+                biography: None,
+                avatar_blob_ref: None,
+                created_at: self.history.events[0].created_at,
+            })
+            .await?;
+        Ok(())
+    }
+
     /// Admit the genesis and return the founding device's gate selector, taken
     /// from the admission result rather than from the fixture's own material.
     pub async fn admit_founding_device(

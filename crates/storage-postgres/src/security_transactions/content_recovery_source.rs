@@ -39,6 +39,24 @@ pub(super) async fn original(
     event_id: &EventId,
     realm: &RealmId,
 ) -> PersistenceResult<(Event, RealmCommit)> {
+    original_in_scope(
+        conn,
+        event_id,
+        &arkret_wire::ScopeRef::Realm {
+            realm_id: realm.clone(),
+        },
+    )
+    .await
+}
+
+pub(super) async fn original_in_scope(
+    conn: &mut AsyncPgConnection,
+    event_id: &EventId,
+    scope: &arkret_wire::ScopeRef,
+) -> PersistenceResult<(Event, RealmCommit)> {
+    let realm = scope
+        .realm_id_opt()
+        .ok_or_else(|| unavailable("original has no effective Realm"))?;
     let token = crate::ids::parse_event_id(event_id.as_str())
         .ok_or_else(|| unavailable("Event ID is invalid"))?;
     let row = sql_query(
@@ -59,10 +77,10 @@ pub(super) async fn original(
             .map_err(unavailable)?;
     if event.event_id != *event_id
         || event.realm_id != *realm
-        || event.scope_ref
-            != (arkret_wire::ScopeRef::Realm {
-                realm_id: realm.clone(),
-            })
+        || &event.scope_ref != scope
+        || commit.realm_id != *realm
+        || commit.stream_ref
+            != arkret_wire::CommitStreamRef::from_scope(scope, None).map_err(unavailable)?
         || event
             .derive_event_id_with_digest_suite(suite)
             .map_err(unavailable)?
@@ -72,6 +90,9 @@ pub(super) async fn original(
     {
         return Err(unavailable("original bytes or covering Commit disagree"));
     }
+    commit
+        .verify_commit_id_matches_content()
+        .map_err(unavailable)?;
     Ok((event, commit))
 }
 
@@ -104,6 +125,23 @@ pub(super) async fn qualify_in_connection(
     .await
     .map_err(crate::PgTransactionError::into_persistence)?
     .ok_or_else(|| unavailable("replacement cut disappeared"))?;
+    let completion = native_completion(conn, &reader.account_id, &reader.device_id, cut).await?;
+    if chrono::Utc::now() >= expires_at {
+        return Err(unavailable("current replacement credential expired"));
+    }
+    Ok(completion)
+}
+
+/// Verify the signed identity unit independently of inventory input. The
+/// coordinator already holds the PCR owner lock; an HTTP reader also needs
+/// its own current credential and delivery lease.
+pub(super) async fn native_completion(
+    conn: &mut AsyncPgConnection,
+    account: &arkret_wire::AccountId,
+    device: &arkret_wire::DeviceId,
+    cut: crate::pcr_device_status_reader::ConfirmedPcrDeviceStatusCut,
+) -> PersistenceResult<RecoveryCompletionAttestation> {
+    let realm = cut.authority.realm_id.clone();
     let authorization = cut
         .authority
         .authorization
@@ -125,8 +163,8 @@ pub(super) async fn qualify_in_connection(
          WHERE kind='recovery' AND principal_id=$1 AND station_id=$2 \
            AND recovery_completion->'completion_attestation'->'device_authorization_event_ref'->>'event_id'=$3 LIMIT 2",
     )
-    .bind::<Text, _>(reader.account_id.principal_id.as_str())
-    .bind::<Text, _>(reader.account_id.station_id.as_str())
+    .bind::<Text, _>(account.principal_id.as_str())
+    .bind::<Text, _>(account.station_id.as_str())
     .bind::<Text, _>(authorization.event_id.as_str())
     .get_results::<TransactionIdRow>(&mut *conn)
     .await
@@ -143,8 +181,8 @@ pub(super) async fn qualify_in_connection(
     let completed = transaction.recovery().map_err(unavailable)?;
     let receipt = &completed.recovery_receipt;
     let completion = completed.completion_attestation.clone();
-    if completed.account_id != reader.account_id
-        || receipt.new_device_id != reader.device_id
+    if completed.account_id != *account
+        || receipt.new_device_id != *device
         || receipt.recovery_unit.events[1].event.event_id != authorization.event_id
         || authorization.payload.recovery_session_id.as_ref() != Some(&receipt.recovery_session_id)
         || cut.authority.current_generation != Some(receipt.new_model_generation_ref)
@@ -202,11 +240,8 @@ pub(super) async fn qualify_in_connection(
             "original consecutive Commit pair differs from signed R/C",
         ));
     }
-    arkret_signatures::verify_device_authorize_possession(
-        &authorization.payload,
-        &reader.account_id,
-    )
-    .map_err(unavailable)?;
+    arkret_signatures::verify_device_authorize_possession(&authorization.payload, account)
+        .map_err(unavailable)?;
     let device_key = arkret_signatures::PublicKeyMaterial::Ed25519Multibase {
         value: authorization
             .payload
@@ -221,9 +256,9 @@ pub(super) async fn qualify_in_connection(
             .account_device_producer()
             .map_err(unavailable)?
             .ok_or_else(|| unavailable("original has no actual Device producer"))?;
-        if event.actor_id.as_account_id() != Some(&reader.account_id)
-            || producer.account_id != reader.account_id
-            || producer.device_id != reader.device_id
+        if event.actor_id.as_account_id() != Some(account)
+            || producer.account_id != *account
+            || producer.device_id != *device
             || event.executed_by.is_some()
         {
             return Err(unavailable(
@@ -263,9 +298,6 @@ pub(super) async fn qualify_in_connection(
         return Err(unavailable(
             "independent accepted predecessor does not precede the native pair",
         ));
-    }
-    if chrono::Utc::now() >= expires_at {
-        return Err(unavailable("current replacement credential expired"));
     }
     Ok(completion)
 }

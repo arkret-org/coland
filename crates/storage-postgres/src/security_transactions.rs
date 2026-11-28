@@ -18,6 +18,7 @@ use super::{
 mod content_recovery_preparation;
 mod content_recovery_source;
 mod recovery_census_cut;
+mod recovery_inventory;
 mod recovery_unit;
 mod replacement_freshness;
 mod revoke_unit;
@@ -621,6 +622,23 @@ async fn insert_step_attempt(
 
 #[async_trait]
 impl SecurityTransactionStore for PgSecurityTransactionStore {
+    async fn prepare_content_recoveries(
+        &self,
+        service: &arkret_wire::DidCoreId,
+        materials: Option<&dyn coland_storage::RecoveryInventoryPublicMaterial>,
+    ) -> PersistenceResult<usize> {
+        recovery_inventory::sweep(&self.pool, service, materials).await
+    }
+
+    async fn read_content_inventory(
+        &self,
+        reader: &coland_storage::HumanPcrHistoryReader,
+        authorization: &arkret_wire::EventId,
+        reference: &arkret_wire::BlobRef,
+    ) -> PersistenceResult<coland_storage::HumanPcrHistoryRead<Vec<u8>>> {
+        recovery_inventory::read(&self.pool, reader, authorization, reference).await
+    }
+
     async fn human_content_recovery_preparation(
         &self,
         reader: &coland_storage::HumanPcrHistoryReader,

@@ -44,6 +44,19 @@ pub(crate) async fn record(
     endpoint: &ContentEndpoint,
     source_event: &EventId,
 ) -> PersistenceResult<()> {
+    retain(conn, scope, genesis, endpoint, source_event, None).await
+}
+
+/// Only an already accepted replica uses this argument. A governor creating
+/// new membership always passes None and stays behind the membership fence.
+async fn retain(
+    conn: &mut AsyncPgConnection,
+    scope: &ScopeRef,
+    genesis: &EventId,
+    endpoint: &ContentEndpoint,
+    source_event: &EventId,
+    frozen_origin: Option<(&str, serde_json::Value)>,
+) -> PersistenceResult<()> {
     let Some(account) = endpoint.actor_id.as_account_id() else {
         return Ok(());
     };
@@ -95,7 +108,17 @@ pub(crate) async fn record(
         // episode cut. It must not create a previously undiscoverable source.
         return Ok(());
     }
-    crate::content_recovery_fence::require_unfenced(conn, &endpoint.actor_id).await?;
+    if crate::content_recovery_fence::locked_active(conn, &endpoint.actor_id).await? {
+        let Some((kind, origin)) = frozen_origin else {
+            return Err(invalid("recovery fence blocks new endpoint admission"));
+        };
+        let held=sql_query("SELECT s.source AS payload FROM content_recovery_census_sources s JOIN content_recovery_episodes e USING(authorization_event_ref) WHERE e.actor_id=$1 AND e.security_completed_at IS NULL AND s.effective_scope=$2 AND s.source_kind=$3 AND s.source @> $4 LIMIT 1 FOR SHARE OF e")
+            .bind::<Jsonb,_>(serde_json::json!(endpoint.actor_id)).bind::<Jsonb,_>(&scope).bind::<Text,_>(kind).bind::<Jsonb,_>(origin)
+            .get_result::<crate::JsonPayloadRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+        if held.is_none() {
+            return Err(invalid("late replica is outside the frozen sources"));
+        }
+    }
     sql_query("INSERT INTO content_endpoint_admission_history(admission_key,effective_scope,genesis_event_ref,binding,first_source,source_event_pk,admitted_at) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(admission_key) DO NOTHING")
         .bind::<Text, _>(&key).bind::<Jsonb, _>(&scope).bind::<Text, _>(genesis.as_str())
         .bind::<Jsonb, _>(&binding).bind::<Jsonb, _>(serde_json::to_value(first_source).map_err(PersistenceError::database)?)
@@ -133,12 +156,16 @@ pub(crate) async fn record_genesis(
         authorization_event_ref: creator.authorization_event_ref,
         signature_key_base64url: creator.leaf_signature_key_base64url.to_string(),
     };
-    record(
+    retain(
         conn,
         &event.scope_ref,
         &event.event_id,
         &endpoint,
         &event.event_id,
+        Some((
+            "outgoing_event",
+            serde_json::json!({"event_ref":event.event_id}),
+        )),
     )
     .await
 }
@@ -147,18 +174,36 @@ pub(crate) async fn record_add(
     conn: &mut AsyncPgConnection,
     attestation: &MlsAddAuthorityAttestation,
 ) -> PersistenceResult<()> {
+    retain_add(conn, attestation, None).await
+}
+
+pub(crate) async fn record_replicated_add(
+    conn: &mut AsyncPgConnection,
+    attestation: &MlsAddAuthorityAttestation,
+) -> PersistenceResult<()> {
+    let receipt = &attestation.claim_receipt;
+    let origin = serde_json::json!({"source_id":receipt.source_id,"claim_request_id":receipt.claim_request_id,"request_digest":receipt.request_digest});
+    retain_add(conn, attestation, Some(("incoming_claim", origin))).await
+}
+
+async fn retain_add(
+    conn: &mut AsyncPgConnection,
+    attestation: &MlsAddAuthorityAttestation,
+    frozen_origin: Option<(&str, serde_json::Value)>,
+) -> PersistenceResult<()> {
     let endpoint = ContentEndpoint {
         actor_id: attestation.actor_id.clone(),
         endpoint: attestation.endpoint.clone(),
         authorization_event_ref: attestation.authorization_event_ref.clone(),
         signature_key_base64url: attestation.leaf_signature_key_base64url.to_string(),
     };
-    record(
+    retain(
         conn,
         &attestation.effective_scope,
         &attestation.genesis_event_ref,
         &endpoint,
         &attestation.commit_event_ref,
+        frozen_origin,
     )
     .await
 }

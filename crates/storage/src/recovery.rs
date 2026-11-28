@@ -518,8 +518,43 @@ pub trait RecoverySessionStore: Send + Sync {
     async fn update(&self, record: RecoverySessionRecord) -> PersistenceResult<()>;
 }
 
+/// Read immutable public MLS publication bytes from the Station object store.
+#[async_trait]
+pub trait RecoveryInventoryPublicMaterial: Send + Sync {
+    /// Verify the registered governor's nonce-bound current assertion before
+    /// entering the database transaction that freezes the inventory.
+    async fn governor_head(
+        &self,
+        realm: &arkret_wire::RealmId,
+        service: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<arkret_wire::RealmAuthorityCurrentAssertion>;
+
+    async fn publication(&self, blob: &crate::BlobRecord) -> PersistenceResult<Option<Vec<u8>>>;
+}
+
 #[async_trait]
 pub trait SecurityTransactionStore: Send + Sync {
+    async fn prepare_content_recoveries(
+        &self,
+        _service: &arkret_wire::DidCoreId,
+        _materials: Option<&dyn crate::RecoveryInventoryPublicMaterial>,
+    ) -> PersistenceResult<usize> {
+        Err(PersistenceError::Conflict(
+            "revision_unavailable: native recovery inventory unavailable".into(),
+        ))
+    }
+
+    async fn read_content_inventory(
+        &self,
+        _reader: &crate::HumanPcrHistoryReader,
+        _authorization: &arkret_wire::EventId,
+        _reference: &arkret_wire::BlobRef,
+    ) -> PersistenceResult<crate::HumanPcrHistoryRead<Vec<u8>>> {
+        Err(PersistenceError::Conflict(
+            "revision_unavailable: native recovery inventory unavailable".into(),
+        ))
+    }
+
     /// Observe an existing, current-holder-bound native episode. This read
     /// never creates an episode or accepts caller-provided inventory material.
     async fn human_content_recovery_preparation(

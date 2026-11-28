@@ -118,6 +118,14 @@ async fn recovery_freezes_unresolved_claims_without_fabricating_prepared_invento
         .commit_recovery_unit(fixture.write.clone())
         .await
         .unwrap();
+    assert_eq!(
+        store
+            .security_transactions()
+            .prepare_content_recoveries(&fixture.state.service_core_id(), None)
+            .await
+            .unwrap(),
+        0
+    );
     let before = footprint(&fixture).await;
     let rows = &before["content_recovery_census_sources"];
     assert_eq!(rows.as_array().unwrap().len(), 2);
@@ -722,6 +730,7 @@ async fn fixture_with_damage(
     drop(conn);
     let store = state.test_persistence();
     let mut pcr = PcrGenesisFixture::new(state.service_did());
+    pcr.register_private_owner(store.as_ref()).await.unwrap();
     pcr.admit_founding_device(store.as_ref()).await.unwrap();
     let account = pcr.history.account.clone();
     let realm = pcr.history.events[0].realm_id.clone();

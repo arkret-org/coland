@@ -21,6 +21,48 @@ pub async fn execute_erase_for_test(
         .await
 }
 
+#[async_trait::async_trait]
+impl coland_storage::RecoveryInventoryPublicMaterial for AppState {
+    async fn governor_head(
+        &self,
+        realm: &arkret_wire::RealmId,
+        service: &arkret_wire::DidCoreId,
+    ) -> coland_storage::PersistenceResult<arkret_wire::RealmAuthorityCurrentAssertion> {
+        let located =
+            crate::routing::realm_join::resolve_verified_authority_of_service(self, realm, service)
+                .await
+                .map_err(|error| {
+                    coland_storage::PersistenceError::Conflict(format!(
+                        "revision_unavailable: recovery governor {}",
+                        error.wire_code()
+                    ))
+                })?;
+        Ok(located.bundle.current_assertion)
+    }
+
+    async fn publication(
+        &self,
+        blob: &coland_storage::BlobRecord,
+    ) -> coland_storage::PersistenceResult<Option<Vec<u8>>> {
+        if blob.storage_backend != self.deliveries().object_storage_backend_name() {
+            return Ok(None);
+        }
+        let bytes = self
+            .deliveries()
+            .get_object(&blob.storage_key)
+            .await
+            .map_err(coland_storage::PersistenceError::database)?;
+        if bytes.len() as i64 != blob.size_bytes
+            || arkret_canonical::sha256_hex(&bytes) != blob.sha256
+        {
+            return Err(coland_storage::PersistenceError::Conflict(
+                "revision_unavailable: MLS publication differs from its registered Blob".into(),
+            ));
+        }
+        Ok(Some(bytes))
+    }
+}
+
 pub fn spawn(state: AppState) -> Arc<tokio::task::JoinHandle<()>> {
     let interval =
         std::time::Duration::from_secs(state.config().security_rotation_worker_interval_seconds);
@@ -29,6 +71,13 @@ pub fn spawn(state: AppState) -> Arc<tokio::task::JoinHandle<()>> {
         loop {
             ticker.tick().await;
             crate::routing::identity::recovery::sweep_rotation_worker(&state).await;
+            if let Err(error) = state
+                .security_transactions()
+                .prepare_content_recoveries(&state.service_core_id(), Some(&state))
+                .await
+            {
+                tracing::warn!(%error, "content recovery inventory worker deferred");
+            }
             if let Err(error) = sweep_realm_device_revocations(&state).await {
                 tracing::warn!(%error, "Realm Device revoke worker deferred");
             }

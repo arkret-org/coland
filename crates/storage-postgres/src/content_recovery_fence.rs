@@ -21,8 +21,20 @@ pub(crate) async fn require_unfenced(
     conn: &mut AsyncPgConnection,
     actor: &ActorId,
 ) -> PersistenceResult<()> {
+    if locked_active(conn, actor).await? {
+        return Err(PersistenceError::Conflict(
+            "failed_precondition: native content recovery membership fence is active".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) async fn locked_active(
+    conn: &mut AsyncPgConnection,
+    actor: &ActorId,
+) -> PersistenceResult<bool> {
     let Some(account) = actor.as_account_id() else {
-        return Ok(());
+        return Ok(false);
     };
     let station = sql_query(
         "SELECT to_jsonb(station_id) AS payload FROM device_inventory_station WHERE singleton",
@@ -37,7 +49,7 @@ pub(crate) async fn require_unfenced(
         )
     })?;
     if station.payload.as_str() != Some(account.station_id.as_str()) {
-        return Ok(());
+        return Ok(false);
     }
     // Membership installation can already hold its business Realm. Never
     // wait backwards on a busy subject PCR and form a lock cycle.
@@ -50,10 +62,5 @@ pub(crate) async fn require_unfenced(
     let blocked = sql_query("SELECT EXISTS(SELECT 1 FROM content_recovery_episodes WHERE actor_id=$1 AND security_completed_at IS NULL) AS blocked")
         .bind::<Jsonb,_>(serde_json::to_value(actor).map_err(PersistenceError::database)?)
         .get_result::<Blocked>(conn).await.map_err(PersistenceError::database)?;
-    if blocked.blocked {
-        return Err(PersistenceError::Conflict(
-            "failed_precondition: native content recovery membership fence is active".into(),
-        ));
-    }
-    Ok(())
+    Ok(blocked.blocked)
 }

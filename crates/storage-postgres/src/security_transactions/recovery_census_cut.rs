@@ -8,11 +8,11 @@
 use arkret_models_crypto::{
     ContentEndpoint, ContentRecoveryPreparation, KeyPackagesClaimRequestBody,
 };
-use arkret_wire::{ActorId, CommittedEventRef, Event, ScopeRef};
+use arkret_wire::{ActorId, CommittedEventRef, Event, EventId, EventKind, ScopeRef};
 use coland_storage::{PersistenceError, PersistenceResult};
 use diesel::sql_types::{Jsonb, Nullable, Text};
 use diesel::{QueryableByName, sql_query};
-use horme::RunQueryDsl as _;
+use horme::{OptionalExtension as _, RunQueryDsl as _};
 use serde_json::{Value, json};
 
 use crate::{AsyncPgConnection, JsonPayloadRow};
@@ -197,6 +197,66 @@ pub(super) async fn retain(
         }
         let key = &replacement.authorization_event_ref;
         put(conn, episode, "predecessor", key, None, row.payload).await?;
+    }
+    Ok(())
+}
+
+/// The identity unit only pins locators. Preparation verifies every frozen
+/// locator against its retained source, including older pending episodes.
+pub(super) async fn verify_admission(
+    conn: &mut AsyncPgConnection,
+    actor: &ActorId,
+    scope: &ScopeRef,
+    genesis: &EventId,
+    locator: &Value,
+) -> PersistenceResult<()> {
+    let key = locator["admission_key"]
+        .as_str()
+        .ok_or_else(|| unavailable("missing admission key"))?;
+    let source: CommittedEventRef =
+        serde_json::from_value(locator["first_source"].clone()).map_err(unavailable)?;
+    let row=sql_query("SELECT h.binding AS payload FROM content_endpoint_admission_history h JOIN canonical_events e ON e.pk=h.source_event_pk WHERE h.admission_key=$1 AND h.effective_scope=$2 AND h.genesis_event_ref=$3 AND h.first_source=$4 AND e.envelope->>'event_id'=$5")
+        .bind::<Text,_>(key).bind::<Jsonb,_>(json!(scope)).bind::<Text,_>(genesis.as_str()).bind::<Jsonb,_>(json!(source)).bind::<Text,_>(source.event_id.as_str())
+        .get_result::<JsonPayloadRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?.ok_or_else(||unavailable("retained admission original is absent"))?;
+    let binding: ContentEndpoint = serde_json::from_value(row.payload).map_err(unavailable)?;
+    binding.validate().map_err(unavailable)?;
+    if &binding.actor_id != actor {
+        return Err(unavailable("admission belongs to another subject"));
+    }
+    let admission_key =
+        arkret_canonical::canonical_sha256(&(&scope, &genesis, &binding)).map_err(unavailable)?;
+    if admission_key != key {
+        return Err(unavailable(
+            "admission identity differs from its original endpoint",
+        ));
+    }
+    let (original, commit) =
+        super::content_recovery_source::original_in_scope(conn, &source.event_id, scope).await?;
+    if source.commit_id != commit.commit_id
+        || source.stream_position != commit.stream_position
+        || source.stream_ref != commit.stream_ref
+        || !matches!(original.kind, EventKind::MlsGenesis | EventKind::MlsCommit)
+    {
+        return Err(unavailable(
+            "admission differs from its accepted source Commit",
+        ));
+    }
+    if original.kind == EventKind::MlsGenesis {
+        use arkret_event_draft::EventPayloadExt as _;
+        let creator = original
+            .as_mls_genesis()
+            .map_err(unavailable)?
+            .creator_leaf_authority;
+        if genesis != &original.event_id
+            || original.actual_signer() != &binding.actor_id
+            || creator.endpoint != binding.endpoint
+            || creator.authorization_event_ref != binding.authorization_event_ref
+            || creator.leaf_signature_key_base64url.as_str() != binding.signature_key_base64url
+        {
+            return Err(unavailable(
+                "Genesis differs from its native creator endpoint",
+            ));
+        }
     }
     Ok(())
 }

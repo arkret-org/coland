@@ -1,3 +1,7 @@
+ALTER TABLE IF EXISTS content_recovery_episodes DROP CONSTRAINT IF EXISTS recovery_inventory_same_episode;
+DROP FUNCTION IF EXISTS guard_prepared_inventory() CASCADE;
+DROP TABLE IF EXISTS content_recovery_inventory_blobs;
+DROP FUNCTION IF EXISTS guard_recovery_inventory_blob() CASCADE;
 DROP FUNCTION IF EXISTS guard_account_private_idempotency_cache() CASCADE;
 DROP FUNCTION IF EXISTS guard_contact_private_copies() CASCADE;
 DROP FUNCTION IF EXISTS public.actor_private_event_owner(JSONB);

@@ -95,6 +95,7 @@ impl RootFixture {
                 ..Default::default()
             },
         );
+        pcr.register_private_owner(&persistence).await.unwrap();
         pcr.admit_into(&persistence).await.unwrap();
         let mut package = root_package();
         if let Some(material) = &material {

@@ -3202,6 +3202,47 @@ CREATE TABLE content_recovery_episodes (
  CHECK((state='pending' AND inventory_blob_ref IS NULL)
     OR (state='prepared' AND inventory_blob_ref IS NOT NULL))
 );
+-- The reference reserves the normal Blob address. Bytes and the domain-separated
+-- commitment live with the episode, in the same transaction as prepared.
+CREATE TABLE content_recovery_inventory_blobs (
+    blob_ref TEXT PRIMARY KEY REFERENCES blobs(id),
+    authorization_event_ref TEXT NOT NULL UNIQUE REFERENCES content_recovery_episodes(authorization_event_ref) ON DELETE CASCADE,
+    inventory_digest TEXT NOT NULL CHECK(inventory_digest ~ '^sha256:[0-9a-f]{64}$'),
+    canonical_bytes BYTEA NOT NULL CHECK(octet_length(canonical_bytes)>0),
+    UNIQUE(authorization_event_ref,blob_ref)
+);
+ALTER TABLE content_recovery_episodes ADD CONSTRAINT recovery_inventory_same_episode
+    FOREIGN KEY(authorization_event_ref,inventory_blob_ref)
+    REFERENCES content_recovery_inventory_blobs(authorization_event_ref,blob_ref);
+
+CREATE FUNCTION guard_prepared_inventory() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF OLD.state='prepared' AND
+        (OLD.state,OLD.actor_id,OLD.replacement,OLD.pcr_cut,OLD.inventory_blob_ref,OLD.transaction_id)
+         IS DISTINCT FROM
+        (NEW.state,NEW.actor_id,NEW.replacement,NEW.pcr_cut,NEW.inventory_blob_ref,NEW.transaction_id) THEN
+        RAISE EXCEPTION 'prepared recovery inventory cannot change';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+CREATE TRIGGER prepared_recovery_immutable BEFORE UPDATE ON content_recovery_episodes
+    FOR EACH ROW EXECUTE FUNCTION guard_prepared_inventory();
+
+CREATE FUNCTION guard_recovery_inventory_blob() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF OLD.storage_backend = 'recovery_inventory' AND
+       (OLD.id,OLD.sha256,OLD.media_type,OLD.size_bytes,OLD.uploaded_by,OLD.realm_id,OLD.storage_backend,OLD.storage_key,OLD.visibility,OLD.payload)
+       IS DISTINCT FROM
+       (NEW.id,NEW.sha256,NEW.media_type,NEW.size_bytes,NEW.uploaded_by,NEW.realm_id,NEW.storage_backend,NEW.storage_key,NEW.visibility,NEW.payload) THEN
+        RAISE EXCEPTION 'prepared recovery inventory classification is immutable';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+CREATE TRIGGER recovery_inventory_blob_immutable BEFORE UPDATE ON blobs
+    FOR EACH ROW EXECUTE FUNCTION guard_recovery_inventory_blob();
+
 CREATE INDEX content_recovery_episodes_active_actor
  ON content_recovery_episodes (actor_id)
  WHERE security_completed_at IS NULL;

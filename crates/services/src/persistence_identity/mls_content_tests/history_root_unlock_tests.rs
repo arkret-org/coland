@@ -114,6 +114,7 @@ pub(super) async fn exercise(
     package: &KeyBackup,
     original: &coland_storage::AuthorityCommitTransaction,
     genesis: &coland_storage::AuthorityCommitTransaction,
+    unresolved_claim: bool,
 ) -> (ContentRootBackupEntry, arkret_wire::BackupId) {
     let record = pcr_history_tests::status(pool, fixture, None).await;
     let reader = pcr_history_tests::reader(fixture, Some(record));
@@ -344,8 +345,11 @@ pub(super) async fn exercise(
             .await
             .is_err()
     );
-    let (replacement, authorization, method, seed, _session_id) =
-        Box::pin(claim_fence::recover(pool, fixture)).await;
+    let (replacement, authorization, method, seed, _session_id) = if unresolved_claim {
+        Box::pin(claim_fence::recover(pool, fixture)).await
+    } else {
+        Box::pin(identity_recovery::recover(pool, fixture)).await
+    };
     assert!(consume(pool, &reader, &valid, package).await.is_err());
     assert!(
         consume(pool, &new_reader, &new_proof, package)
@@ -378,10 +382,91 @@ pub(super) async fn exercise(
     replacement_reader.credential_device_binding = Some(
         arkret_models_identity::session_credential::SessionGrantDeviceBinding {
             device_id: replacement.clone(),
-            authorization_event_id: authorization,
+            authorization_event_id: authorization.clone(),
             model_generation_ref: 2,
         },
     );
+    use arkret_event_draft::EventPayloadExt as _;
+    use coland_storage::{DeliveryPolicyStoreRegistry as _, HumanPcrHistoryRead};
+    let episodes = persistence.security_transactions();
+    let service = &reader.account_id.station_id;
+    assert_eq!(
+        episodes
+            .prepare_content_recoveries(service, None)
+            .await
+            .unwrap(),
+        usize::from(!unresolved_claim)
+    );
+    let HumanPcrHistoryRead::Ready {
+        value: preparation,
+        guard,
+    } = episodes
+        .human_content_recovery_preparation(&replacement_reader, &authorization)
+        .await
+        .unwrap()
+    else {
+        panic!("replacement has no preparation")
+    };
+    guard.finish().await.unwrap();
+    if unresolved_claim {
+        assert_eq!(preparation.state, ContentRecoveryPreparationState::Pending);
+        assert!(preparation.inventory_blob_ref.is_none());
+    } else {
+        let reference = preparation.inventory_blob_ref.as_ref().unwrap();
+        assert_eq!(preparation.state, ContentRecoveryPreparationState::Prepared);
+        assert_eq!(
+            episodes
+                .prepare_content_recoveries(service, None)
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(matches!(
+            episodes
+                .read_content_inventory(&reader, &authorization, reference)
+                .await
+                .unwrap(),
+            HumanPcrHistoryRead::NotApplicable
+        ));
+        let HumanPcrHistoryRead::Ready {
+            value: bytes,
+            guard,
+        } = episodes
+            .read_content_inventory(&replacement_reader, &authorization, reference)
+            .await
+            .unwrap()
+        else {
+            panic!("missing prepared private Blob")
+        };
+        guard.finish().await.unwrap();
+        assert_eq!(
+            reference.as_str(),
+            format!("ak:blob:sha256:{}", arkret_canonical::sha256_hex(&bytes))
+        );
+        let inventory: ContentRecoveryInventory = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            arkret_canonical::canonical_json_bytes(&inventory).unwrap(),
+            bytes
+        );
+        assert_eq!(inventory.pcr_cut, preparation.pcr_cut);
+        assert_eq!(inventory.entries.len(), 1);
+        let entry = &inventory.entries[0];
+        assert_eq!(entry.effective_scope, original.event.scope_ref);
+        assert_eq!(entry.genesis_event_ref, genesis.event.event_id);
+        assert_eq!(entry.base_group_state_ref, genesis.event.event_id);
+        assert_eq!(entry.epoch, 0);
+        assert_eq!(entry.old_leaves.len(), 1);
+        assert_eq!(entry.old_leaves[0].leaf_index, 0);
+        assert_eq!(
+            entry.old_leaves[0].endpoint.authorization_event_ref,
+            genesis
+                .event
+                .as_mls_genesis()
+                .unwrap()
+                .creator_leaf_authority
+                .authorization_event_ref
+        );
+    }
     recovery_source::exercise(pool, &replacement_reader, &reader).await;
     history_material::exercise(pool, &replacement_reader, &reader, genesis).await;
     let mut replacement_challenge = new_challenge;

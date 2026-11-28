@@ -1406,6 +1406,31 @@ impl crate::identity::RecoverySessionPort for PersistenceRecoverySessions {
 
 #[async_trait::async_trait]
 impl crate::identity::SecurityTransactionPort for PersistenceSecurityTransactions {
+    async fn prepare_content_recoveries(
+        &self,
+        service: &arkret_wire::DidCoreId,
+        materials: Option<&dyn coland_storage::RecoveryInventoryPublicMaterial>,
+    ) -> crate::ServiceResult<usize> {
+        Ok(self
+            .0
+            .security_transactions()
+            .prepare_content_recoveries(service, materials)
+            .await?)
+    }
+
+    async fn read_content_inventory(
+        &self,
+        reader: &coland_storage::HumanPcrHistoryReader,
+        authorization: &arkret_wire::EventId,
+        reference: &arkret_wire::BlobRef,
+    ) -> crate::ServiceResult<coland_storage::HumanPcrHistoryRead<Vec<u8>>> {
+        Ok(self
+            .0
+            .security_transactions()
+            .read_content_inventory(reader, authorization, reference)
+            .await?)
+    }
+
     async fn human_content_recovery_preparation(
         &self,
         reader: &coland_storage::HumanPcrHistoryReader,

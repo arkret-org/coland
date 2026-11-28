@@ -1098,6 +1098,29 @@ pub use coland_storage::{
 
 #[async_trait]
 pub trait SecurityTransactionPort: Send + Sync {
+    async fn prepare_content_recoveries(
+        &self,
+        _service: &arkret_wire::DidCoreId,
+        _materials: Option<&dyn coland_storage::RecoveryInventoryPublicMaterial>,
+    ) -> crate::ServiceResult<usize> {
+        Err(coland_storage::PersistenceError::Conflict(
+            "revision_unavailable: native recovery inventory unavailable".into(),
+        )
+        .into())
+    }
+
+    async fn read_content_inventory(
+        &self,
+        _reader: &coland_storage::HumanPcrHistoryReader,
+        _authorization: &arkret_wire::EventId,
+        _reference: &arkret_wire::BlobRef,
+    ) -> crate::ServiceResult<coland_storage::HumanPcrHistoryRead<Vec<u8>>> {
+        Err(coland_storage::PersistenceError::Conflict(
+            "revision_unavailable: native recovery inventory unavailable".into(),
+        )
+        .into())
+    }
+
     async fn human_content_recovery_preparation(
         &self,
         _reader: &coland_storage::HumanPcrHistoryReader,
@@ -1183,6 +1206,27 @@ pub struct SecurityTransactionService {
 }
 
 impl SecurityTransactionService {
+    pub async fn prepare_content_recoveries(
+        &self,
+        service: &arkret_wire::DidCoreId,
+        materials: Option<&dyn coland_storage::RecoveryInventoryPublicMaterial>,
+    ) -> crate::ServiceResult<usize> {
+        self.transactions
+            .prepare_content_recoveries(service, materials)
+            .await
+    }
+
+    pub async fn read_content_inventory(
+        &self,
+        reader: &coland_storage::HumanPcrHistoryReader,
+        authorization: &arkret_wire::EventId,
+        reference: &arkret_wire::BlobRef,
+    ) -> crate::ServiceResult<coland_storage::HumanPcrHistoryRead<Vec<u8>>> {
+        self.transactions
+            .read_content_inventory(reader, authorization, reference)
+            .await
+    }
+
     pub async fn human_content_recovery_preparation(
         &self,
         reader: &coland_storage::HumanPcrHistoryReader,

@@ -49,6 +49,15 @@ pub(crate) async fn put_blob_if_absent_in_connection(
     .execute(&mut *conn)
     .await
     .map_err(PersistenceError::database)?;
+    if written == 0 {
+        let reserved=sql_query("SELECT to_jsonb(id) AS payload FROM blobs WHERE id=$1 AND storage_backend='recovery_inventory'")
+            .bind::<Text,_>(blob_ref).get_result::<crate::JsonPayloadRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+        if reserved.is_some() {
+            return Err(PersistenceError::Conflict(
+                "failed_precondition: Blob address belongs to a private recovery inventory".into(),
+            ));
+        }
+    }
     Ok(written == 1)
 }
 #[async_trait]
@@ -138,9 +147,12 @@ impl BlobStore for PgBlobStore {
     async fn delete(&self, blob_ref: &str) -> PersistenceResult<()> {
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_,crate::PgTransactionError,_>(async |conn| {
-            let live = sql_query("SELECT payload FROM blobs WHERE id=$1 FOR UPDATE")
+            let live = sql_query("SELECT to_jsonb(storage_backend) AS payload FROM blobs WHERE id=$1 FOR UPDATE")
                 .bind::<Text,_>(blob_ref).get_result::<crate::JsonPayloadRow>(&mut *conn).await.optional()?;
-            if live.is_none() { return Ok(()); }
+            let Some(live)=live else {return Ok(())};
+            if live.payload.as_str()==Some("recovery_inventory") {
+                return Err(PersistenceError::Conflict("failed_precondition: Blob is required by a prepared recovery".into()).into());
+            }
             let referenced = sql_query("SELECT '{}'::jsonb AS payload FROM content_original_blobs WHERE blob_ref=$1 LIMIT 1 FOR SHARE")
                 .bind::<Text,_>(blob_ref).get_result::<crate::JsonPayloadRow>(&mut *conn).await.optional()?;
             if referenced.is_some() {

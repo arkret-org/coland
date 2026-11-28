@@ -228,7 +228,8 @@ pub(super) async fn purge(
     // The signed Recovery R/C and accepted PCR originals remain intact.
     sql_query("DELETE FROM content_recovery_census_sources c USING content_recovery_episodes e WHERE c.authorization_event_ref=e.authorization_event_ref AND e.actor_id=$1")
         .bind::<Jsonb,_>(&actor_json).execute(&mut *conn).await.map_err(PersistenceError::database)?;
-    sql_query("DELETE FROM content_recovery_episodes WHERE actor_id=$1")
+    sql_query("WITH erased AS (DELETE FROM content_recovery_episodes WHERE actor_id=$1 RETURNING inventory_blob_ref)
+        DELETE FROM blobs WHERE id IN (SELECT inventory_blob_ref FROM erased) AND storage_backend='recovery_inventory'")
         .bind::<Jsonb, _>(&actor_json)
         .execute(&mut *conn)
         .await

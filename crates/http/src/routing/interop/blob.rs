@@ -560,7 +560,19 @@ async fn blob_get(depot: &mut Depot, req: &mut Request, res: &mut Response) {
             return;
         }
     }
-    let mut blob = state.deliveries().blob(&blob_ref).await.ok().flatten();
+    let mut blob = match state.deliveries().blob(&blob_ref).await {
+        Ok(blob) => blob,
+        Err(error) => {
+            tracing::warn!(%error,"Blob metadata lookup unavailable");
+            render_error(
+                res,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "temporarily_unavailable",
+                "Blob metadata unavailable",
+            );
+            return;
+        }
+    };
     if blob.is_none()
         && purpose == "profile_avatar"
         && let Some(session) = session.as_ref()
@@ -569,6 +581,19 @@ async fn blob_get(depot: &mut Depot, req: &mut Request, res: &mut Response) {
     }
     match blob.as_ref() {
         Some(blob) => {
+            if blob.storage_backend == "recovery_inventory" {
+                let Some(session) = session.as_ref() else {
+                    render_error(res, StatusCode::NOT_FOUND, "not_found", "not found");
+                    return;
+                };
+                if let Err(error) =
+                    recovery_inventory_get(state, session, blob, &blob_ref, req, res).await
+                {
+                    clear_blob_content_headers(res);
+                    render_error(res, error.http_status(), error.wire_code(), &error.message);
+                }
+                return;
+            }
             if let Some(payload) = presign_payload.as_ref()
                 && (!presign_payload_matches_blob(blob, payload)
                     || (blob.realm_id.is_none()
@@ -846,6 +871,101 @@ async fn blob_get(depot: &mut Depot, req: &mut Request, res: &mut Response) {
         }
         None => render_error(res, StatusCode::NOT_FOUND, "not_found", "not found"),
     }
+}
+
+async fn recovery_inventory_get(
+    state: &AppState,
+    session: &SessionRecord,
+    blob: &BlobRecord,
+    blob_ref: &str,
+    req: &Request,
+    res: &mut Response,
+) -> Result<(), AppError> {
+    use coland_storage::HumanPcrHistoryRead;
+
+    use crate::routing::events::pcr_history;
+    let missing = || AppError::indistinguishable_not_found("not found");
+    if blob.visibility != BlobVisibility::DeviceBound || blob.redacted || blob.legal_hold {
+        return Err(missing());
+    }
+    let authorization =
+        arkret_wire::EventId::new(blob.storage_key.clone()).map_err(|_| missing())?;
+    let reference = BlobRef::new(blob_ref.to_owned()).map_err(|_| missing())?;
+    let mut reader = pcr_history::standard_reader(state, session)
+        .await
+        .map_err(|_| missing())?;
+    let unavailable = || {
+        crate::app_error!(
+            RevisionUnavailable,
+            "private recovery inventory evidence is unavailable"
+        )
+    };
+    let service = state.security_transactions();
+    let mut result = service
+        .read_content_inventory(&reader, &authorization, &reference)
+        .await
+        .map_err(|_| unavailable())?;
+    if matches!(result, HumanPcrHistoryRead::CurrentStatusRequired) {
+        pcr_history::resolve_current_status(state, session, &mut reader).await?;
+        result = service
+            .read_content_inventory(&reader, &authorization, &reference)
+            .await
+            .map_err(|_| unavailable())?;
+    }
+    let HumanPcrHistoryRead::Ready { value, mut guard } = result else {
+        return Err(missing());
+    };
+    if !guard.prepare_handoff().await {
+        return Err(missing());
+    }
+    let total = value.len();
+    let range = parse_range(req, total)
+        .transpose()
+        .map_err(AppError::param_invalid)?;
+    let bytes = bytes::Bytes::from(value);
+    let bytes = if let Some((start, end)) = range {
+        res.status_code(StatusCode::PARTIAL_CONTENT);
+        res.headers_mut().insert(
+            salvo::http::header::CONTENT_RANGE,
+            format!("bytes {start}-{end}/{total}").parse().unwrap(),
+        );
+        bytes.slice(start..=end)
+    } else {
+        res.status_code(StatusCode::OK);
+        bytes
+    };
+    res.headers_mut().insert(
+        salvo::http::header::CACHE_CONTROL,
+        "private, no-store".parse().unwrap(),
+    );
+    res.headers_mut().insert(
+        salvo::http::header::HeaderName::from_static("digest"),
+        format!("sha-256={}", blob.sha256).parse().unwrap(),
+    );
+    res.headers_mut().insert(
+        salvo::http::header::CONTENT_LENGTH,
+        bytes.len().to_string().parse().unwrap(),
+    );
+    res.headers_mut()
+        .insert(salvo::http::header::ACCEPT_RANGES, "bytes".parse().unwrap());
+    res.headers_mut().insert(
+        salvo::http::header::CONTENT_TYPE,
+        "application/json".parse().unwrap(),
+    );
+    let head = req.method() == Method::HEAD;
+    res.stream(async_stream::stream! {
+        if head {
+            if !guard.permits_handoff(){yield Err(std::io::Error::other("inventory authority expired"));return;}
+            yield Ok(bytes::Bytes::new());
+        } else {
+            for offset in (0..bytes.len()).step_by(65536) {
+                if !guard.permits_handoff(){yield Err(std::io::Error::other("inventory authority expired"));return;}
+                yield Ok(bytes.slice(offset..(offset+65536).min(bytes.len())));
+            }
+        }
+        if guard.finish().await.is_err(){yield Err(std::io::Error::other("inventory cut could not be released"));}
+    });
+    Ok(())
 }
 
 fn clear_blob_content_headers(res: &mut Response) {
@@ -1509,12 +1629,15 @@ pub(super) async fn validate_existing_blob_classification(
     res: &mut Response,
 ) -> bool {
     match state.deliveries().blob(blob_ref).await {
-        Ok(Some(existing)) if existing.encryption != encryption => {
+        Ok(Some(existing))
+            if existing.encryption != encryption
+                || existing.storage_backend == "recovery_inventory" =>
+        {
             render_error(
                 res,
                 StatusCode::CONFLICT,
                 "failed_precondition",
-                "blob encryption classification is immutable for this content reference",
+                "blob storage classification is immutable for this content reference",
             );
             false
         }

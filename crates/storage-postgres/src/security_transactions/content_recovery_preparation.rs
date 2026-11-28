@@ -24,7 +24,7 @@ fn unavailable(detail: impl std::fmt::Display) -> PersistenceError {
     ))
 }
 
-fn replacement(
+pub(super) fn replacement(
     account: &arkret_wire::AccountId,
     event: &arkret_wire::Event,
 ) -> PersistenceResult<ContentEndpoint> {
@@ -93,11 +93,37 @@ pub(super) async fn retain_in_connection(
     super::recovery_census_cut::retain(conn, &value).await
 }
 
+pub(super) struct QualifiedEpisode {
+    pub(super) value: ContentRecoveryPreparation,
+    pub(super) held: Box<DeliveryGuard>,
+    pub(super) expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+pub(super) enum EpisodeRead {
+    NotApplicable,
+    CurrentStatusRequired,
+    Qualified(Box<QualifiedEpisode>),
+}
+
 pub(super) async fn read(
     pool: &PgPool,
     reader: &HumanPcrHistoryReader,
     authorization: &EventId,
 ) -> PersistenceResult<HumanPcrHistoryRead<ContentRecoveryPreparation>> {
+    Ok(match qualify(pool, reader, authorization).await? {
+        EpisodeRead::NotApplicable => HumanPcrHistoryRead::NotApplicable,
+        EpisodeRead::CurrentStatusRequired => HumanPcrHistoryRead::CurrentStatusRequired,
+        EpisodeRead::Qualified(episode) => {
+            crate::pcr_history_read::guarded(episode.held, episode.expires_at, episode.value)
+        }
+    })
+}
+
+pub(super) async fn qualify(
+    pool: &PgPool,
+    reader: &HumanPcrHistoryReader,
+    authorization: &EventId,
+) -> PersistenceResult<EpisodeRead> {
     let mut held = DeliveryGuard::begin(pool).await?;
     let now = chrono::Utc::now();
     let current = crate::pcr_device_status_reader::confirmed_pcr_device_status_cut_in_connection(
@@ -110,7 +136,7 @@ pub(super) async fn read(
     .map_err(crate::PgTransactionError::into_persistence)?;
     let Some(current) = current else {
         held.finish().await?;
-        return Ok(HumanPcrHistoryRead::NotApplicable);
+        return Ok(EpisodeRead::NotApplicable);
     };
     let eligible = current.admission()
         == arkret_wire::AccountDeviceRevocationAdmissionDecision::Allow
@@ -135,11 +161,11 @@ pub(super) async fn read(
             });
     if !eligible {
         held.finish().await?;
-        return Ok(HumanPcrHistoryRead::NotApplicable);
+        return Ok(EpisodeRead::NotApplicable);
     }
     if reader.account_status_observation.is_none() {
         held.finish().await?;
-        return Ok(HumanPcrHistoryRead::CurrentStatusRequired);
+        return Ok(EpisodeRead::CurrentStatusRequired);
     }
     let realm = current.authority.realm_id;
     let expires_at = crate::pcr_history_read::qualify(
@@ -176,5 +202,9 @@ pub(super) async fn read(
         )
         .map_err(unavailable)?;
     held.probe().await?;
-    Ok(crate::pcr_history_read::guarded(held, expires_at, value))
+    Ok(EpisodeRead::Qualified(Box::new(QualifiedEpisode {
+        held,
+        expires_at,
+        value,
+    })))
 }

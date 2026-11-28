@@ -52,6 +52,7 @@ mod agent_producer_evidence;
 mod agent_producer_signer_keys;
 mod agent_provisioning;
 mod agent_session_authority;
+mod agent_sidecar_backup;
 mod agents;
 mod applet_admission;
 mod applet_authority_material;

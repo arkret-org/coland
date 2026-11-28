@@ -158,7 +158,10 @@ impl crate::key_backup::PgKeyBackupStore {
             .await
             .map_err(PersistenceError::database)?;
         conn.transaction::<_,PgTransactionError,_>(async move |conn| {
-            let owner:arkret_wire::AccountId=serde_json::from_value(backup["actor_id"]["account_id"].clone()).map_err(PersistenceError::database)?;
+            let owner: arkret_wire::AccountId = match basis {
+                coland_storage::KeyBackupUnlockBasis::CurrentHumanPcrHistory { reader, .. } => reader.account_id.clone(),
+                _ => serde_json::from_value(backup["actor_id"]["account_id"].clone()).map_err(PersistenceError::database)?,
+            };
             crate::pcr_private_authority::require_active_account_owner(conn,&owner).await?;
             let historical = matches!(basis, coland_storage::KeyBackupUnlockBasis::CurrentHumanPcrHistory { .. });
             let mut history_expires = None;
@@ -184,7 +187,7 @@ impl crate::key_backup::PgKeyBackupStore {
                 }
             };
             // Shared lock order serializes account counters and each authority's byte budget.
-            let account=arkret_canonical::canonical_json_string(&backup["actor_id"]["account_id"]).map_err(PersistenceError::database)?;
+            let account=arkret_canonical::canonical_json_string(&owner).map_err(PersistenceError::database)?;
             sql_query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))").bind::<Text,_>(format!("backup-unlock:{account}")).execute(&mut *conn).await.map_err(PersistenceError::database)?;
             // Current-device authorities carry an explicit device gate. A recovery
             // authority must acquire the same policy lock as every policy publication.
@@ -201,7 +204,7 @@ impl crate::key_backup::PgKeyBackupStore {
                 let challenge=sql_query("SELECT challenge AS payload FROM key_backup_unlock_authorities WHERE authority_id=$1")
                     .bind::<Text,_>(&id).get_result::<JsonPayloadRow>(&mut *conn).await?.payload;
                 if challenge.get("content_history").is_some() != historical
-                    || challenge.get("subject_actor_id").is_some() || challenge.get("custody_authorization_ref").is_some() {
+                    || (!historical && (challenge.get("subject_actor_id").is_some() || challenge.get("custody_authorization_ref").is_some())) {
                     return Err(rejected("unlock history binding requires its native delivery gate").into());
                 }
             }

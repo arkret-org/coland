@@ -82,11 +82,55 @@ pub(crate) async fn read_in_connection(
 
 pub(crate) struct OriginalRootIndex {
     pub actor: ActorId,
+    pub agent_custodian: Option<ActorId>,
     pub roots: Vec<(Hash, ContentRootContext)>,
+}
+
+impl OriginalRootIndex {
+    pub(crate) fn covers_personal_scope(
+        &self,
+        owner: &ActorId,
+        scope: &arkret_wire::ScopeRef,
+    ) -> bool {
+        if &self.actor == owner {
+            return true;
+        }
+        matches!(scope, arkret_wire::ScopeRef::Sidecar { .. })
+            && self.agent_custodian.as_ref() == Some(owner)
+            && matches!(self.roots.as_slice(), [(_, context)] if &context.effective_scope == scope)
+    }
 }
 
 /// Recheck the immutable original index after policy and Actor-series locks.
 /// A current replacement can cover only this first-admitted Actor/R/context.
+#[derive(diesel::QueryableByName)]
+struct RootSubjectRow {
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Jsonb>)]
+    custodian: Option<serde_json::Value>,
+    #[diesel(sql_type = Text)]
+    actor_id: String,
+}
+
+/// Read immutable subject IDs before taking the actor lock, then verify the full
+/// indexed packet under that lock in the consuming transaction.
+pub(crate) async fn subjects_in_connection(
+    conn: &mut AsyncPgConnection,
+    id: &arkret_wire::BackupId,
+) -> crate::PersistenceResult<(ActorId, ActorId)> {
+    let row = sql_query("SELECT actor_id,writer_admission->'custodian' AS custodian FROM key_backup_identities WHERE id=$1")
+        .bind::<diesel::sql_types::Uuid, _>(crate::ids::typed_uuid_part_expect_internal(id.as_str()))
+        .get_result::<RootSubjectRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
+        .ok_or_else(|| PersistenceError::Conflict("failed_precondition: original root admission unavailable".into()))?;
+    let actor: ActorId = serde_json::from_str(&row.actor_id).map_err(PersistenceError::database)?;
+    let recipient = row
+        .custodian
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(PersistenceError::database)?
+        .unwrap_or_else(|| actor.clone());
+    Ok((actor, recipient))
+}
+
 pub(crate) async fn original_index_in_connection(
     conn: &mut AsyncPgConnection,
     id: &BackupId,
@@ -102,7 +146,7 @@ pub(crate) async fn original_index_in_connection(
     };
     let actor: ActorId = serde_json::from_str(row["actor"].as_str().ok_or_else(invalid)?)
         .map_err(PersistenceError::database)?;
-    let admission: crate::key_backup_authority::DeviceBackupAdmission =
+    let admission: crate::key_backup_authority::BackupWriterAdmission =
         serde_json::from_value(row["admission"].clone()).map_err(PersistenceError::database)?;
     if !row["digest"]
         .as_str()
@@ -126,7 +170,11 @@ pub(crate) async fn original_index_in_connection(
     if roots.is_empty() {
         return Err(invalid());
     }
-    Ok(OriginalRootIndex { actor, roots })
+    Ok(OriginalRootIndex {
+        actor,
+        agent_custodian: admission.agent_custodian().cloned(),
+        roots,
+    })
 }
 
 /// Find a currently sufficient signed package after the Actor-series lock.
@@ -196,7 +244,7 @@ pub(crate) async fn read_retained_envelope(
         .ok_or_else(invalid)?.payload;
     let backup: arkret_models_crypto::KeyBackup =
         serde_json::from_value(row["body"].clone()).map_err(PersistenceError::database)?;
-    let admission: crate::key_backup_authority::DeviceBackupAdmission =
+    let admission: crate::key_backup_authority::BackupWriterAdmission =
         serde_json::from_value(row["admission"].clone()).map_err(PersistenceError::database)?;
     backup.validate().map_err(PersistenceError::database)?;
     backup
@@ -232,7 +280,7 @@ pub(crate) async fn require_original_binding(
         .bind::<Array<diesel::sql_types::Uuid>,_>(&ids).bind::<Text,_>(actor.to_string()).bind::<Jsonb,_>(&selector)
         .get_results::<crate::JsonPayloadRow>(&mut *conn).await.map_err(PersistenceError::database)?;
     for row in rows {
-        let admission: crate::key_backup_authority::DeviceBackupAdmission =
+        let admission: crate::key_backup_authority::BackupWriterAdmission =
             serde_json::from_value(row.payload["admission"].clone())
                 .map_err(PersistenceError::database)?;
         if row.payload["digest"]

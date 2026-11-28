@@ -16,21 +16,59 @@ use crate::{AsyncPgConnection, PgTransactionError};
 /// device state. It is not a wire authorization or a reusable admission lease.
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct DeviceBackupAdmission {
+pub(crate) struct BackupWriterAdmission {
     envelope_digest: String,
     signer_actor: arkret_wire::ActorId,
-    signer_device: DeviceId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    signer_device: Option<DeviceId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    agent_method: Option<arkret_wire::DidUrl>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    custodian: Option<arkret_wire::ActorId>,
     authorization_event_ref: arkret_wire::EventId,
     source_head: arkret_wire::RealmCommitId,
-    generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    generation: Option<u64>,
     public_key_did: String,
     #[serde(with = "arkret_canonical::serde_helpers::canonical_timestamp")]
     accepted_at: chrono::DateTime<chrono::Utc>,
 }
 
-impl DeviceBackupAdmission {
+impl BackupWriterAdmission {
+    pub(crate) fn verify_agent(
+        backup: &KeyBackup,
+        actor: &arkret_wire::ActorId,
+        endpoint: &coland_storage::AgentEndpointGuard,
+        key: &[u8; 32],
+        accepted_at: chrono::DateTime<chrono::Utc>,
+    ) -> crate::PersistenceResult<Self> {
+        let admission = Self {
+            envelope_digest: arkret_canonical::canonical_sha256(backup)
+                .map_err(PersistenceError::database)?,
+            signer_actor: actor.clone(),
+            signer_device: None,
+            agent_method: Some(endpoint.verification_method.clone()),
+            custodian: backup.custodian_actor_id.clone(),
+            authorization_event_ref: endpoint.authorization_ref.event_id.clone(),
+            source_head: endpoint.authorization_ref.commit_id.clone(),
+            generation: None,
+            public_key_did: format!(
+                "did:key:{}",
+                arkret_canonical::ed25519_pubkey_to_did_key_multibase(key)
+            ),
+            accepted_at,
+        };
+        admission.verify_retained_envelope(backup)?;
+        Ok(admission)
+    }
+
     pub(crate) fn matches_envelope(&self, digest: &str) -> bool {
         self.envelope_digest == digest
+    }
+
+    pub(crate) fn agent_custodian(&self) -> Option<&arkret_wire::ActorId> {
+        self.agent_method.as_ref()?;
+        self.custodian.as_ref()
     }
 
     pub(crate) fn authenticates_metadata(
@@ -55,11 +93,27 @@ impl DeviceBackupAdmission {
         if !self.matches_envelope(
             &arkret_canonical::canonical_sha256(backup).map_err(PersistenceError::database)?,
         ) || backup.actor_id != self.signer_actor
-            || backup.signature_proof.device_id.as_ref() != Some(&self.signer_device)
-            || backup.signature_proof.device_authorize_event_id.as_ref()
-                != Some(&self.authorization_event_ref)
         {
             return Err(invalid());
+        }
+        let proof = &backup.signature_proof;
+        match (&self.signer_device, &self.agent_method, self.generation) {
+            (Some(device), None, Some(_))
+                if proof.device_id.as_ref() == Some(device)
+                    && proof.device_authorize_event_id.as_ref()
+                        == Some(&self.authorization_event_ref)
+                    && proof.agent_authorization_event_ref.is_none() => {}
+            (None, Some(method), None)
+                if self.custodian.is_some()
+                    && self.custodian == backup.custodian_actor_id
+                    && &proof.verification_method == method
+                    && proof.agent_authorization_event_ref.as_ref()
+                        == Some(&self.authorization_event_ref)
+                    && proof.device_id.is_none()
+                    && proof.device_authorize_event_id.is_none()
+                    && backup.device_id.is_none()
+                    && backup.source_commit_ref.is_none() => {}
+            _ => return Err(invalid()),
         }
         let key = self
             .public_key_did
@@ -88,7 +142,7 @@ pub(crate) fn verify_realm_device_backup_signature(
     backup: &KeyBackup,
     authority: &coland_storage::AppletManagedDeviceAuthority,
     accepted_at: chrono::DateTime<chrono::Utc>,
-) -> crate::PersistenceResult<DeviceBackupAdmission> {
+) -> crate::PersistenceResult<BackupWriterAdmission> {
     let invalid = || {
         PersistenceError::Conflict(
             "signature_invalid: native backup differs from its original Device".into(),
@@ -127,14 +181,16 @@ pub(crate) fn verify_realm_device_backup_signature(
     ) {
         return Err(invalid());
     }
-    Ok(DeviceBackupAdmission {
+    Ok(BackupWriterAdmission {
         envelope_digest: arkret_canonical::canonical_sha256(backup)
             .map_err(PersistenceError::database)?,
         signer_actor: authority.actor_id.clone(),
-        signer_device: authority.device_id.clone(),
+        signer_device: Some(authority.device_id.clone()),
+        agent_method: None,
+        custodian: None,
         authorization_event_ref: authority.authorization_ref.event_id.clone(),
         source_head: authority.authorization_ref.commit_id.clone(),
-        generation: authority.current_device_generation_ref,
+        generation: Some(authority.current_device_generation_ref),
         public_key_did: format!("did:key:{fingerprint}"),
         accepted_at,
     })
@@ -162,7 +218,7 @@ pub(crate) async fn verify_human_backup_signature(
     cut: &ConfirmedPcrDeviceStatusCut,
     account: &AccountId,
     authorizer: &DeviceId,
-) -> Result<DeviceBackupAdmission, PgTransactionError> {
+) -> Result<BackupWriterAdmission, PgTransactionError> {
     let authorization = cut.authority.authorization.as_ref().ok_or_else(|| {
         rejected(
             ConflictCode::FailedPrecondition,
@@ -281,14 +337,16 @@ pub(crate) async fn verify_human_backup_signature(
             "backup creation or first admission is outside the writer authorization window",
         ));
     }
-    Ok(DeviceBackupAdmission {
+    Ok(BackupWriterAdmission {
         envelope_digest: arkret_canonical::canonical_sha256(backup)
             .map_err(PersistenceError::database)?,
         signer_actor: arkret_wire::ActorId::account(account.clone()),
-        signer_device: authorizer.clone(),
+        signer_device: Some(authorizer.clone()),
+        agent_method: None,
+        custodian: None,
         authorization_event_ref: authorization.event_id.clone(),
         source_head: cut.authority.authority_commit_id.clone(),
-        generation,
+        generation: Some(generation),
         public_key_did: authorization
             .payload
             .device_public_key_did
@@ -373,7 +431,7 @@ pub(crate) async fn verify_current_recipient_view(
 pub(crate) async fn verify_backup_writer(
     conn: &mut AsyncPgConnection,
     backup: &KeyBackup,
-) -> Result<DeviceBackupAdmission, PgTransactionError> {
+) -> Result<BackupWriterAdmission, PgTransactionError> {
     backup
         .validate()
         .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;

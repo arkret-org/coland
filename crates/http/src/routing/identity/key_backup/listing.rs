@@ -35,10 +35,19 @@ pub(crate) async fn list_key_backups(
         arkret_models_crypto::KeysBackupsListParameters::Manager(query) => {
             return super::native::inventory(depot, req, query).await;
         }
-        arkret_models_crypto::KeysBackupsListParameters::Sidecar(_) => {
-            return Err(AppError::capability_denied(
-                "Sidecar root preparation requires current write authority",
-            ));
+        arkret_models_crypto::KeysBackupsListParameters::Sidecar(query) => {
+            let state = depot.get_typed::<AppState>().expect("state injected");
+            let session = aa.authenticated_session(state, req).await?;
+            let input = super::agent_sidecar::writer(state, &session).await?;
+            let (result, guard) = state
+                .persistence()
+                .prepare_agent_sidecar_backup(&input, &query.sidecar_id)
+                .await
+                .map_err(super::native::storage_error)?;
+            return coland_http::result::guarded_json_ok(
+                arkret_models_integration::KeysBackupsListResponseBody::Sidecar(result),
+                Some(guard),
+            );
         }
         arkret_models_crypto::KeysBackupsListParameters::Account(_) => {}
     }
@@ -118,6 +127,9 @@ async fn list(
         &session,
         arkret_wire::ServiceOperationId::SELF_KEYS_BACKUPS_READ_LIST_V1,
     )?;
+    if session.agent_session().is_some() {
+        return Err(AppError::not_found("account backup inventory unavailable"));
+    }
     let actor =
         crate::routing::identity::session_actor::session_actor_from_credential(state, &session)?;
     let account = actor

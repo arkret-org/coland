@@ -2114,6 +2114,8 @@ async fn commit_transaction_with_device_guard_inner(
             verified_unit,
             VerifiedPcrUnit::KeyBackupPointer | VerifiedPcrUnit::RealmActorBackupSeries
         )
+        && !(verified_unit == VerifiedPcrUnit::AgentControl
+            && crate::agent_control::is_agent_control_event(&transaction.event))
     {
         return Err(PersistenceError::Conflict(
             "key_backup_active_series_current_device_authority_unavailable".to_owned(),
@@ -2955,10 +2957,9 @@ pub(crate) async fn accepted_realm_reader_in_connection(
     actor: &arkret_wire::ActorId,
 ) -> PersistenceResult<bool> {
     if accepted_current_member_joined_in_connection(conn, realm_id, actor).await? {
-        if let Some(controller) = crate::agent_management_admission::read_controller_in_connection(
-            conn, realm_id, actor,
-        )
-        .await?
+        if let Some(controller) =
+            crate::agent_management_admission::read_controller_in_connection(conn, realm_id, actor)
+                .await?
         {
             return accepted_current_member_joined_in_connection(conn, realm_id, &controller).await;
         }
@@ -4683,10 +4684,16 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
     ) -> PersistenceResult<Option<arkret_wire::CommitStreamHead>> {
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
-        sql_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY").execute(&mut *conn).await?;
+            sql_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                .execute(&mut *conn)
+                .await?;
 
-        crate::replica_authorization::verified_head(conn, stream).await.map_err(Into::into)
-        }).await.map_err(PgTransactionError::into_persistence)
+            crate::replica_authorization::verified_head(conn, stream)
+                .await
+                .map_err(Into::into)
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
     }
 
     async fn replica_bootstrap_readers(

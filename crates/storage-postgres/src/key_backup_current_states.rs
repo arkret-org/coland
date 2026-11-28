@@ -206,6 +206,86 @@ pub(crate) fn verification_method_device(
     DeviceId::new(fragment.to_owned()).ok()
 }
 
+/// Bind the inner signature and its checkpoint to the actual signing Device's PCR.
+pub(crate) async fn verify_pointer_record(
+    conn: &mut AsyncPgConnection,
+    record: &KeyBackupActiveSeries,
+    status: &crate::pcr_device_status_reader::ConfirmedPcrDeviceStatusCut,
+) -> Result<arkret_signatures::PublicKeyMaterial, PgTransactionError> {
+    let authorization = status
+        .authority
+        .authorization
+        .as_ref()
+        .ok_or_else(|| pointer_rejected("KeyBackup pointer device has no authorization"))?;
+    let generation = status
+        .authority
+        .current_generation
+        .ok_or_else(|| pointer_rejected("KeyBackup pointer PCR has no current generation"))?;
+    if record.signature_proof.device_authorize_event_id.as_ref() != Some(&authorization.event_id) {
+        return Err(pointer_rejected(
+            "KeyBackup pointer names a device authorization that is not current",
+        ));
+    }
+    let source = record.source_commit_ref.as_ref().ok_or_else(|| {
+        pointer_rejected("Account backup pointer requires its original PCR source")
+    })?;
+    if source.device_generation_ref != generation {
+        return Err(pointer_rejected("backup_revision_stale"));
+    }
+    let checkpoint = sql_query(
+        "SELECT \
+           (SELECT c.stream_position FROM realm_commits c WHERE c.commit_id=$2 AND c.realm_id=$1 \
+              AND c.stream_ref=jsonb_build_object('kind','realm','realm_id',$1::text)) AS source_position, \
+           (SELECT g.current_stream_position FROM pcr_device_generation_current_states g \
+              WHERE g.realm_id=$1) AS generation_position, \
+           (SELECT c.stream_position FROM realm_commits c WHERE c.commit_id=$3 AND c.realm_id=$1) \
+              AS authorization_position",
+    )
+    .bind::<Text, _>(status.authority.realm_id.as_str())
+    .bind::<Text, _>(source.realm_commit_id.as_str())
+    .bind::<Text, _>(authorization.source_commit_id.as_str())
+    .get_result::<SourceCheckpointRow>(&mut *conn)
+    .await?;
+    match (
+        checkpoint.source_position,
+        checkpoint.generation_position,
+        checkpoint.authorization_position,
+    ) {
+        (Some(source), Some(generation_at), Some(authorized_at))
+            if source >= generation_at && source >= authorized_at => {}
+        _ => {
+            return Err(pointer_rejected(
+                "KeyBackup pointer source checkpoint is not an accepted PCR Commit under the current generation and device",
+            ));
+        }
+    }
+
+    let did_key = authorization
+        .payload
+        .device_public_key_did
+        .as_str()
+        .strip_prefix("did:key:")
+        .ok_or_else(|| pointer_rejected("current device authorization has no did:key key"))?;
+    let public_key = arkret_canonical::multibase::decode_ed25519_multibase(did_key)
+        .map_err(|_| pointer_rejected("current device authorization key is invalid"))?;
+    let device_key = arkret_signatures::PublicKeyMaterial::Ed25519Raw {
+        bytes: public_key.to_vec(),
+    };
+    let signed = record
+        .signing_payload_bytes()
+        .map_err(|error| invalid(error.to_string()))?;
+    if !arkret_signatures::verify_detached_ed25519_signature(
+        &device_key,
+        &signed,
+        record.signature_proof.signature.as_str(),
+    ) {
+        return Err(pointer_rejected(
+            "KeyBackup pointer signature does not match the device key",
+        ));
+    }
+    Ok(device_key)
+}
+
 /// The registered `ak.key_backup.active_series` unit. The caller supplies the
 /// Station-signed RealmCommit it prepared at the PCR head; everything that
 /// depends on durable state is decided here under the PCR authority lock:
@@ -255,7 +335,10 @@ pub(crate) async fn commit_key_backup_pointer_unit_in_connection(
         .actor_id
         .as_account_id()
         .ok_or_else(|| invalid("KeyBackup pointer actor is not an account"))?;
-    if record.actor_id != event.actor_id || record.backup_kind != BackupKind::SecretStorage {
+    if record.actor_id != event.actor_id
+        || record.backup_kind != BackupKind::SecretStorage
+        || record.custodian_actor_id.is_some()
+    {
         return Err(pointer_rejected(
             "key_backup_active_series_actor_or_class_mismatch",
         ));
@@ -329,77 +412,7 @@ pub(crate) async fn commit_key_backup_pointer_unit_in_connection(
             "KeyBackup pointer Commit does not extend the confirmed PCR head",
         ));
     }
-    let authorization = status
-        .authority
-        .authorization
-        .as_ref()
-        .ok_or_else(|| pointer_rejected("KeyBackup pointer device has no authorization"))?;
-    let generation = status
-        .authority
-        .current_generation
-        .ok_or_else(|| pointer_rejected("KeyBackup pointer PCR has no current generation"))?;
-    if record.signature_proof.device_authorize_event_id.as_ref() != Some(&authorization.event_id) {
-        return Err(pointer_rejected(
-            "KeyBackup pointer names a device authorization that is not current",
-        ));
-    }
-    let source = record.source_commit_ref.as_ref().ok_or_else(|| {
-        pointer_rejected("Account backup pointer requires its original PCR source")
-    })?;
-    if source.device_generation_ref != generation {
-        return Err(pointer_rejected("backup_revision_stale"));
-    }
-    let checkpoint = sql_query(
-        "SELECT \
-           (SELECT c.stream_position FROM realm_commits c WHERE c.commit_id=$2 AND c.realm_id=$1 \
-              AND c.stream_ref=jsonb_build_object('kind','realm','realm_id',$1::text)) AS source_position, \
-           (SELECT g.current_stream_position FROM pcr_device_generation_current_states g \
-              WHERE g.realm_id=$1) AS generation_position, \
-           (SELECT c.stream_position FROM realm_commits c WHERE c.commit_id=$3 AND c.realm_id=$1) \
-              AS authorization_position",
-    )
-    .bind::<Text, _>(event.realm_id.as_str())
-    .bind::<Text, _>(source.realm_commit_id.as_str())
-    .bind::<Text, _>(authorization.source_commit_id.as_str())
-    .get_result::<SourceCheckpointRow>(&mut *conn)
-    .await?;
-    match (
-        checkpoint.source_position,
-        checkpoint.generation_position,
-        checkpoint.authorization_position,
-    ) {
-        (Some(source), Some(generation_at), Some(authorized_at))
-            if source >= generation_at && source >= authorized_at => {}
-        _ => {
-            return Err(pointer_rejected(
-                "KeyBackup pointer source checkpoint is not an accepted PCR Commit under the current generation and device",
-            ));
-        }
-    }
-
-    let did_key = authorization
-        .payload
-        .device_public_key_did
-        .as_str()
-        .strip_prefix("did:key:")
-        .ok_or_else(|| pointer_rejected("current device authorization has no did:key key"))?;
-    let public_key = arkret_canonical::multibase::decode_ed25519_multibase(did_key)
-        .map_err(|_| pointer_rejected("current device authorization key is invalid"))?;
-    let device_key = arkret_signatures::PublicKeyMaterial::Ed25519Raw {
-        bytes: public_key.to_vec(),
-    };
-    let signed = record
-        .signing_payload_bytes()
-        .map_err(|error| invalid(error.to_string()))?;
-    if !arkret_signatures::verify_detached_ed25519_signature(
-        &device_key,
-        &signed,
-        record.signature_proof.signature.as_str(),
-    ) {
-        return Err(pointer_rejected(
-            "KeyBackup pointer signature does not match the device key",
-        ));
-    }
+    let device_key = verify_pointer_record(conn, &record, &status).await?;
     let envelope_bytes = arkret_signatures::EventProofBuilder::new()
         .envelope_bytes(event)
         .map_err(|error| invalid(format!("KeyBackup pointer envelope is invalid: {error}")))?;

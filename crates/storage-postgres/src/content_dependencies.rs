@@ -35,12 +35,6 @@ struct GroupRow {
 }
 
 #[derive(QueryableByName)]
-struct RootSubjectRow {
-    #[diesel(sql_type = Text)]
-    actor_id: String,
-}
-
-#[derive(QueryableByName)]
 struct DomainRow {
     #[diesel(sql_type = Text)]
     event_id: String,
@@ -261,15 +255,12 @@ pub(crate) async fn local_original_dependencies_in_connection(
         let owner = sql_query("SELECT principal_id,station_id FROM principal_resolutions WHERE pcr_realm_id=$1 FOR SHARE")
             .bind::<Text,_>(event.realm_id.as_str()).get_result::<Owner>(&mut *conn).await.optional()?
             .ok_or_else(|| missing("PCR has no accepted full Account owner"))?;
-        Some(
-            arkret_wire::ActorId::account(arkret_wire::AccountId::new(
-                arkret_wire::DidCoreId::new(owner.principal_id)
-                    .map_err(|error| invalid(error.to_string()))?,
-                arkret_wire::DidCoreId::new(owner.station_id)
-                    .map_err(|error| invalid(error.to_string()))?,
-            ))
-            .to_string(),
-        )
+        Some(arkret_wire::ActorId::account(arkret_wire::AccountId::new(
+            arkret_wire::DidCoreId::new(owner.principal_id)
+                .map_err(|error| invalid(error.to_string()))?,
+            arkret_wire::DidCoreId::new(owner.station_id)
+                .map_err(|error| invalid(error.to_string()))?,
+        )))
     } else {
         None
     };
@@ -305,21 +296,8 @@ pub(crate) async fn local_original_dependencies_in_connection(
     let mut actors = BTreeMap::new();
     let mut recipients = BTreeMap::new();
     for id in &backup_ids {
-        let row = sql_query("SELECT actor_id FROM key_backup_identities WHERE id=$1")
-            .bind::<diesel::sql_types::Uuid, _>(crate::ids::typed_uuid_part_expect_internal(
-                id.as_str(),
-            ))
-            .get_result::<RootSubjectRow>(&mut *conn)
-            .await
-            .optional()?
-            .ok_or_else(|| {
-                missing("original references a missing durable root package first-admission index")
-            })?;
-        let actor: arkret_wire::ActorId =
-            serde_json::from_str(&row.actor_id).map_err(PersistenceError::database)?;
-        // Agent custody remains a separate adapter. Human and Realm-native
-        // packages each retain their own current recipient qualification below.
-        let recipient = actor.clone();
+        let (actor, recipient) =
+            crate::content_root_packages::subjects_in_connection(conn, id).await?;
         recipients.insert(recipient.to_string(), recipient);
         actors.insert(actor.to_string(), actor);
     }
@@ -332,7 +310,7 @@ pub(crate) async fn local_original_dependencies_in_connection(
         let original = crate::content_root_packages::original_index_in_connection(conn, id).await?;
         if pcr_actor
             .as_ref()
-            .is_some_and(|actor| actor != &original.actor.to_string())
+            .is_some_and(|owner| !original.covers_personal_scope(owner, &event.scope_ref))
         {
             return Err(invalid("root package subject does not cover this original").into());
         }
@@ -343,13 +321,21 @@ pub(crate) async fn local_original_dependencies_in_connection(
             .iter()
             .filter(|(root, _)| wanted.iter().any(|wanted| wanted == root.as_str()))
         {
-            let (_, until) = crate::content_root_packages::current_root_in_connection(
+            let (packet, until) = crate::content_root_packages::current_root_in_connection(
                 conn,
                 &original.actor,
                 root_ref,
                 context,
             )
             .await?;
+            if pcr_actor
+                .as_ref()
+                .is_some_and(|owner| owner != &packet.recipient_subject)
+            {
+                return Err(
+                    invalid("root package recipient does not cover this personal scope").into(),
+                );
+            }
             source_valid_until = source_valid_until.min(until);
             used = true;
             selected.insert(root_ref.as_str().to_owned());
@@ -865,7 +851,7 @@ pub(crate) async fn guard_delete_in_connection(
         let source = sql_query("SELECT writer_admission AS payload FROM key_backup_identities WHERE id=$1 AND deleted_at IS NULL FOR SHARE")
             .bind::<diesel::sql_types::Uuid,_>(crate::ids::typed_uuid_part_expect_internal(backup.backup_id.as_str()))
             .get_result::<crate::JsonPayloadRow>(&mut *conn).await?;
-        let admission: crate::key_backup_authority::DeviceBackupAdmission =
+        let admission: crate::key_backup_authority::BackupWriterAdmission =
             serde_json::from_value(source.payload).map_err(PersistenceError::database)?;
         admission.verify_retained_envelope(backup)?;
     }

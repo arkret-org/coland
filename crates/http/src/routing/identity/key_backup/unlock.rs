@@ -398,10 +398,13 @@ pub(super) async fn issue_key_backup_unlock_challenge(
     request
         .validate()
         .map_err(|error| schema_error(error.to_string()))?;
-    if request.subject_actor_id.is_some() {
+    if request.subject_actor_id.is_some() && request.content_history.is_none() {
         return Err(AppError::not_found("key backup history source unavailable"));
     }
     let session = aa.authenticated_session(state, req).await?;
+    if session.agent_session().is_some() {
+        return Err(AppError::not_found("key backup unavailable"));
+    }
     if session.session_grant.as_ref().is_some_and(|grant| {
         grant.credential_class
             == arkret_models_identity::SessionGrantCredentialClass::RecoverySession
@@ -425,7 +428,13 @@ pub(super) async fn issue_key_backup_unlock_challenge(
         .await
         .map_err(|error| AppError::internal(error.to_string()))?
         .ok_or_else(|| AppError::not_found("key backup not found"))?;
-    if !backup_actor_matches(&backup, &local_backup_actor(state, &session.actor)?) {
+    if !allows_history_subject(
+        &backup,
+        &local_backup_actor(state, &session.actor)?,
+        request.content_history.as_ref(),
+        request.subject_actor_id.as_ref(),
+        request.custody_authorization_ref.as_ref(),
+    ) {
         return Err(AppError::not_found("key backup not found"));
     }
     let typed: KeyBackup =
@@ -647,5 +656,31 @@ mod tests {
             device,
             &format!("{did}#other")
         ));
+    }
+}
+
+/// Route only an exactly bound cross-subject packet to the history authorization transaction.
+pub(super) fn allows_history_subject(
+    backup: &Value,
+    caller: &arkret_wire::ActorId,
+    history: Option<&arkret_models_crypto::ContentHistoryBackupAccess>,
+    subject: Option<&arkret_wire::ActorId>,
+    provision: Option<&arkret_wire::EventId>,
+) -> bool {
+    match (subject, provision) {
+        (None, None) => {
+            backup.get("custodian_actor_id").is_none() && backup_actor_matches(backup, caller)
+        }
+        (Some(subject), Some(provision)) => {
+            history.is_some_and(|h| {
+                matches!(
+                    h.source.stream_ref,
+                    arkret_wire::CommitStreamRef::Sidecar { .. }
+                )
+            }) && backup_actor_matches(backup, subject)
+                && backup.get("custodian_actor_id") == Some(&json!(caller))
+                && backup.get("custody_authorization_ref") == Some(&json!(provision))
+        }
+        _ => false,
     }
 }

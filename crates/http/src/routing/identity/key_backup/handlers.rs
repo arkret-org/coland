@@ -237,6 +237,34 @@ pub(super) async fn put_key_backup(
     // OpenAPI request contract is strong rather than `Value`.
     let backup = backup.into_inner();
     let account_actor = local_backup_actor(state, &session.actor)?;
+    if session.agent_session().is_some() {
+        if backup.backup_id != typed_backup_id || backup.actor_id != account_actor {
+            return Err(AppError::capability_denied(
+                "Agent backup path or subject differs",
+            ));
+        }
+        let [item] = backup.contents.as_slice() else {
+            return Err(AppError::capability_denied(
+                "Agent Sidecar requires one root",
+            ));
+        };
+        let Some(arkret_wire::ScopeRef::Sidecar { sidecar_id, .. }) =
+            item.root_context.as_ref().map(|ctx| &ctx.effective_scope)
+        else {
+            return Err(AppError::capability_denied(
+                "Agent Sidecar requires its own root context",
+            ));
+        };
+        let input = super::agent_sidecar::writer(state, &session).await?;
+        let result = state
+            .persistence()
+            .put_agent_sidecar_backup(&input, sidecar_id, &backup, &idempotency_key)
+            .await
+            .map_err(super::native::storage_error)?;
+        return json_ok(
+            arkret_models_crypto::KeysBackupsReplaceOperationResponseBody::Account(result),
+        );
+    }
     validate_key_backup_body_typed(&typed_backup_id, &account_actor, &backup)?;
     validate_key_backup_session_device(&backup, session.require_human_device_id())?;
     let device_gate =
@@ -480,6 +508,9 @@ pub(super) async fn unlock_key_backup(
         proof => return super::native::unlock(depot, req, backup_id.into_inner(), proof).await,
     };
     let session = aa.authenticated_session(state, req).await?;
+    if session.agent_session().is_some() {
+        return Err(AppError::not_found("key backup unavailable"));
+    }
     let backup_id = backup_id.into_inner();
     // spec `keys_backups_unlock_request_body` (additionalProperties: false):
     // `{proof}` only; the unlock proof MUST NOT travel in a header or query.
@@ -534,7 +565,13 @@ pub(super) async fn unlock_key_backup(
     else {
         return Err(AppError::not_found("key backup not found"));
     };
-    if !backup_actor_matches(&backup, &local_backup_actor(state, &session.actor)?) {
+    if !allows_history_subject(
+        &backup,
+        &local_backup_actor(state, &session.actor)?,
+        body.proof.content_history.as_ref(),
+        body.proof.subject_actor_id.as_ref(),
+        body.proof.custody_authorization_ref.as_ref(),
+    ) {
         return Err(AppError::not_found("key backup not found"));
     }
     // The path `backup_id` and `proof.backup_id` MUST match: the envelope is
@@ -630,6 +667,9 @@ pub(super) async fn delete_key_backup(
 ) -> Result<(), AppError> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
+    if session.agent_session().is_some() {
+        return Err(AppError::not_found("key backup unavailable"));
+    }
     let idempotency_principal_id = arkret_wire::DidCoreId::new(session.actor.clone())
         .map_err(|error| AppError::internal(format!("session actor invalid: {error}")))?;
     let backup_id = backup_id.into_inner();

@@ -78,7 +78,7 @@ pub(crate) fn is_agent_control_event(event: &arkret_wire::Event) -> bool {
     is_agent_control_kind(&event.kind)
         || (matches!(
             event.kind,
-            EventKind::ProfileCreate | EventKind::ProfileUpdate
+            EventKind::ProfileCreate | EventKind::ProfileUpdate | EventKind::KeyBackupActiveSeries
         ) && event
             .executed_by
             .as_ref()
@@ -103,7 +103,7 @@ async fn pcr_of(
 
 /// Select only the immutable PCR birth accepted for this complete Agent.
 /// This neither checks today's delegation nor grants controller authority.
-async fn accepted_agent_pcr(
+pub(crate) async fn accepted_agent_pcr(
     conn: &mut AsyncPgConnection,
     agent: &arkret_wire::AccountId,
 ) -> Result<arkret_wire::RealmId, PgTransactionError> {
@@ -160,7 +160,7 @@ async fn lock_realm(
     .is_some())
 }
 
-async fn accepted_lifecycle(
+pub(crate) async fn accepted_lifecycle(
     conn: &mut AsyncPgConnection,
     realm_id: &arkret_wire::RealmId,
     agent: &arkret_wire::ActorId,
@@ -544,6 +544,42 @@ async fn admit_agent_control_in_connection(
     let non_terminal = matches!(lifecycle.as_deref(), Some("active" | "paused"));
     let payload_value = Value::Object(event.payload.clone().into_iter().collect());
     match event.kind {
+        EventKind::KeyBackupActiveSeries => {
+            use arkret_models_collaboration::events_payloads::{
+                KeyBackupActiveSeries, validate_key_backup_active_series_record,
+            };
+            let record: KeyBackupActiveSeries = serde_json::from_value(payload_value)
+                .map_err(|error| schema(&error.to_string()))?;
+            validate_key_backup_active_series_record(&record)
+                .map_err(|error| schema(error.reason_code()))?;
+            let (owner_pcr, provision, original) =
+                crate::agent_provisioning::declared_agent_provision_in_connection(
+                    conn,
+                    &event.realm_id,
+                )
+                .await?
+                .ok_or_else(|| precondition("Agent has no accepted provision"))?;
+            if !non_terminal
+                || owner_pcr != controller_realm
+                || provision.agent_id != agent.principal_id
+                || record.actor_id != event.actor_id
+                || record.backup_kind != arkret_models_crypto::BackupKind::SecretStorage
+                || record.custodian_actor_id.as_ref() != event.executed_by.as_ref()
+                || Some(&provision.history_custody.custodian_actor_id) != event.executed_by.as_ref()
+                || record.custody_authorization_ref.as_ref() != Some(&original.event_id)
+                || record.signature_proof.verification_method != proof.verification_method
+            {
+                return Err(precondition(
+                    "Agent backup series differs from its accepted custody or signer",
+                ));
+            }
+            crate::key_backup_current_states::verify_pointer_record(
+                conn,
+                &record,
+                &controller_status,
+            )
+            .await?;
+        }
         EventKind::AgentKeyAuthorize => {
             let payload: AgentKeyAuthorizePayload = serde_json::from_value(payload_value)
                 .map_err(|error| schema(&format!("Agent key authorization is invalid: {error}")))?;
@@ -691,6 +727,12 @@ async fn admit_agent_control_in_connection(
     // active set, a revoke with nothing active or a status edge outside the
     // lifecycle FSM refuses the whole Event.
     let projected = match event.kind {
+        EventKind::KeyBackupActiveSeries => {
+            crate::key_backup_current_states::commit_key_backup_pointer_in_connection(
+                conn, event, commit,
+            )
+            .await
+        }
         EventKind::ProfileCreate | EventKind::ProfileUpdate => {
             crate::actor_profiles::write_profile_current_in_connection(
                 conn,

@@ -142,8 +142,11 @@ pub(crate) async fn qualify(
     backup_id: &arkret_wire::BackupId,
 ) -> PersistenceResult<(KeyBackup, chrono::DateTime<chrono::Utc>)> {
     let realm = history.source.stream_ref.realm_id();
-    if !matches!(&history.source.stream_ref, CommitStreamRef::Realm { .. } | CommitStreamRef::Sidecar { .. })
-        || history.root_refs.is_empty() {
+    if !matches!(
+        &history.source.stream_ref,
+        CommitStreamRef::Realm { .. } | CommitStreamRef::Sidecar { .. }
+    ) || history.root_refs.is_empty()
+    {
         return Err(denied("source or selection"));
     }
     let (owned_realm, expires) = current_reader(conn, reader).await?;
@@ -151,9 +154,17 @@ pub(crate) async fn qualify(
         return Err(denied("source is outside the original Account PCR"));
     }
     if let CommitStreamRef::Sidecar { sidecar_id, .. } = &history.source.stream_ref {
-        let floor = crate::sidecar_authority_cut::controller_floor_in_connection(conn, realm, sidecar_id,
-            &ActorId::account(reader.account_id.clone())).await?.ok_or_else(|| denied("personal history unavailable"))?;
-        if history.source.stream_position < floor.oldest_position { return Err(denied("outside personal history")); }
+        let floor = crate::sidecar_authority_cut::controller_floor_in_connection(
+            conn,
+            realm,
+            sidecar_id,
+            &ActorId::account(reader.account_id.clone()),
+        )
+        .await?
+        .ok_or_else(|| denied("personal history unavailable"))?;
+        if history.source.stream_position < floor.oldest_position {
+            return Err(denied("outside personal history"));
+        }
     }
     let original = crate::committed_disclosure::accepted_full_event_in_connection(
         conn,
@@ -165,7 +176,8 @@ pub(crate) async fn qualify(
         || original.commit.stream_ref != history.source.stream_ref
         || original.commit.stream_position != history.source.stream_position
         || original.event.scope_ref != history.source.stream_ref.scope_ref()
-        || original.event.actor_id != ActorId::account(reader.account_id.clone())
+        || (matches!(history.source.stream_ref, CommitStreamRef::Realm { .. })
+            && original.event.actor_id != ActorId::account(reader.account_id.clone()))
     {
         return Err(denied("original coordinates or subject"));
     }
@@ -194,7 +206,12 @@ pub(crate) async fn qualify(
     crate::pcr_recovery_policy_unit::current_policy(conn, &reader.account_id)
         .await
         .map_err(crate::PgTransactionError::into_persistence)?;
-    crate::key_backup::lock_backup_series_in_connection(conn, &actor).await?;
+    let (subject, custodian) =
+        crate::content_root_packages::subjects_in_connection(conn, backup_id).await?;
+    if custodian != actor {
+        return Err(denied("wrong backup custodian"));
+    }
+    crate::key_backup::lock_backup_series_in_connection(conn, &subject).await?;
     let wanted = history
         .root_refs
         .iter()
@@ -203,7 +220,7 @@ pub(crate) async fn qualify(
     let packet = crate::content_root_packages::read_in_connection(conn, backup_id, &wanted)
         .await
         .map_err(crate::PgTransactionError::into_persistence)?;
-    if packet.actor != actor
+    if (matches!(history.source.stream_ref, CommitStreamRef::Realm { .. }) && packet.actor != actor)
         || packet.recipient_subject != actor
         || history.root_refs.iter().any(|root| {
             !packet.roots.iter().any(|(r, context)| {
@@ -216,7 +233,7 @@ pub(crate) async fn qualify(
     for (root, context) in &packet.roots {
         let accepted = sql_query("SELECT root_context AS payload FROM content_original_roots WHERE event_id=$1 AND root_ref=$2 AND backup_actor_id=$3 FOR SHARE")
             .bind::<Text,_>(history.source.event_id.as_str()).bind::<Text,_>(root.as_str())
-            .bind::<Text,_>(actor.to_string()).get_result::<JsonPayloadRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
+            .bind::<Text,_>(packet.actor.to_string()).get_result::<JsonPayloadRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
             .ok_or_else(|| denied("original root context unavailable"))?;
         if accepted.payload != serde_json::to_value(context).map_err(PersistenceError::database)? {
             return Err(denied("original root context changed"));
@@ -236,18 +253,56 @@ pub(crate) async fn qualify(
         crate::content_root_packages::require_original_binding(
             conn,
             &original_ids,
-            &actor,
+            &packet.actor,
             root,
             context,
         )
         .await?;
     }
     let backup = crate::content_root_packages::read_retained_envelope(conn, backup_id).await?;
-    if backup.backup_id != *backup_id
-        || backup.custodian_actor_id.is_some()
-        || backup.custody_authorization_ref.is_some()
-    {
-        return Err(denied("subject differs"));
+    if backup.backup_id != *backup_id {
+        return Err(denied("backup identity differs"));
+    }
+    if let Some(controller) = &backup.custodian_actor_id {
+        let account = backup
+            .actor_id
+            .as_account_id()
+            .ok_or_else(|| denied("Agent Account"))?;
+        let pcr = crate::agent_control::accepted_agent_pcr(conn, account)
+            .await
+            .map_err(crate::PgTransactionError::into_persistence)?;
+        let (owner_pcr, provision, reference) =
+            crate::agent_provisioning::declared_agent_provision_in_connection(conn, &pcr)
+                .await
+                .map_err(crate::PgTransactionError::into_persistence)?
+                .ok_or_else(|| denied("Agent provision unavailable"))?;
+        if owner_pcr != owned_realm
+            || provision.agent_id != account.principal_id
+            || provision.controller_principal_id != reader.account_id.principal_id
+            || provision.history_custody.custodian_actor_id != actor
+            || backup.custody_authorization_ref.as_ref() != Some(&reference.event_id)
+            || !matches!(
+                crate::agent_control::accepted_lifecycle(conn, &pcr, &backup.actor_id)
+                    .await
+                    .map_err(crate::PgTransactionError::into_persistence)?
+                    .as_deref(),
+                Some("active" | "paused")
+            )
+        {
+            return Err(denied("Agent custody unavailable"));
+        }
+        let [item] = backup.contents.as_slice() else {
+            return Err(denied("custody requires a single root"));
+        };
+        if controller != &actor
+            || !matches!(history.source.stream_ref, CommitStreamRef::Sidecar { .. })
+            || item
+                .root_context
+                .as_ref()
+                .is_none_or(|ctx| ctx.effective_scope != original.event.scope_ref)
+        {
+            return Err(denied("private root disclosure scope differs"));
+        }
     }
     let recipient_expiry = recipient(conn, &backup).await?;
     Ok((backup, expires.min(recipient_expiry)))
@@ -291,8 +346,9 @@ pub(crate) async fn verify_proof(
         || challenge.custody_authorization_ref != proof.custody_authorization_ref
         || challenge.content_history != proof.content_history
         || proof.content_history.is_none()
-        || proof.subject_actor_id.is_some()
-        || proof.custody_authorization_ref.is_some()
+        || proof.subject_actor_id.as_ref()
+            != backup.custodian_actor_id.as_ref().map(|_| &backup.actor_id)
+        || proof.custody_authorization_ref != backup.custody_authorization_ref
         || proof.issued_at < challenge.issued_at
         || proof.issued_at >= challenge.expires_at
         || proof.issued_at > chrono::Utc::now()
@@ -376,8 +432,6 @@ pub(crate) async fn issue(
     if challenge.account_id != reader.account_id
         || challenge.requesting_device_id != reader.device_id
         || challenge.service_id != reader.account_id.station_id
-        || challenge.subject_actor_id.is_some()
-        || challenge.custody_authorization_ref.is_some()
     {
         return Err(denied("challenge caller"));
     }
@@ -404,7 +458,10 @@ pub(crate) async fn issue(
         }
     }
     let (backup, _) = qualify(held.connection(), reader, history, &challenge.backup_id).await?;
-    if challenge.series_id != backup.series_id
+    if challenge.subject_actor_id.as_ref()
+        != backup.custodian_actor_id.as_ref().map(|_| &backup.actor_id)
+        || challenge.custody_authorization_ref != backup.custody_authorization_ref
+        || challenge.series_id != backup.series_id
         || challenge.ciphertext_digest != backup.ciphertext_digest
     {
         return Err(denied("challenge immutable object"));

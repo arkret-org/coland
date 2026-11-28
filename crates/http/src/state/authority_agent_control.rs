@@ -25,6 +25,7 @@ pub(super) async fn submit_self_agent_controller_event(
             | arkret_wire::EventKind::AgentKeyRevoke
             | arkret_wire::EventKind::ProfileCreate
             | arkret_wire::EventKind::ProfileUpdate
+            | arkret_wire::EventKind::KeyBackupActiveSeries
     ) {
         return Err(ServiceError::Internal(
             "Agent controller admission received another Event kind".to_owned(),
@@ -43,6 +44,19 @@ pub(super) async fn submit_self_agent_controller_event(
             .map_err(|error| {
                 ServiceError::Conflict(format!("authenticated Account unavailable: {error}"))
             })?;
+    if event.kind == arkret_wire::EventKind::KeyBackupActiveSeries
+        && session.human_device_id().is_none_or(|device| {
+            event
+                .producer_proof
+                .as_ref()
+                .and_then(|proof| proof.verification_method.as_str().rsplit_once('#'))
+                .is_none_or(|(_, fragment)| fragment != device)
+        })
+    {
+        return Err(ServiceError::Conflict(
+            "Agent series selection requires the signing controller Device".into(),
+        ));
+    }
     if event.executed_by.as_ref() != Some(&controller) {
         return Err(ServiceError::Conflict(
             "an Agent controller Event is executed by the authenticated controller".to_owned(),

@@ -189,6 +189,31 @@ pub struct KeyBackupDeleteGate {
 /// delete-challenge ledger the high-risk DELETE path consumes.
 #[async_trait]
 pub trait KeyBackupStore: Send + Sync {
+    async fn prepare_agent_sidecar_backup(
+        &self,
+        _input: &crate::AccountContentDeliveryInput,
+        _sidecar: &arkret_wire::SidecarId,
+    ) -> PersistenceResult<(
+        arkret_models_crypto::SidecarBackupPrepareResponseBody,
+        Box<dyn crate::AccountContentDeliveryGuard>,
+    )> {
+        Err(crate::PersistenceError::Conflict(
+            "capability_denied: private root preparation unavailable".into(),
+        ))
+    }
+
+    async fn put_agent_sidecar_backup(
+        &self,
+        _input: &crate::AccountContentDeliveryInput,
+        _sidecar: &arkret_wire::SidecarId,
+        _backup: &arkret_models_crypto::KeyBackup,
+        _idempotency_key: &str,
+    ) -> PersistenceResult<arkret_models_crypto::KeysBackupsReplaceResponseBody> {
+        Err(crate::PersistenceError::Conflict(
+            "capability_denied: private root admission unavailable".into(),
+        ))
+    }
+
     async fn issue_native_unlock(
         &self,
         _reader: &RealmActorBackupReader,

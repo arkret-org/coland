@@ -151,7 +151,8 @@ async fn require_personal_root_writer(
             return Err(denied());
         }
         crate::realm_authorization_cut::lock_realm_authorization_cut(conn, realm_id).await?;
-        // Replacement packets may preserve an already admitted historical root in the same native custody.
+        // Replacement packets may preserve an already admitted historical root in the same native
+        // custody.
         let root = item.root_ref.as_ref().ok_or_else(denied)?;
         let known = diesel::sql_query("SELECT EXISTS(SELECT 1 FROM content_original_roots WHERE root_ref=$1 AND backup_actor_id=$2 AND root_context=$3) AS present")
             .bind::<Text,_>(root.as_str()).bind::<Text,_>(backup.actor_id.to_string()).bind::<Jsonb,_>(serde_json::json!(context))
@@ -238,7 +239,7 @@ pub(crate) async fn put_key_backup_in_connection(
     conn: &mut crate::AsyncPgConnection,
     backup_id: &str,
     payload: &Value,
-    admission: &crate::key_backup_authority::DeviceBackupAdmission,
+    admission: &crate::key_backup_authority::BackupWriterAdmission,
 ) -> PersistenceResult<()> {
     let typed: arkret_models_crypto::KeyBackup =
         serde_json::from_value(payload.clone()).map_err(PersistenceError::database)?;
@@ -261,7 +262,12 @@ pub(crate) async fn put_key_backup_in_connection(
     }
     let actor = typed.actor_id.to_string();
     let uuid = ids::typed_uuid_part_expect_internal(backup_id);
-    if let Some(account) = typed.actor_id.as_account_id() {
+    if let Some(account) = typed
+        .custodian_actor_id
+        .as_ref()
+        .unwrap_or(&typed.actor_id)
+        .as_account_id()
+    {
         crate::pcr_private_authority::require_active_account_owner(conn, account).await?;
     }
     lock_backup_series_in_connection(conn, &typed.actor_id).await?;
@@ -438,6 +444,27 @@ async fn list_page_in_connection(
 
 #[async_trait]
 impl KeyBackupStore for PgKeyBackupStore {
+    async fn prepare_agent_sidecar_backup(
+        &self,
+        input: &coland_storage::AccountContentDeliveryInput,
+        sidecar: &arkret_wire::SidecarId,
+    ) -> PersistenceResult<(
+        arkret_models_crypto::SidecarBackupPrepareResponseBody,
+        Box<dyn coland_storage::AccountContentDeliveryGuard>,
+    )> {
+        crate::agent_sidecar_backup::prepare(&self.pool, input, sidecar).await
+    }
+
+    async fn put_agent_sidecar_backup(
+        &self,
+        input: &coland_storage::AccountContentDeliveryInput,
+        sidecar: &arkret_wire::SidecarId,
+        backup: &arkret_models_crypto::KeyBackup,
+        idempotency_key: &str,
+    ) -> PersistenceResult<arkret_models_crypto::KeysBackupsReplaceResponseBody> {
+        crate::agent_sidecar_backup::put(&self.pool, input, sidecar, backup, idempotency_key).await
+    }
+
     async fn issue_native_unlock(
         &self,
         reader: &coland_storage::RealmActorBackupReader,

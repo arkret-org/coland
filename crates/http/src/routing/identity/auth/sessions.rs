@@ -481,6 +481,8 @@ fn agent_recipient_operation(method: &str, path: &str) -> Option<&'static str> {
         operation @ (ServiceOperationId::SelfAccountStreamSubscribeV1
         | ServiceOperationId::SelfCommittedEventResourceGetV1
         | ServiceOperationId::SelfCommittedEventStreamSubscribeV1
+        | ServiceOperationId::SelfKeysBackupsReadListV1
+        | ServiceOperationId::SelfKeysBackupsResourceReplaceV1
         | ServiceOperationId::SelfBlobResourceGetV1
         | ServiceOperationId::SelfBlobResourceHeadV1),
     ) = ServiceOperationId::from_http_request(method, path)
@@ -1081,6 +1083,16 @@ mod tests {
         for (method, path, operation) in [
             (
                 "GET",
+                "/_arkret/self/keys/backups",
+                ServiceOperationId::SELF_KEYS_BACKUPS_READ_LIST_V1,
+            ),
+            (
+                "PUT",
+                "/_arkret/self/keys/backups/ak:backup:example",
+                ServiceOperationId::SELF_KEYS_BACKUPS_RESOURCE_REPLACE_V1,
+            ),
+            (
+                "GET",
                 "/_arkret/self/contacts",
                 ServiceOperationId::SELF_CONTACT_READ_LIST_V1,
             ),
@@ -1236,7 +1248,7 @@ mod tests {
             ("GET", "/_arkret/self/device-messages/ack"),
             ("GET", "/_arkret/self/account/stream"),
             ("POST", "/_arkret/self/account/subscribe"),
-            ("GET", "/_arkret/self/keys/backups"),
+            ("DELETE", "/_arkret/self/keys/backups/ak:backup:example"),
             ("POST", "/_arkret/self/realms/ak:realm:example/streams"),
             ("GET", "/_arkret/self/realms/ak:realm:example/streams/extra"),
             (

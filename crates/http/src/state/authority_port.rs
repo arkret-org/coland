@@ -68,7 +68,82 @@ fn self_event_route(kind: &arkret_wire::EventKind) -> ServiceResult<SelfEventRou
         EventKind::MlsHistoryRequest
         | EventKind::MlsHistoryGrant
         | EventKind::RealmActorStatusSet
-        | EventKind::RealmActorRecoverySet | EventKind::AppletBridgeError | EventKind::SidecarCreate | EventKind::SidecarMemberState | EventKind::SidecarContextAttach | EventKind::AgentSidecarExchangeControl | EventKind::RealmOrganization | EventKind::RealmLink | EventKind::RealmJoinRule | EventKind::RealmHistoryAccess | EventKind::StrandCreate | EventKind::RealmProfile | EventKind::RealmTombstone | EventKind::RealmDestroy | EventKind::RealmArchive | EventKind::RealmRestore | EventKind::RealmFreeze | EventKind::RealmUnfreeze | EventKind::RealmGovernanceStationChange | EventKind::StrandUpdate | EventKind::StrandTracksUpdate | EventKind::RsvpSet | EventKind::StrandArchive | EventKind::StrandRestore | EventKind::StrandStageSet | EventKind::StrandMove | EventKind::StrandReorder | EventKind::StrandWatchSet | EventKind::AgentInteractionSet | EventKind::AgentActionApprove | EventKind::SpaceCreate | EventKind::SpaceUpdate | EventKind::SpaceParent | EventKind::SpaceTombstone | EventKind::SchemaDefine | EventKind::RealmPolicyBundle | EventKind::PolicySet | EventKind::PolicyAction | EventKind::DirectConversationBound | EventKind::RealmSetDefaultStrand | EventKind::ScopeReadReceiptPolicy | EventKind::RealmPlaintextVisibleServices | EventKind::RealmPreviewPolicy | EventKind::RealmAssetPrivacyPolicy | EventKind::MemberIdentityUpdate | EventKind::CallCreate | EventKind::CallState | EventKind::CallRecordingStart | EventKind::RealmMediaService | EventKind::MessageCreate | EventKind::MemberState | EventKind::CapabilityGrant | EventKind::MessageRevise | EventKind::MessageRedact | EventKind::ModerationDecision | EventKind::ModerationDecisionLift | EventKind::RealmInviteLinkCreate | EventKind::RealmInviteLinkRevoke | EventKind::RealmInviteLinkAccept | EventKind::InviteCreate | EventKind::InviteRevoke | EventKind::InviteCancel | EventKind::InviteAccept | EventKind::CapabilityRevoke | EventKind::CapabilityRelinquish | EventKind::RelationCreate | EventKind::RelationUpdate | EventKind::RelationTombstone | EventKind::SpaceArchive | EventKind::SpaceRestore | EventKind::ReactionAdd | EventKind::ReactionRemove | EventKind::PinAdd | EventKind::PinRemove | EventKind::PinReorder | EventKind::MimiRoomBinding => Ok(SelfEventRoute::GuardedUnit),
+        | EventKind::RealmActorRecoverySet
+        | EventKind::AppletBridgeError
+        | EventKind::SidecarCreate
+        | EventKind::SidecarMemberState
+        | EventKind::SidecarContextAttach
+        | EventKind::AgentSidecarExchangeControl
+        | EventKind::RealmOrganization
+        | EventKind::RealmLink
+        | EventKind::RealmJoinRule
+        | EventKind::RealmHistoryAccess
+        | EventKind::StrandCreate
+        | EventKind::RealmProfile
+        | EventKind::RealmTombstone
+        | EventKind::RealmDestroy
+        | EventKind::RealmArchive
+        | EventKind::RealmRestore
+        | EventKind::RealmFreeze
+        | EventKind::RealmUnfreeze
+        | EventKind::RealmGovernanceStationChange
+        | EventKind::StrandUpdate
+        | EventKind::StrandTracksUpdate
+        | EventKind::RsvpSet
+        | EventKind::StrandArchive
+        | EventKind::StrandRestore
+        | EventKind::StrandStageSet
+        | EventKind::StrandMove
+        | EventKind::StrandReorder
+        | EventKind::StrandWatchSet
+        | EventKind::AgentInteractionSet
+        | EventKind::AgentActionApprove
+        | EventKind::SpaceCreate
+        | EventKind::SpaceUpdate
+        | EventKind::SpaceParent
+        | EventKind::SpaceTombstone
+        | EventKind::SchemaDefine
+        | EventKind::RealmPolicyBundle
+        | EventKind::PolicySet
+        | EventKind::PolicyAction
+        | EventKind::DirectConversationBound
+        | EventKind::RealmSetDefaultStrand
+        | EventKind::ScopeReadReceiptPolicy
+        | EventKind::RealmPlaintextVisibleServices
+        | EventKind::RealmPreviewPolicy
+        | EventKind::RealmAssetPrivacyPolicy
+        | EventKind::MemberIdentityUpdate
+        | EventKind::CallCreate
+        | EventKind::CallState
+        | EventKind::CallRecordingStart
+        | EventKind::RealmMediaService
+        | EventKind::MessageCreate
+        | EventKind::MemberState
+        | EventKind::CapabilityGrant
+        | EventKind::MessageRevise
+        | EventKind::MessageRedact
+        | EventKind::ModerationDecision
+        | EventKind::ModerationDecisionLift
+        | EventKind::RealmInviteLinkCreate
+        | EventKind::RealmInviteLinkRevoke
+        | EventKind::RealmInviteLinkAccept
+        | EventKind::InviteCreate
+        | EventKind::InviteRevoke
+        | EventKind::InviteCancel
+        | EventKind::InviteAccept
+        | EventKind::CapabilityRevoke
+        | EventKind::CapabilityRelinquish
+        | EventKind::RelationCreate
+        | EventKind::RelationUpdate
+        | EventKind::RelationTombstone
+        | EventKind::SpaceArchive
+        | EventKind::SpaceRestore
+        | EventKind::ReactionAdd
+        | EventKind::ReactionRemove
+        | EventKind::PinAdd
+        | EventKind::PinRemove
+        | EventKind::PinReorder
+        | EventKind::MimiRoomBinding => Ok(SelfEventRoute::GuardedUnit),
         EventKind::Unknown(raw) => Err(ServiceError::SchemaViolation(format!(
             "self Event kind {raw} is not registered"
         ))),
@@ -497,7 +572,9 @@ impl AuthorityProtocolPort for AppState {
             arkret_wire::EventKind::AgentKeyAuthorize | arkret_wire::EventKind::AgentKeyRevoke
         ) || (matches!(
             event.kind,
-            arkret_wire::EventKind::ProfileCreate | arkret_wire::EventKind::ProfileUpdate
+            arkret_wire::EventKind::ProfileCreate
+                | arkret_wire::EventKind::ProfileUpdate
+                | arkret_wire::EventKind::KeyBackupActiveSeries
         ) && event
             .executed_by
             .as_ref()

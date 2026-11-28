@@ -20,6 +20,7 @@ use crate::routing::system::extract::AuthArgs;
 use crate::state::AppState;
 use crate::wire::{KeyBackupPutStatus, KeysBackupsPage, KeysBackupsReplaceResponseBody};
 
+mod agent_sidecar;
 mod delete;
 mod handlers;
 mod listing;

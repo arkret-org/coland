@@ -20,6 +20,8 @@ pub(crate) struct BackupWriterAdmission {
     envelope_digest: String,
     signer_actor: arkret_wire::ActorId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    subject: Option<arkret_wire::ActorId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     signer_device: Option<DeviceId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     agent_method: Option<arkret_wire::DidUrl>,
@@ -46,6 +48,7 @@ impl BackupWriterAdmission {
             envelope_digest: arkret_canonical::canonical_sha256(backup)
                 .map_err(PersistenceError::database)?,
             signer_actor: actor.clone(),
+            subject: None,
             signer_device: None,
             agent_method: Some(endpoint.verification_method.clone()),
             custodian: backup.custodian_actor_id.clone(),
@@ -62,6 +65,23 @@ impl BackupWriterAdmission {
         Ok(admission)
     }
 
+    pub(crate) fn bind_controller_subject(
+        mut self,
+        backup: &KeyBackup,
+    ) -> crate::PersistenceResult<Self> {
+        if self.signer_device.is_none()
+            || backup.custodian_actor_id.as_ref() != Some(&self.signer_actor)
+            || backup.actor_id == self.signer_actor
+        {
+            return Err(PersistenceError::Conflict(
+                "capability_denied: wrong backup custodian".into(),
+            ));
+        }
+        self.subject = Some(backup.actor_id.clone());
+        self.custodian = backup.custodian_actor_id.clone();
+        self.verify_retained_envelope(backup)?;
+        Ok(self)
+    }
     pub(crate) fn matches_envelope(&self, digest: &str) -> bool {
         self.envelope_digest == digest
     }
@@ -76,7 +96,8 @@ impl BackupWriterAdmission {
         actor: &arkret_wire::ActorId,
         digest: &str,
     ) -> bool {
-        &self.signer_actor == actor && self.matches_envelope(digest)
+        self.subject.as_ref().unwrap_or(&self.signer_actor) == actor
+            && self.matches_envelope(digest)
     }
 
     /// Verify the exact retained original using its first accepted key. Current
@@ -92,7 +113,7 @@ impl BackupWriterAdmission {
         };
         if !self.matches_envelope(
             &arkret_canonical::canonical_sha256(backup).map_err(PersistenceError::database)?,
-        ) || backup.actor_id != self.signer_actor
+        ) || &backup.actor_id != self.subject.as_ref().unwrap_or(&self.signer_actor)
         {
             return Err(invalid());
         }
@@ -185,6 +206,7 @@ pub(crate) fn verify_realm_device_backup_signature(
         envelope_digest: arkret_canonical::canonical_sha256(backup)
             .map_err(PersistenceError::database)?,
         signer_actor: authority.actor_id.clone(),
+        subject: None,
         signer_device: Some(authority.device_id.clone()),
         agent_method: None,
         custodian: None,
@@ -341,6 +363,7 @@ pub(crate) async fn verify_human_backup_signature(
         envelope_digest: arkret_canonical::canonical_sha256(backup)
             .map_err(PersistenceError::database)?,
         signer_actor: arkret_wire::ActorId::account(account.clone()),
+        subject: None,
         signer_device: Some(authorizer.clone()),
         agent_method: None,
         custodian: None,

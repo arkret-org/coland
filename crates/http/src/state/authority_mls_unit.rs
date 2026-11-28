@@ -702,8 +702,12 @@ async fn verify_genesis(
     let leaves = tracker
         .leaves()
         .map_err(|error| schema(error.to_string()))?;
+    let creator = event.actual_signer();
+    if event.executed_by.is_some() {
+        verify_agent_pcr_genesis_controller(state, event, creator).await?;
+    }
     if leaves.len() != 1
-        || leaves[0].actor_id != event.actor_id
+        || &leaves[0].actor_id != creator
         || leaves[0].signature_key != authority.leaf_signature_key_base64url
     {
         return Err(failed_precondition(
@@ -745,6 +749,47 @@ fn carried_blob_addresses(blob_ref: &arkret_wire::BlobRef, bytes: &[u8]) -> Serv
             format!("MLS public material does not address {blob_ref}"),
         )
     })
+}
+
+/// A controller can create the MLS group only in its provisioned Agent's own
+/// PCR. The commit transaction independently rechecks the provision, lifecycle,
+/// Device signature and the actual creator leaf against accepted originals.
+pub(super) async fn verify_agent_pcr_genesis_controller(
+    state: &AppState,
+    event: &Event,
+    controller: &arkret_wire::ActorId,
+) -> ServiceResult<()> {
+    let agent = event
+        .actor_id
+        .as_account_id()
+        .ok_or_else(|| failed_precondition("Agent PCR Genesis has no Agent Account"))?;
+    let owner = controller
+        .as_account_id()
+        .ok_or_else(|| failed_precondition("Agent PCR Genesis has no controller Account"))?;
+    let record = state
+        .agent_pairings()
+        .agent(agent.principal_id.as_str())
+        .await?
+        .ok_or_else(|| failed_precondition("Agent PCR Genesis has no accepted provision"))?;
+    if event.kind != EventKind::MlsGenesis
+        || event.executed_by.as_ref() != Some(controller)
+        || agent == owner
+        || agent.station_id != state.service_core_id()
+        || owner.station_id != agent.station_id
+        || event.scope_ref
+            != (ScopeRef::Realm {
+                realm_id: event.realm_id.clone(),
+            })
+        || record.principal_control_realm_id != event.realm_id.as_str()
+        || record.controller_principal_id != owner.principal_id.as_str()
+        || event.authorization_ref.as_ref().map(|r| r.as_str())
+            != Some(record.controller_authorization_ref.as_str())
+    {
+        return Err(failed_precondition(
+            "MLS creator differs from the Agent PCR controller",
+        ));
+    }
+    Ok(())
 }
 
 /// Put verified carried or post-transition public bytes into the object store

@@ -237,28 +237,40 @@ pub(super) async fn put_key_backup(
     // OpenAPI request contract is strong rather than `Value`.
     let backup = backup.into_inner();
     let account_actor = local_backup_actor(state, &session.actor)?;
-    if session.agent_session().is_some() {
-        if backup.backup_id != typed_backup_id || backup.actor_id != account_actor {
-            return Err(AppError::capability_denied(
-                "Agent backup path or subject differs",
-            ));
+    if session.agent_session().is_some() || backup.custodian_actor_id.is_some() {
+        if backup.backup_id != typed_backup_id {
+            return Err(AppError::capability_denied("Agent backup path differs"));
         }
-        let [item] = backup.contents.as_slice() else {
-            return Err(AppError::capability_denied(
-                "Agent Sidecar requires one root",
-            ));
+        let input;
+        let controller_device;
+        let writer = if session.agent_session().is_some() {
+            if backup.actor_id != account_actor {
+                return Err(AppError::capability_denied("Agent backup subject differs"));
+            }
+            input = super::agent_sidecar::writer(state, &session).await?;
+            coland_storage::AgentRootBackupWriter::Runtime(&input)
+        } else {
+            if backup.actor_id == account_actor
+                || backup.custodian_actor_id.as_ref() != Some(&account_actor)
+            {
+                return Err(AppError::capability_denied(
+                    "Agent backup custodian differs",
+                ));
+            }
+            controller_device =
+                arkret_wire::DeviceId::new(session.require_human_device_id().clone()).map_err(
+                    |_| AppError::capability_denied("Agent custodian requires a current Device"),
+                )?;
+            coland_storage::AgentRootBackupWriter::Controller {
+                account: account_actor.as_account_id().ok_or_else(|| {
+                    AppError::capability_denied("Agent custodian requires an Account")
+                })?,
+                device: &controller_device,
+            }
         };
-        let Some(arkret_wire::ScopeRef::Sidecar { sidecar_id, .. }) =
-            item.root_context.as_ref().map(|ctx| &ctx.effective_scope)
-        else {
-            return Err(AppError::capability_denied(
-                "Agent Sidecar requires its own root context",
-            ));
-        };
-        let input = super::agent_sidecar::writer(state, &session).await?;
         let result = state
             .persistence()
-            .put_agent_sidecar_backup(&input, sidecar_id, &backup, &idempotency_key)
+            .put_agent_root_backup(writer, &backup, &idempotency_key)
             .await
             .map_err(super::native::storage_error)?;
         return json_ok(

@@ -452,17 +452,30 @@ impl KeyBackupStore for PgKeyBackupStore {
         arkret_models_crypto::SidecarBackupPrepareResponseBody,
         Box<dyn coland_storage::AccountContentDeliveryGuard>,
     )> {
-        crate::agent_sidecar_backup::prepare(&self.pool, input, sidecar).await
+        crate::agent_root_backup::prepare(&self.pool, input, sidecar).await
     }
 
-    async fn put_agent_sidecar_backup(
+    async fn put_agent_root_backup(
         &self,
-        input: &coland_storage::AccountContentDeliveryInput,
-        sidecar: &arkret_wire::SidecarId,
+        writer: coland_storage::AgentRootBackupWriter<'_>,
         backup: &arkret_models_crypto::KeyBackup,
         idempotency_key: &str,
     ) -> PersistenceResult<arkret_models_crypto::KeysBackupsReplaceResponseBody> {
-        crate::agent_sidecar_backup::put(&self.pool, input, sidecar, backup, idempotency_key).await
+        match writer {
+            coland_storage::AgentRootBackupWriter::Runtime(input) => {
+                crate::agent_root_backup::put(&self.pool, input, backup, idempotency_key).await
+            }
+            coland_storage::AgentRootBackupWriter::Controller { account, device } => {
+                crate::agent_root_backup::put_controller(
+                    &self.pool,
+                    account,
+                    device,
+                    backup,
+                    idempotency_key,
+                )
+                .await
+            }
+        }
     }
 
     async fn issue_native_unlock(

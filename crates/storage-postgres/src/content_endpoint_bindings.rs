@@ -116,7 +116,7 @@ pub(crate) async fn install_in_connection(
             crate::content_recovery_fence::require_unfenced(conn, &leaf.actor_id).await?;
         }
         let (mut binding, origin_event, origin_key) = if let Some(creator) = &creator {
-            if leaf.actor_id != event.actor_id
+            if &leaf.actor_id != event.actual_signer()
                 || leaf.signature_key != creator.leaf_signature_key_base64url
             {
                 return Err(invalid(

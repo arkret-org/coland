@@ -1,6 +1,8 @@
-//! First publication of a private Sidecar root under the Agent's own session.
+//! Native Agent uploads for its PCR and the separately authorized private Sidecar.
 use arkret_event_draft::EventPayloadExt as _;
-use arkret_models_collaboration::events_payloads::agent::AgentKeyAuthorizePayload;
+use arkret_models_collaboration::events_payloads::agent::{
+    AgentKeyAuthorizePayload, AgentKeyScopeResourceKind,
+};
 use arkret_models_crypto::{
     ContentRootContext, KeyBackup, KeyBackupPutStatus, KeyBackupRecipientMethod,
     KeysBackupsReplaceResponseBody, RecoveryMethod, RecoveryPolicy, SecretStorageItemKind,
@@ -16,17 +18,22 @@ use diesel::sql_query;
 use diesel::sql_types::Text;
 use horme::{OptionalExtension as _, RunQueryDsl as _};
 
+mod controller;
+pub(crate) use controller::put_controller;
+
 use crate::account_content_delivery::DeliveryGuard;
 use crate::{AsyncPgConnection, PgPool, PgTransactionError};
 
 fn denied() -> PersistenceError {
-    PersistenceError::Conflict(
-        "capability_denied: private Sidecar root writer is unavailable".into(),
-    )
+    PersistenceError::Conflict("capability_denied: Agent root writer is unavailable".into())
 }
 
 struct WriterCut {
-    prepare: SidecarBackupPrepareResponseBody,
+    controller_realm: arkret_wire::RealmId,
+    series_id: arkret_wire::BackupSeriesId,
+    custody_ref: arkret_wire::EventId,
+    policy_ref: arkret_models_crypto::RecoveryPolicyRef,
+    recipient: arkret_models_crypto::RecoveryKeyAgreementEntry,
     actor: ActorId,
     custodian: ActorId,
     public_key: [u8; 32],
@@ -37,7 +44,7 @@ struct WriterCut {
 async fn current(
     conn: &mut AsyncPgConnection,
     input: &AccountContentDeliveryInput,
-    sidecar: &SidecarId,
+    sidecar: Option<&SidecarId>,
 ) -> PersistenceResult<WriterCut> {
     let now = Utc::now();
     let endpoint = input.agent_endpoint.as_ref().ok_or_else(denied)?;
@@ -63,26 +70,28 @@ async fn current(
     let realm = crate::morph_projection_reads::human_realm_in_connection(conn, owner).await?;
     crate::pcr_private_authority::require_active_human_account(conn, owner).await?;
     crate::realm_authorization_cut::lock_realm_authorization_cut(conn, &realm).await?;
-    if crate::sidecar_access::controller_account_in_connection(conn, &realm, sidecar)
-        .await?
-        .as_ref()
-        != Some(owner)
-        || !crate::sidecar_access::can_reply_in_connection(
-            conn,
-            &realm,
-            sidecar,
-            &account,
-            &endpoint.verification_method,
-            Some(&endpoint.authorization_ref.event_id),
-        )
-        .await?
-        || crate::sidecar_authority_cut::controller_floor_in_connection(
-            conn, &realm, sidecar, &custodian,
-        )
-        .await?
-        .is_none()
-    {
-        return Err(denied());
+    if let Some(sidecar) = sidecar {
+        if crate::sidecar_access::controller_account_in_connection(conn, &realm, sidecar)
+            .await?
+            .as_ref()
+            != Some(owner)
+            || !crate::sidecar_access::can_reply_in_connection(
+                conn,
+                &realm,
+                sidecar,
+                &account,
+                &endpoint.verification_method,
+                Some(&endpoint.authorization_ref.event_id),
+            )
+            .await?
+            || crate::sidecar_authority_cut::controller_floor_in_connection(
+                conn, &realm, sidecar, &custodian,
+            )
+            .await?
+            .is_none()
+        {
+            return Err(denied());
+        }
     }
     crate::agent_current_states::lock_agent_producer_current(
         conn,
@@ -114,22 +123,67 @@ async fn current(
     )
     .await?;
     let ceilings = [&key.agent_key_scope, &provision_scope];
-    for op in [
-        ServiceOperationId::SELF_KEYS_BACKUPS_READ_LIST_V1,
-        ServiceOperationId::SELF_KEYS_BACKUPS_RESOURCE_REPLACE_V1,
-    ] {
-        if !actions.iter().any(|a| a == op)
-            || ceilings
+    let put = ServiceOperationId::SELF_KEYS_BACKUPS_RESOURCE_REPLACE_V1;
+    let permits = |op: &str| {
+        actions.iter().any(|a| a == op)
+            && ceilings
                 .iter()
-                .any(|scope| !scope.actions.iter().any(|a| a == op))
+                .all(|scope| scope.actions.iter().any(|a| a == op))
+    };
+    if !permits(put) {
+        return Err(denied());
+    }
+    if let Some(sidecar) = sidecar {
+        if !permits(ServiceOperationId::SELF_KEYS_BACKUPS_READ_LIST_V1) {
+            return Err(denied());
+        }
+        require_current_reply(
+            conn, &realm, sidecar, &account, owner, actions, details, ceilings, now,
+        )
+        .await?;
+    } else {
+        let service = &owner.station_id;
+        for ceiling in ceilings {
+            if !ceiling.resources.iter().any(|resource| {
+                resource.service_id.as_ref().is_none_or(|id| id == service)
+                    && resource
+                        .realm_id
+                        .as_ref()
+                        .is_none_or(|id| id == &endpoint.pcr_realm_id)
+                    && resource.schema_ref.is_none()
+                    && resource.resource_ref.is_none()
+                    && match resource.kind {
+                        AgentKeyScopeResourceKind::Operation => {
+                            resource.operation.as_deref() == Some(put)
+                        }
+                        AgentKeyScopeResourceKind::Service => {
+                            resource.service_id.as_ref() == Some(service)
+                                && resource.operation.as_deref().is_none_or(|op| op == put)
+                        }
+                        _ => false,
+                    }
+            }) {
+                return Err(denied());
+            }
+        }
+        // A PCR backup is a whole-Realm operation; it cannot consume a
+        // credential restricted to a different Realm or a particular Strand.
+        for realms in [&details.realm_ids, &details.resources.realm_ids] {
+            if !realms.is_empty() && !realms.contains(&endpoint.pcr_realm_id) {
+                return Err(denied());
+            }
+        }
+        if !details.strand_ids.is_empty()
+            || !details.resources.strand_ids.is_empty()
+            || details
+                .constraints
+                .allowed_strand_ids
+                .as_ref()
+                .is_some_and(|ids| !ids.is_empty())
         {
             return Err(denied());
         }
     }
-    require_current_reply(
-        conn, &realm, sidecar, &account, owner, actions, details, ceilings, now,
-    )
-    .await?;
     let (controller_realm, provision, reference) =
         crate::agent_provisioning::declared_agent_provision_in_connection(
             conn,
@@ -149,35 +203,6 @@ async fn current(
     {
         return Err(denied());
     }
-    let scope = ScopeRef::Sidecar {
-        realm_id: realm.clone(),
-        sidecar_id: sidecar.clone(),
-    };
-    let group =
-        crate::mls_group_current_states::held_current_value_in_connection(conn, &scope, None)
-            .await?
-            .ok_or_else(denied)?;
-    let create =
-        crate::committed_disclosure::accepted_full_event_in_connection(conn, &realm.event_id())
-            .await?
-            .ok_or_else(denied)?;
-    if group.effective_scope != scope || create.event.realm_id != realm {
-        return Err(denied());
-    }
-    let root_context = ContentRootContext {
-        effective_scope: scope,
-        genesis_event_ref: group.genesis_event_ref,
-        epoch: group.epoch,
-        group_state_ref: group.current_mls_commit_event_ref,
-        cipher_suite: group.cipher_suite.as_str().into(),
-        encryption_backup_strategy: create
-            .event
-            .as_realm_create()
-            .map_err(|_| denied())?
-            .object
-            .initial_encryption_backup_strategy,
-        backup_strategy_ref: create.event.event_id,
-    };
     let pointer = crate::key_backup_current_states::confirmed_key_backup_pointer_in_connection(
         conn, &account,
     )
@@ -244,9 +269,66 @@ async fn current(
     .map_err(|_| denied())?
     .raw_public_key;
     crate::key_backup::lock_backup_series_in_connection(conn, &actor).await?;
+    Ok(WriterCut {
+        controller_realm,
+        series_id,
+        custody_ref: reference.event_id,
+        policy_ref: custody.recovery_policy_ref,
+        recipient: recipient.backup_hpke.clone(),
+        actor,
+        custodian,
+        public_key,
+        valid_from: key.issued_at,
+        valid_until,
+    })
+}
+
+async fn sidecar_context(
+    conn: &mut AsyncPgConnection,
+    realm: &arkret_wire::RealmId,
+    sidecar: &SidecarId,
+) -> PersistenceResult<ContentRootContext> {
+    let scope = ScopeRef::Sidecar {
+        realm_id: realm.clone(),
+        sidecar_id: sidecar.clone(),
+    };
+    let group =
+        crate::mls_group_current_states::held_current_value_in_connection(conn, &scope, None)
+            .await?
+            .ok_or_else(denied)?;
+    let create =
+        crate::committed_disclosure::accepted_full_event_in_connection(conn, &realm.event_id())
+            .await?
+            .ok_or_else(denied)?;
+    if group.effective_scope != scope || &create.event.realm_id != realm {
+        return Err(denied());
+    }
+    Ok(ContentRootContext {
+        effective_scope: scope,
+        genesis_event_ref: group.genesis_event_ref,
+        epoch: group.epoch,
+        group_state_ref: group.current_mls_commit_event_ref,
+        cipher_suite: group.cipher_suite.as_str().into(),
+        encryption_backup_strategy: create
+            .event
+            .as_realm_create()
+            .map_err(|_| denied())?
+            .object
+            .initial_encryption_backup_strategy,
+        backup_strategy_ref: create.event.event_id,
+    })
+}
+
+async fn current_prepare(
+    conn: &mut AsyncPgConnection,
+    input: &AccountContentDeliveryInput,
+    sidecar: &SidecarId,
+) -> PersistenceResult<(SidecarBackupPrepareResponseBody, DateTime<Utc>)> {
+    let cut = current(conn, input, Some(sidecar)).await?;
+    let root_context = sidecar_context(conn, &cut.controller_realm, sidecar).await?;
     let predecessor = sql_query("SELECT jsonb_build_array('ak:backup:' || id::text, signing_payload_digest, series_sequence, deleted_at IS NULL) AS payload
         FROM key_backup_identities WHERE actor_id=$1 AND series_id=$2 ORDER BY series_sequence DESC LIMIT 1 FOR SHARE")
-        .bind::<Text,_>(actor.to_string()).bind::<Text,_>(series_id.as_str())
+        .bind::<Text,_>(cut.actor.to_string()).bind::<Text,_>(cut.series_id.as_str())
         .get_result::<crate::JsonPayloadRow>(conn).await.optional().map_err(PersistenceError::database)?;
     let (series_sequence, supersedes_id, supersedes_digest) = match predecessor {
         None => (0, None, None),
@@ -270,23 +352,16 @@ async fn current(
     let prepare = SidecarBackupPrepareResponseBody {
         sidecar_id: sidecar.clone(),
         root_context,
-        series_id,
+        series_id: cut.series_id,
         series_sequence,
         supersedes_id,
         supersedes_digest,
-        custody_authorization_ref: reference.event_id.clone(),
-        recovery_policy_ref: custody.recovery_policy_ref,
-        backup_hpke: recipient.backup_hpke.clone(),
+        custody_authorization_ref: cut.custody_ref,
+        recovery_policy_ref: cut.policy_ref,
+        backup_hpke: cut.recipient,
     };
     prepare.validate().map_err(PersistenceError::database)?;
-    Ok(WriterCut {
-        prepare,
-        actor,
-        custodian,
-        public_key,
-        valid_from: key.issued_at,
-        valid_until,
-    })
+    Ok((prepare, cut.valid_until))
 }
 
 /// The prepare request names only the Sidecar. Any narrower target must be
@@ -417,13 +492,13 @@ impl AccountContentDeliveryGuard for PreparedDelivery {
     }
     async fn prepare_handoff(&mut self) -> bool {
         self.permits_handoff()
-            && current(
+            && current_prepare(
                 self.held.connection(),
                 &self.input,
                 &self.expected.sidecar_id,
             )
             .await
-            .is_ok_and(|cut| cut.prepare == self.expected)
+            .is_ok_and(|(prepare, _)| prepare == self.expected)
             && self.held.probe().await.is_ok()
             && self.permits_handoff()
     }
@@ -441,69 +516,95 @@ pub(crate) async fn prepare(
     Box<dyn AccountContentDeliveryGuard>,
 )> {
     let mut held = DeliveryGuard::begin(pool).await?;
-    let cut = current(held.connection(), input, id).await?;
+    let (prepare, expires) = current_prepare(held.connection(), input, id).await?;
     let delivery = PreparedDelivery {
         held,
         input: input.clone(),
-        expected: cut.prepare.clone(),
-        expires: cut.valid_until,
+        expected: prepare.clone(),
+        expires,
     };
-    Ok((cut.prepare, Box::new(delivery)))
+    Ok((prepare, Box::new(delivery)))
 }
 
 pub(crate) async fn put(
     pool: &PgPool,
     input: &AccountContentDeliveryInput,
-    id: &SidecarId,
     backup: &KeyBackup,
     token: &str,
 ) -> PersistenceResult<KeysBackupsReplaceResponseBody> {
     let mut held = DeliveryGuard::begin(pool).await?;
-    let cut = current(held.connection(), input, id).await?;
-    let now = Utc::now();
     backup
         .validate()
         .map_err(|e| PersistenceError::SchemaViolation(e.to_string()))?;
-    let [item] = backup.contents.as_slice() else {
-        return Err(denied());
+    let endpoint = input.agent_endpoint.as_ref().ok_or_else(denied)?;
+    let first = backup
+        .contents
+        .first()
+        .and_then(|item| item.root_context.as_ref())
+        .ok_or_else(denied)?;
+    let sidecar = match &first.effective_scope {
+        ScopeRef::Sidecar { sidecar_id, .. } if backup.contents.len() == 1 => Some(sidecar_id),
+        ScopeRef::Realm { realm_id } if realm_id == &endpoint.pcr_realm_id => None,
+        _ => return Err(denied()),
     };
+    let cut = current(held.connection(), input, sidecar).await?;
+    if let Some(id) = sidecar {
+        let item = &backup.contents[0];
+        if item.item_kind != SecretStorageItemKind::ContentEpochRoot
+            || item.root_ref.is_none()
+            || *first != sidecar_context(held.connection(), &cut.controller_realm, id).await?
+        {
+            return Err(denied());
+        }
+    } else {
+        validate_pcr_roots(held.connection(), backup, &endpoint.pcr_realm_id).await?;
+    }
+    let now = Utc::now();
     if token.is_empty()
         || token.len() > 128
-        || item.item_kind != SecretStorageItemKind::ContentEpochRoot
-        || item.root_context.as_ref() != Some(&cut.prepare.root_context)
-        || item.root_ref.is_none()
         || backup.created_at < cut.valid_from
         || backup.created_at > now
         || now >= cut.valid_until
         || backup.expires_at.flatten().is_some_and(|at| at <= now)
         || backup.actor_id != cut.actor
         || backup.custodian_actor_id.as_ref() != Some(&cut.custodian)
-        || backup.custody_authorization_ref.as_ref() != Some(&cut.prepare.custody_authorization_ref)
-        || backup.series_id != cut.prepare.series_id
-        || backup.recovery_policy_ref.as_ref() != Some(&cut.prepare.recovery_policy_ref)
+        || backup.custody_authorization_ref.as_ref() != Some(&cut.custody_ref)
+        || backup.series_id != cut.series_id
+        || backup.recovery_policy_ref.as_ref() != Some(&cut.policy_ref)
         || backup.encryption.recipient_method != KeyBackupRecipientMethod::RecoveryPublicKey
         || backup.encryption.recipient_key_ref.as_deref()
-            != Some(cut.prepare.backup_hpke.key_agreement_ref.as_str())
+            != Some(cut.recipient.key_agreement_ref.as_str())
     {
         return Err(denied());
     }
     let admission = crate::key_backup_authority::BackupWriterAdmission::verify_agent(
         backup,
         &cut.actor,
-        input.agent_endpoint.as_ref().ok_or_else(denied)?,
+        endpoint,
         &cut.public_key,
         now,
     )?;
     crate::key_backup_authority::verify_current_backup_recipient(held.connection(), backup, now)
         .await
         .map_err(PgTransactionError::into_persistence)?;
+    store_verified(held, backup, token, admission, cut.actor, now).await
+}
+
+async fn store_verified(
+    mut held: Box<DeliveryGuard>,
+    backup: &KeyBackup,
+    token: &str,
+    admission: crate::key_backup_authority::BackupWriterAdmission,
+    caller: ActorId,
+    now: DateTime<Utc>,
+) -> PersistenceResult<KeysBackupsReplaceResponseBody> {
     let response = KeysBackupsReplaceResponseBody {
         status: KeyBackupPutStatus::Accepted,
         backup_id: backup.backup_id.clone(),
         ciphertext_digest: backup.ciphertext_digest.clone(),
     };
     let replay = IdempotencyRecord {
-        authenticated_actor: cut.actor,
+        authenticated_actor: caller,
         operation_id: "ak.self.keys.backups.resource.replace".into(),
         idempotency_key: token.to_owned(),
         request_hash: arkret_canonical::canonical_sha256(backup)
@@ -531,4 +632,40 @@ pub(crate) async fn put(
     }
     held.commit().await?;
     Ok(response)
+}
+
+async fn validate_pcr_roots(
+    conn: &mut AsyncPgConnection,
+    backup: &KeyBackup,
+    pcr: &arkret_wire::RealmId,
+) -> PersistenceResult<()> {
+    let scope = ScopeRef::Realm {
+        realm_id: pcr.clone(),
+    };
+    if backup.contents.is_empty()
+        || !backup.contents.iter().all(|item| {
+            item.item_kind == SecretStorageItemKind::ContentEpochRoot
+                && item.root_ref.is_some()
+                && item.root_context.as_ref().is_some_and(|ctx| {
+                    ctx.effective_scope == scope && ctx.backup_strategy_ref == pcr.event_id()
+                })
+        })
+    {
+        return Err(denied());
+    }
+    let group =
+        crate::mls_group_current_states::held_current_value_in_connection(conn, &scope, None)
+            .await?
+            .ok_or_else(denied)?;
+    let declaration = crate::content_dependencies::original_event(conn, &pcr.event_id()).await?;
+    for item in &backup.contents {
+        crate::content_dependencies::validate_root_basis(
+            conn,
+            item.root_context.as_ref().ok_or_else(denied)?,
+            &group,
+            &declaration,
+        )
+        .await?;
+    }
+    Ok(())
 }

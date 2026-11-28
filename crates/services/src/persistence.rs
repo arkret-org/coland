@@ -1085,16 +1085,15 @@ impl PersistenceHandle {
             .await
     }
 
-    pub async fn put_agent_sidecar_backup(
+    pub async fn put_agent_root_backup(
         &self,
-        input: &coland_storage::AccountContentDeliveryInput,
-        sidecar: &arkret_wire::SidecarId,
+        writer: coland_storage::AgentRootBackupWriter<'_>,
         backup: &arkret_models_crypto::KeyBackup,
         idempotency_key: &str,
     ) -> PersistenceResult<arkret_models_crypto::KeysBackupsReplaceResponseBody> {
         self.persistence
             .key_backups()
-            .put_agent_sidecar_backup(input, sidecar, backup, idempotency_key)
+            .put_agent_root_backup(writer, backup, idempotency_key)
             .await
     }
 

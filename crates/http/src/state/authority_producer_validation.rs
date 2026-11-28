@@ -90,7 +90,7 @@ async fn verify_self_event_producer_key_inner(
     state: &AppState,
     session: &SessionIdentityState,
     event: &Event,
-    allow_agent_execution: bool,
+    allow_delegated_submission: bool,
 ) -> ServiceResult<(
     SelfProducerCommitGuard,
     arkret_signatures::PublicKeyMaterial,
@@ -100,11 +100,21 @@ async fn verify_self_event_producer_key_inner(
     let actor = crate::routing::identity::session_actor::validated_session_actor(state, session)
         .await
         .map_err(|error| rejected(format!("authenticated Account unavailable: {error}")))?;
-    let delegated_agent = allow_agent_execution
+    let delegated_agent = allow_delegated_submission
         && session.agent_session().is_some()
         && event.executed_by.as_ref() == Some(&actor)
         && event.actor_id != actor;
-    if event.actual_signer() != &actor || (event.executed_by.is_some() && !delegated_agent) {
+    let controller_genesis = allow_delegated_submission
+        && session.agent_session().is_none()
+        && event.kind == arkret_wire::EventKind::MlsGenesis
+        && event.executed_by.as_ref() == Some(&actor);
+    if controller_genesis {
+        super::authority_mls_unit::verify_agent_pcr_genesis_controller(state, event, &actor)
+            .await?;
+    }
+    if event.actual_signer() != &actor
+        || (event.executed_by.is_some() && !delegated_agent && !controller_genesis)
+    {
         return Err(ServiceError::protocol(
             arkret_wire::ErrorCode::CapabilityDenied,
             "self Event requires the exact authenticated producer on its registered execution path"

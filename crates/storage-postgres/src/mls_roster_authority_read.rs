@@ -376,7 +376,7 @@ async fn read_in_connection(
     }
     let mut records = vec![MlsRosterRecord::Genesis {
         genesis_event_ref: request.genesis_event_ref.clone(),
-        actor_id: genesis.event.actor_id.clone(),
+        actor_id: genesis.event.actual_signer().clone(),
         leaf_signature_key_base64url: payload.creator_leaf_authority.leaf_signature_key_base64url,
         endpoint: payload.creator_leaf_authority.endpoint,
         authorization_event_ref: payload.creator_leaf_authority.authorization_event_ref,

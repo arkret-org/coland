@@ -239,7 +239,7 @@ async fn qualify_mls_group<'a>(
             "the MLS effective scope has no supported authority cut".to_owned(),
         ));
     }
-    let own_pcr_genesis = qualified_own_human_pcr_genesis(conn, transaction).await?;
+    let own_pcr_genesis = qualified_pcr_genesis(conn, transaction).await?;
     let scope_member = if own_pcr_genesis {
         true
     } else if let ScopeRef::Sidecar { sidecar_id, .. } = &event.scope_ref {
@@ -547,11 +547,10 @@ async fn install_authorized_mls_group(
     Ok(())
 }
 
-/// A Human PCR's first real Device creates its own private MLS scope. It has
-/// no collaboration member row or Realm administrator grant. The exception is
-/// derived from the accepted creation unit and current native Device proof,
-/// and applies only to this exact scope's single-leaf Genesis.
-async fn qualified_own_human_pcr_genesis(
+/// The first PCR MLS leaf is the actual Human Device, including the explicitly
+/// delegated controller of an Agent PCR. Both branches verify the current
+/// Device proof and accept only a single-leaf Genesis in the exact PCR.
+async fn qualified_pcr_genesis(
     conn: &mut AsyncPgConnection,
     transaction: &AuthorityCommitTransaction,
 ) -> PersistenceResult<bool> {
@@ -564,15 +563,96 @@ async fn qualified_own_human_pcr_genesis(
     {
         return Ok(false);
     }
-    if !matches!(
-        crate::pcr_private_authority::accepted_governance(conn, &event.realm_id).await?,
-        arkret_wire::GenesisGovernance::Human(_)
-    ) {
-        return Ok(false);
-    }
-    let (actor, endpoint, authorization) =
-        crate::content_endpoint_bindings::home_human_device_producer(conn, transaction, None)
-            .await?;
+    let governance =
+        crate::pcr_private_authority::accepted_governance(conn, &event.realm_id).await?;
+    let (actor, endpoint, authorization) = match &governance {
+        arkret_wire::GenesisGovernance::Human(_) => {
+            crate::content_endpoint_bindings::home_human_device_producer(conn, transaction, None)
+                .await?
+        }
+        arkret_wire::GenesisGovernance::Agent(agent) => {
+            governance
+                .validate_current(
+                    &transaction.expected_authority.service_id,
+                    transaction.expected_authority.generation,
+                )
+                .map_err(|e| failed_precondition(e.to_string()))?;
+            let controller = event
+                .executed_by
+                .as_ref()
+                .and_then(|a| a.as_account_id())
+                .ok_or_else(|| {
+                    failed_precondition("Agent PCR Genesis requires its native controller Device")
+                })?;
+            let (controller_pcr, provision, _) =
+                crate::agent_provisioning::declared_agent_provision_in_connection(
+                    conn,
+                    &event.realm_id,
+                )
+                .await
+                .map_err(crate::PgTransactionError::into_persistence)?
+                .ok_or_else(|| failed_precondition("Agent PCR has no custody provision"))?;
+            if event.actor_id.as_account_id() != Some(agent)
+                || agent == controller
+                || controller.station_id != agent.station_id
+                || provision.agent_id != agent.principal_id
+                || provision.principal_control_realm_id != event.realm_id
+                || provision.controller_principal_id != controller.principal_id
+                || provision.history_custody.custodian_actor_id.as_account_id() != Some(controller)
+                || event.authorization_ref.as_ref().map(|r| r.as_str())
+                    != Some(provision.controller_authorization_ref.as_str())
+            {
+                return Err(failed_precondition(
+                    "Agent PCR Genesis differs from its accepted control delegation",
+                ));
+            }
+            crate::pcr_private_authority::require_active_human_account(conn, controller).await?;
+            if crate::agent_interaction_current_states::owned_provenance_in_connection(
+                conn,
+                agent,
+                controller,
+                chrono::Utc::now(),
+                true,
+            )
+            .await?
+            .is_none()
+            {
+                return Err(failed_precondition(
+                    "Agent PCR creator has no current controller binding",
+                ));
+            }
+            let device = event
+                .account_device_producer()
+                .map_err(|e| failed_precondition(e.to_string()))?
+                .filter(|d| &d.account_id == controller)
+                .ok_or_else(|| {
+                    failed_precondition("Agent PCR creator must be the actual controller Device")
+                })?;
+            let (cut, _) = crate::actor_profiles::verify_device_signer_in_connection(
+                conn,
+                event,
+                controller,
+                &device.device_id,
+                &controller_pcr,
+                chrono::Utc::now(),
+                event.realm_id.digest_suite_code().digest_suite(),
+                "Agent PCR MLS Genesis",
+            )
+            .await
+            .map_err(crate::PgTransactionError::into_persistence)?;
+            let accepted = cut.authority.authorization.ok_or_else(|| {
+                failed_precondition("controller Device has no current authorization")
+            })?;
+            (
+                arkret_wire::ActorId::account(controller.clone()),
+                arkret_wire::MlsWelcomeRecipientEndpoint::Device {
+                    device_id: device.device_id,
+                },
+                accepted.event_id,
+            )
+        }
+        _ => return Ok(false),
+    };
     let payload: MlsGenesisPayload = serde_json::from_value(
         serde_json::to_value(&event.payload).map_err(PersistenceError::database)?,
     )
@@ -592,8 +672,7 @@ async fn qualified_own_human_pcr_genesis(
     )
     .map_err(PersistenceError::database)?;
     let leaves = tracker.leaves().map_err(PersistenceError::database)?;
-    if event.executed_by.is_some()
-        || payload.created_at != event.created_at
+    if payload.created_at != event.created_at
         || payload.creator_leaf_authority.endpoint != endpoint
         || payload.creator_leaf_authority.authorization_event_ref != authorization
         || leaves.len() != 1
@@ -1587,10 +1666,7 @@ pub(crate) async fn advance_key_access_revision_in_connection(
 ) -> PersistenceResult<()> {
     if !matches!(
         event.kind,
-        EventKind::MemberState
-            | EventKind::InviteAccept
-            | EventKind::RealmInviteLinkAccept
-
+        EventKind::MemberState | EventKind::InviteAccept | EventKind::RealmInviteLinkAccept
     ) {
         return Ok(());
     }

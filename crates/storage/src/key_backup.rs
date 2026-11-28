@@ -187,6 +187,14 @@ pub struct KeyBackupDeleteGate {
 
 /// Encrypted key-backup envelopes (one row per `backup_id`), plus the durable
 /// delete-challenge ledger the high-risk DELETE path consumes.
+pub enum AgentRootBackupWriter<'a> {
+    Runtime(&'a crate::AccountContentDeliveryInput),
+    Controller {
+        account: &'a arkret_wire::AccountId,
+        device: &'a arkret_wire::DeviceId,
+    },
+}
+
 #[async_trait]
 pub trait KeyBackupStore: Send + Sync {
     async fn prepare_agent_sidecar_backup(
@@ -202,10 +210,9 @@ pub trait KeyBackupStore: Send + Sync {
         ))
     }
 
-    async fn put_agent_sidecar_backup(
+    async fn put_agent_root_backup(
         &self,
-        _input: &crate::AccountContentDeliveryInput,
-        _sidecar: &arkret_wire::SidecarId,
+        _writer: AgentRootBackupWriter<'_>,
         _backup: &arkret_models_crypto::KeyBackup,
         _idempotency_key: &str,
     ) -> PersistenceResult<arkret_models_crypto::KeysBackupsReplaceResponseBody> {
